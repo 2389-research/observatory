@@ -57,3 +57,20 @@ func TestRegistryLookup(t *testing.T) {
 		}
 	}
 }
+
+func TestAttentionAndAnnotationKindsRegistered(t *testing.T) {
+	// SPEC line ~681: attention.* and annotation.* families are host_observed.
+	for _, kind := range []string{"attention.raised", "attention.queue_overflow", "annotation.created"} {
+		info, ok := events.LookupKind(kind)
+		if !ok {
+			t.Errorf("%q not registered", kind)
+			continue
+		}
+		if info.Provenance != events.HostObserved {
+			t.Errorf("%q provenance = %q, want host_observed", kind, info.Provenance)
+		}
+		if info.Semantics == "" {
+			t.Errorf("%q has no semantics", kind)
+		}
+	}
+}

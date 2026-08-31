@@ -55,6 +55,34 @@ var registry = []KindInfo{
 		Provenance:    HostObserved,
 		Semantics:     "Ingress rejected an event whose kind is not in this registry; the original kind and source are recorded in data.",
 	},
+	{
+		Kind:          "attention.raised",
+		Family:        "attention",
+		SchemaVersion: 1,
+		Provenance:    HostObserved,
+		Semantics:     "A deterministic trigger raised an attention item; data carries the item fields. The event is host-wide; VM linkage lives in data and on the queue item.",
+		Caveats: []string{
+			"raised only by the in-process trigger engine, never by API clients",
+			"duplicates of an open item collapse on the queue with counts; each raise is still its own event",
+		},
+	},
+	{
+		Kind:          "attention.queue_overflow",
+		Family:        "attention",
+		SchemaVersion: 1,
+		Provenance:    HostObserved,
+		Semantics:     "The bounded attention queue refused a non-critical item; data records the refused trigger class and scope. Critical items are never refused.",
+	},
+	{
+		Kind:          "annotation.created",
+		Family:        "annotation",
+		SchemaVersion: 1,
+		Provenance:    HostObserved,
+		Semantics:     "An operator annotation was recorded against an entity ref; data carries the annotation. Annotations are immutable once created.",
+		Caveats: []string{
+			"text is stored post-redaction; the original input is not retained",
+		},
+	},
 }
 
 var registryByKind = func() map[string]KindInfo {
