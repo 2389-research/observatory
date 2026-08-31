@@ -102,6 +102,30 @@ capture:
   redact_before_persistence: true
   allow_unredacted_proxy_flow_dump: false
 
+agent_interface:
+  situation_max_response_bytes: 65536
+  attention_queue_max_items: 500
+  attention_collapse_duplicates: true
+  # Trigger classes are the enumerated deterministic sources of attention items.
+  # The active set is served by GET /meta. Disabling one reduces watch scope,
+  # which /situation must report (P-03): quiet-because-blind is never calm.
+  attention_triggers:
+    lifecycle_failed: true
+    run_concluded: true
+    telemetry_degraded: true
+    spool_threshold: true
+    disk_reserve_threshold: true
+    policy_denial_anomaly: true
+    capacity_exhausted: true
+    reconciliation_surprise: true
+  run_goal_max_bytes: 2048
+  guest_result_max_bytes: 65536
+  report_tail_max_bytes: 4096
+  # Optional local command receiving one attention item as JSON on stdin.
+  # Host-config only; never settable through the API (that would be a host
+  # exec primitive). Runs unprivileged with a bounded timeout. May defer to V1.1.
+  attention_notify_hook: null
+
 storage:
   database: "/var/lib/vmobs/vmobs.sqlite"
   sqlite_journal_mode: WAL

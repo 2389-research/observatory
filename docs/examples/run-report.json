@@ -1,0 +1,113 @@
+{
+  "schema_version": 1,
+  "run_id": "3f1c2c53-42a2-46bb-9f21-6c0f6f8d6b2e",
+  "vm_id": "1ed7fdbf-7007-43f3-b5b2-8071e96b2df5",
+  "boot_ids": ["10e6210d-d21f-4f8d-8c69-5370f1e6d44f"],
+  "goal": "Verify the seeded fixture workspace passes its test suite unmodified; success is the initial exec exiting zero.",
+  "success_criteria": "exec_exit_zero",
+  "outcome": {
+    "status": "succeeded",
+    "evaluated_by": "exec_exit",
+    "evidence_links": ["/api/v1/execs/7d0a4f1e-93b0-4a52-8f68-1f1f0f2b7c19"]
+  },
+  "timing": {
+    "created_at": "2026-08-30T19:58:11.000000Z",
+    "started_at": "2026-08-30T19:58:24.000000Z",
+    "concluded_at": "2026-08-30T20:01:47.000000Z"
+  },
+  "execs": [
+    {
+      "exec_id": "7d0a4f1e-93b0-4a52-8f68-1f1f0f2b7c19",
+      "argv_preview": "python -m pytest -q",
+      "result": {
+        "kind": "exit",
+        "exit_code": 0,
+        "duration_ms": 183211
+      },
+      "stdout": {
+        "bytes": 2144,
+        "truncated": false,
+        "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "tail": "42 passed in 179.42s",
+        "full_output_link": "/api/v1/execs/7d0a4f1e-93b0-4a52-8f68-1f1f0f2b7c19/output?stream=stdout"
+      },
+      "stderr": {
+        "bytes": 0,
+        "truncated": false,
+        "full_output_link": "/api/v1/execs/7d0a4f1e-93b0-4a52-8f68-1f1f0f2b7c19/output?stream=stderr"
+      }
+    }
+  ],
+  "event_rollup": [
+    {
+      "family": "process",
+      "count": 96,
+      "reproduce_query": "/api/v1/events?vm_id=1ed7fdbf-7007-43f3-b5b2-8071e96b2df5&run_id=3f1c2c53-42a2-46bb-9f21-6c0f6f8d6b2e&kind_prefix=process."
+    },
+    {
+      "family": "fs",
+      "count": 412,
+      "reproduce_query": "/api/v1/events?vm_id=1ed7fdbf-7007-43f3-b5b2-8071e96b2df5&run_id=3f1c2c53-42a2-46bb-9f21-6c0f6f8d6b2e&kind_prefix=fs."
+    }
+  ],
+  "coverage": {
+    "telemetry_health_final": "healthy",
+    "gaps": []
+  },
+  "network_summary": {
+    "profile": "transport",
+    "flows": {
+      "count": 3,
+      "reproduce_query": "/api/v1/events?vm_id=1ed7fdbf-7007-43f3-b5b2-8071e96b2df5&run_id=3f1c2c53-42a2-46bb-9f21-6c0f6f8d6b2e&kind_prefix=net.flow."
+    },
+    "dns_queries": {
+      "count": 2,
+      "reproduce_query": "/api/v1/events?vm_id=1ed7fdbf-7007-43f3-b5b2-8071e96b2df5&run_id=3f1c2c53-42a2-46bb-9f21-6c0f6f8d6b2e&kind_prefix=dns."
+    },
+    "policy_denials": {
+      "count": 0,
+      "reproduce_query": "/api/v1/events?vm_id=1ed7fdbf-7007-43f3-b5b2-8071e96b2df5&run_id=3f1c2c53-42a2-46bb-9f21-6c0f6f8d6b2e&kind_prefix=policy.&outcome=denied"
+    }
+  },
+  "filesystem_summary": {
+    "live_mutation_events": {
+      "count": 412,
+      "reproduce_query": "/api/v1/events?vm_id=1ed7fdbf-7007-43f3-b5b2-8071e96b2df5&run_id=3f1c2c53-42a2-46bb-9f21-6c0f6f8d6b2e&kind_prefix=fs."
+    },
+    "final_diff": {
+      "status": "complete",
+      "added": 9,
+      "modified": 3,
+      "deleted": 0,
+      "link": "/api/v1/vms/1ed7fdbf-7007-43f3-b5b2-8071e96b2df5/filesystem/diff"
+    }
+  },
+  "artifacts": [
+    {
+      "artifact_id": "5b7e2f60-1f0c-4f9f-9b62-52b3f0d1c8a4",
+      "media_type": "application/json",
+      "byte_size": 4096,
+      "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "label": "guest_result"
+    }
+  ],
+  "attention": [
+    {
+      "attention_id": "att-000339",
+      "kind": "run_concluded",
+      "severity": "info",
+      "acked": false,
+      "link": "/api/v1/attention/att-000339"
+    }
+  ],
+  "quality": {
+    "truncated": false,
+    "redacted": false
+  },
+  "links": {
+    "run": "/api/v1/runs/3f1c2c53-42a2-46bb-9f21-6c0f6f8d6b2e",
+    "vm": "/api/v1/vms/1ed7fdbf-7007-43f3-b5b2-8071e96b2df5",
+    "events": "/api/v1/events?run_id=3f1c2c53-42a2-46bb-9f21-6c0f6f8d6b2e",
+    "export": "/api/v1/vms/1ed7fdbf-7007-43f3-b5b2-8071e96b2df5/exports"
+  }
+}

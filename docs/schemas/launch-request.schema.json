@@ -259,6 +259,55 @@
         }
       ]
     },
+    "run": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "goal",
+            "success_criteria",
+            "on_completion"
+          ],
+          "properties": {
+            "goal": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
+            },
+            "success_criteria": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "type"
+              ],
+              "properties": {
+                "type": {
+                  "enum": [
+                    "exec_exit_zero",
+                    "guest_result",
+                    "operator_verdict"
+                  ]
+                }
+              }
+            },
+            "on_completion": {
+              "enum": [
+                "keep_running",
+                "stop",
+                "stop_and_finalize"
+              ]
+            },
+            "progress_events": {
+              "type": "boolean"
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "queue_if_capacity_unavailable": {
       "type": "boolean"
     },
@@ -291,6 +340,43 @@
     }
   },
   "allOf": [
+    {
+      "if": {
+        "properties": {
+          "run": {
+            "type": "object",
+            "properties": {
+              "success_criteria": {
+                "properties": {
+                  "type": {
+                    "const": "exec_exit_zero"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              }
+            },
+            "required": [
+              "success_criteria"
+            ]
+          }
+        },
+        "required": [
+          "run"
+        ]
+      },
+      "then": {
+        "properties": {
+          "initial_exec": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "initial_exec"
+        ]
+      }
+    },
     {
       "if": {
         "properties": {

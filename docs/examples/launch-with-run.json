@@ -1,0 +1,53 @@
+{
+  "name": "agent-python-02",
+  "template_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "resources": {
+    "vcpu_count": 2,
+    "memory_mib": 2048,
+    "root_disk_mib": 8192,
+    "workspace_disk_mib": 10240
+  },
+  "guest_privilege": "unprivileged",
+  "network": {
+    "profile": "transport",
+    "policy_id": "transport-public-web"
+  },
+  "observation": {
+    "filesystem_reads": false,
+    "require_telemetry": false,
+    "on_failure": "degrade",
+    "heartbeat_timeout_seconds": 5
+  },
+  "capture": {
+    "http_headers": "none",
+    "http_body_mode": "off",
+    "terminal_recording": false,
+    "pcap": false
+  },
+  "workspace_seed_artifact_id": "9c0b7c6e-6a5f-4b53-9a5d-2f8c7f1e0a11",
+  "initial_exec": {
+    "argv": ["python", "-m", "pytest", "-q"],
+    "cwd": "/workspace",
+    "timeout_seconds": 600,
+    "stdout_limit_bytes": 10485760,
+    "stderr_limit_bytes": 10485760
+  },
+  "run": {
+    "goal": "Verify the seeded fixture workspace passes its test suite unmodified; success is the initial exec exiting zero.",
+    "success_criteria": {
+      "type": "exec_exit_zero"
+    },
+    "on_completion": "stop_and_finalize",
+    "progress_events": true
+  },
+  "queue_if_capacity_unavailable": false,
+  "labels": {
+    "project": "agent-sandbox",
+    "purpose": "fixture-verification"
+  },
+  "retention": {
+    "event_days": 30,
+    "artifact_days": 7
+  },
+  "idempotency_key": "task-42-fixture-verify-attempt-1"
+}

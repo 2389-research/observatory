@@ -1,0 +1,542 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vmobs:schema:run-report:1",
+  "title": "Firecracker Observatory run report v1",
+  "description": "Machine-readable conclusion of a declarative run. Every count carries reproduce_query, the API filter that regenerates it. Summaries are deterministic rollups of durable records, never model-generated prose. Counts use JSON integers within the safe range; monotonic nanosecond counters elsewhere remain decimal strings.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "vm_id",
+    "boot_ids",
+    "goal",
+    "success_criteria",
+    "outcome",
+    "timing",
+    "execs",
+    "event_rollup",
+    "coverage",
+    "network_summary",
+    "filesystem_summary",
+    "artifacts",
+    "attention",
+    "quality",
+    "links"
+  ],
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "query": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "counted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "count",
+        "reproduce_query"
+      ],
+      "properties": {
+        "count": {
+          "$ref": "#/$defs/count"
+        },
+        "reproduce_query": {
+          "$ref": "#/$defs/query"
+        }
+      }
+    },
+    "stream_digest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bytes",
+        "truncated"
+      ],
+      "properties": {
+        "bytes": {
+          "$ref": "#/$defs/count"
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "tail": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "full_output_link": {
+          "$ref": "#/$defs/query"
+        }
+      }
+    }
+  },
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "run_id": {
+      "$ref": "#/$defs/uuid"
+    },
+    "vm_id": {
+      "$ref": "#/$defs/uuid"
+    },
+    "boot_ids": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/uuid"
+      }
+    },
+    "goal": {
+      "type": "string",
+      "maxLength": 2048
+    },
+    "success_criteria": {
+      "enum": [
+        "exec_exit_zero",
+        "guest_result",
+        "operator_verdict"
+      ]
+    },
+    "outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "evaluated_by",
+        "evidence_links"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "succeeded",
+            "failed",
+            "inconclusive",
+            "aborted"
+          ]
+        },
+        "evaluated_by": {
+          "enum": [
+            "exec_exit",
+            "guest_result",
+            "operator",
+            "system"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "evidence_links": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/query"
+          }
+        }
+      }
+    },
+    "timing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "created_at",
+        "concluded_at"
+      ],
+      "properties": {
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "started_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "concluded_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "execs": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "exec_id",
+          "argv_preview",
+          "result",
+          "stdout",
+          "stderr"
+        ],
+        "properties": {
+          "exec_id": {
+            "$ref": "#/$defs/uuid"
+          },
+          "argv_preview": {
+            "type": "string",
+            "maxLength": 512
+          },
+          "result": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "enum": [
+                  "exit",
+                  "signal",
+                  "timeout",
+                  "cancelled",
+                  "unknown"
+                ]
+              },
+              "exit_code": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "signal": {
+                "type": "string",
+                "maxLength": 16
+              },
+              "duration_ms": {
+                "$ref": "#/$defs/count"
+              }
+            }
+          },
+          "stdout": {
+            "$ref": "#/$defs/stream_digest"
+          },
+          "stderr": {
+            "$ref": "#/$defs/stream_digest"
+          }
+        }
+      }
+    },
+    "event_rollup": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "family",
+          "count",
+          "reproduce_query"
+        ],
+        "properties": {
+          "family": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "count": {
+            "$ref": "#/$defs/count"
+          },
+          "reproduce_query": {
+            "$ref": "#/$defs/query"
+          }
+        }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "telemetry_health_final",
+        "gaps"
+      ],
+      "properties": {
+        "telemetry_health_final": {
+          "enum": [
+            "healthy",
+            "degraded",
+            "unavailable"
+          ]
+        },
+        "gaps": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "evidence_link"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "maxLength": 64
+              },
+              "detail": {
+                "type": "string",
+                "maxLength": 512
+              },
+              "evidence_link": {
+                "$ref": "#/$defs/query"
+              }
+            }
+          }
+        }
+      }
+    },
+    "network_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile",
+        "flows",
+        "dns_queries",
+        "policy_denials"
+      ],
+      "properties": {
+        "profile": {
+          "enum": [
+            "offline",
+            "transport",
+            "http_inspect"
+          ]
+        },
+        "flows": {
+          "$ref": "#/$defs/counted"
+        },
+        "dns_queries": {
+          "$ref": "#/$defs/counted"
+        },
+        "policy_denials": {
+          "$ref": "#/$defs/counted"
+        },
+        "http_requests": {
+          "$ref": "#/$defs/counted"
+        },
+        "tls_passthrough": {
+          "$ref": "#/$defs/counted"
+        }
+      }
+    },
+    "filesystem_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "live_mutation_events",
+        "final_diff"
+      ],
+      "properties": {
+        "live_mutation_events": {
+          "$ref": "#/$defs/counted"
+        },
+        "final_diff": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "not_requested",
+                "pending",
+                "complete",
+                "crash_recovered",
+                "diff_incomplete"
+              ]
+            },
+            "added": {
+              "$ref": "#/$defs/count"
+            },
+            "modified": {
+              "$ref": "#/$defs/count"
+            },
+            "deleted": {
+              "$ref": "#/$defs/count"
+            },
+            "link": {
+              "$ref": "#/$defs/query"
+            }
+          }
+        }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "artifact_id",
+          "media_type",
+          "byte_size",
+          "digest"
+        ],
+        "properties": {
+          "artifact_id": {
+            "$ref": "#/$defs/uuid"
+          },
+          "media_type": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "byte_size": {
+            "$ref": "#/$defs/count"
+          },
+          "digest": {
+            "$ref": "#/$defs/digest"
+          },
+          "label": {
+            "type": "string",
+            "maxLength": 128
+          }
+        }
+      }
+    },
+    "attention": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "attention_id",
+          "kind",
+          "severity",
+          "acked"
+        ],
+        "properties": {
+          "attention_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "kind": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "severity": {
+            "enum": [
+              "info",
+              "needs_decision",
+              "critical"
+            ]
+          },
+          "acked": {
+            "type": "boolean"
+          },
+          "link": {
+            "$ref": "#/$defs/query"
+          }
+        }
+      }
+    },
+    "anomalies": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "detail",
+          "evidence_links"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "detail": {
+            "type": "string",
+            "maxLength": 512
+          },
+          "evidence_links": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 16,
+            "items": {
+              "$ref": "#/$defs/query"
+            }
+          }
+        }
+      }
+    },
+    "quality": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "truncated",
+        "redacted"
+      ],
+      "properties": {
+        "truncated": {
+          "type": "boolean"
+        },
+        "redacted": {
+          "type": "boolean"
+        },
+        "notes": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "string",
+            "maxLength": 512
+          }
+        }
+      }
+    },
+    "links": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run",
+        "vm",
+        "events"
+      ],
+      "properties": {
+        "run": {
+          "$ref": "#/$defs/query"
+        },
+        "vm": {
+          "$ref": "#/$defs/query"
+        },
+        "events": {
+          "$ref": "#/$defs/query"
+        },
+        "export": {
+          "$ref": "#/$defs/query"
+        }
+      }
+    }
+  }
+}
