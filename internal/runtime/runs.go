@@ -364,6 +364,12 @@ func (m *Manager) postConclude(run *store.Run) {
 
 // stopVMAfterRun issues a stop action on the VM as a system-initiated stop.
 // If the VM is already stopping or stopped, this is a no-op.
+//
+// Intentional bypass of doAction and its onVMTerminal hook: the run is already
+// terminal when this fires, so there is no active run to orphan (R4 partial
+// unique index enforces one non-terminal run per VM). A future VM hook addition
+// to doAction would not affect this path — that is safe here because the
+// lifecycle invariant is fully resolved before stopVMAfterRun is called.
 func (m *Manager) stopVMAfterRun(vmID string) {
 	ctx := m.ctx
 	vm, err := m.st.GetVM(ctx, vmID)
@@ -429,7 +435,11 @@ func (m *Manager) SubmitRunResult(ctx context.Context, runID string, result json
 
 	// Trigger conclusion asynchronously (best-effort race resolution).
 	// The caller gets the run post-result-recording; the conclusion fires in the bg.
+	// wg.Add before go ensures Close()'s wg.Wait() blocks until this goroutine
+	// finishes — same pattern as enqueueLaunch in manager.go.
+	m.wg.Add(1)
 	go func() {
+		defer m.wg.Done()
 		concluded, err := m.concludeRun(m.ctx, runID, triggerGuestResult)
 		if err != nil {
 			// Log implicitly; conclusion races resolve via From pins.

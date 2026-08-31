@@ -860,6 +860,10 @@ func (m *Manager) reconcileRuns(ctx context.Context) error {
 	for _, run := range terminalRuns {
 		if _, err := m.st.GetRunReport(ctx, run.RunID); errors.Is(err, store.ErrReportNotFound) {
 			// No report stored — re-enqueue.
+			// Guard for "no running report op" deferred to Task 7: the report-
+			// operation kind does not exist until Task 7 wires the real generator.
+			// Double-enqueue is safe per R7 (generation is deterministic and
+			// idempotent), so the cost of a spurious re-enqueue is bounded.
 			m.reportGen(run.RunID)
 		}
 	}

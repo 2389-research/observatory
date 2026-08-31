@@ -390,7 +390,7 @@ func TestConcludeRunOnTerminalErrors(t *testing.T) {
 
 // --- guest_result conclusion ---
 
-func TestRunGuestResultSucceeded(t *testing.T) {
+func TestRunGuestResultFailed(t *testing.T) {
 	st := openStoreForManager(t)
 	fk := runtimetest.NewFake()
 	mgr := newManager(t, st, fk)
@@ -417,6 +417,48 @@ func TestRunGuestResultSucceeded(t *testing.T) {
 	concluded := waitForRunPhase(t, st, run.RunID, "failed")
 	if concluded.EvaluatedBy != "guest_result" {
 		t.Errorf("evaluated_by = %q, want guest_result", concluded.EvaluatedBy)
+	}
+}
+
+// TestSubmitRunResultConclusionSurvivesClose is the regression test for F1.
+// It verifies that Close() waits for the conclusion goroutine spawned by
+// SubmitRunResult before cancelling m.ctx. Without wg tracking, the goroutine
+// can run with a cancelled context and leave the run stuck in "concluding".
+func TestSubmitRunResultConclusionSurvivesClose(t *testing.T) {
+	st := openStoreForManager(t)
+	fk := runtimetest.NewFake()
+	mgr := newManager(t, st, fk)
+
+	vm := launchedVM(t, st, mgr, "submit-result-close-vm")
+	run, _, err := mgr.CreateRun(t.Context(), runtime.RunRequest{
+		VMID:         vm.VMID,
+		Owner:        "local_operator",
+		Goal:         "survives close",
+		CriteriaType: "guest_result",
+		OnCompletion: "keep_running",
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	resultJSON := json.RawMessage(`{"status":"failed","detail":"expected failure"}`)
+	if _, err := mgr.SubmitRunResult(t.Context(), run.RunID, resultJSON); err != nil {
+		t.Fatalf("SubmitRunResult: %v", err)
+	}
+	// Close immediately — before the conclusion goroutine is necessarily scheduled.
+	// With correct wg tracking, Close blocks until the goroutine finishes.
+	mgr.Close()
+
+	// The run must be in a terminal phase, not stuck in "concluding".
+	final, err := st.GetRun(t.Context(), run.RunID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	terminal := map[string]bool{
+		"succeeded": true, "failed": true, "inconclusive": true, "aborted": true,
+	}
+	if !terminal[final.Phase] {
+		t.Errorf("run phase = %q after Close, want a terminal phase (not stuck in concluding)", final.Phase)
 	}
 }
 
@@ -769,9 +811,11 @@ func TestReportEnqueueOnAllTerminalPaths(t *testing.T) {
 			mgr.SetReportGen(recordReportGen)
 
 			runID := tc.run(t, st, mgr, fk)
-			mgr.Close()
 
-			// Wait for terminal phase.
+			// Poll until the run is terminal. For paths that go through
+			// SubmitRunResult (guest_result), the conclusion goroutine is now
+			// tracked in wg, so mgr.Close() below waits for it — no bare sleep
+			// needed as a band-aid.
 			deadline := time.Now().Add(3 * time.Second)
 			for time.Now().Before(deadline) {
 				run, _ := st.GetRun(t.Context(), runID)
@@ -783,8 +827,10 @@ func TestReportEnqueueOnAllTerminalPaths(t *testing.T) {
 				}
 				time.Sleep(10 * time.Millisecond)
 			}
-			// Allow a moment for the async enqueue call.
-			time.Sleep(20 * time.Millisecond)
+
+			// Close blocks until all goroutines finish (wg.Wait before cancel).
+			// reportGen is guaranteed to have been called before we reach the check.
+			mgr.Close()
 
 			found := false
 			for _, id := range enqueued {
