@@ -83,6 +83,41 @@ var registry = []KindInfo{
 			"text is stored post-redaction; the original input is not retained",
 		},
 	},
+	{
+		Kind:          "vm.created",
+		Family:        "vm",
+		SchemaVersion: 1,
+		Provenance:    HostObserved,
+		Semantics:     "A VM record was created and its resources reserved. Data carries vm_id, name, template_id, template_digest, operation_id, owner, and resources.",
+		Caveats: []string{
+			"creation precedes boot; the VM is in provisioning state and is not yet running",
+		},
+	},
+	{
+		Kind:          "vm.state_changed",
+		Family:        "vm",
+		SchemaVersion: 1,
+		Provenance:    HostObserved,
+		Semantics:     "An observed lifecycle state transition. Data carries vm_id, from, to, reason, operation_id, and revision as a decimal string.",
+		Caveats: []string{
+			"failed state carries failure_stage and failure_reason for the last completed stage",
+			"paused VMs retain memory and disk reservations; freed compute is only on stopped",
+		},
+	},
+	{
+		Kind:          "vm.deleted",
+		Family:        "vm",
+		SchemaVersion: 1,
+		Provenance:    HostObserved,
+		Semantics:     "VM compute resources were deleted. Retained history and artifacts are not purged by deletion (SPEC §5.4). Data carries vm_id and operation_id.",
+	},
+	{
+		Kind:          "operation.state_changed",
+		Family:        "operation",
+		SchemaVersion: 1,
+		Provenance:    HostObserved,
+		Semantics:     "Operation progress event. Data carries operation_id, kind, vm_id (nullable), phase, state, attempt, and error {cause, message} when failed. Terminal states are succeeded and failed.",
+	},
 }
 
 var registryByKind = func() map[string]KindInfo {
