@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -115,16 +116,18 @@ func NewManager(st *store.Store, rt Runtime, cfg ManagerConfig) (*Manager, error
 	return m, nil
 }
 
-// Close waits for all in-flight launch jobs and then releases the manager's
-// context. In-flight jobs run to completion first; cancel only stops newly
-// queued work from starting.
 // Templates returns a copy of the approved template registry, keyed by ID.
-func (m *Manager) Templates() map[string]Template { return m.cfg.Templates }
+// A copy, because the registry is the admission trust surface: no caller may
+// mutate what this host considers approved.
+func (m *Manager) Templates() map[string]Template { return maps.Clone(m.cfg.Templates) }
 
 // Availability delegates to the underlying Runtime. Callers check the returned
 // error for *UnavailableError to surface honest host-status information.
 func (m *Manager) Availability(ctx context.Context) error { return m.rt.Availability(ctx) }
 
+// Close waits for all in-flight launch jobs and then releases the manager's
+// context. In-flight jobs run to completion first; cancel only stops newly
+// queued work from starting.
 func (m *Manager) Close() {
 	m.wg.Wait()
 	m.cancel()
