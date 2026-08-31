@@ -91,7 +91,7 @@ func (c *client) vmList(args []string) int {
 	fs.SetOutput(c.stderr)
 	after := fs.String("after", "", "resume after cursor (row_id of last item)")
 	limit := fs.Int("limit", 0, "page size")
-	state := fs.String("state", "", "filter by observed state (repeatable via --state=s1 --state=s2)")
+	state := fs.String("state", "", "filter by observed state, comma-separated for multiple (--state stopped,failed)")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}

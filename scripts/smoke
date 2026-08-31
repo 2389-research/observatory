@@ -1,0 +1,143 @@
+#!/bin/sh
+# ABOUTME: Real-usage smoke: boots vmobsd on loopback with a temp state dir and a
+# ABOUTME: real template manifest, drives the vmobs CLI, verifies typed exit codes.
+set -u
+cd "$(dirname "$0")/.."
+
+# Heal a stale inherited GOROOT pointing at a removed toolchain.
+if [ -n "${GOROOT:-}" ] && [ ! -d "${GOROOT:-}" ]; then
+  unset GOROOT
+fi
+
+PORT=18787
+TMP=$(mktemp -d)
+DAEMON_PID=""
+fail=0
+note() { printf '%s\n' "$*"; }
+
+cleanup() {
+  if [ -n "$DAEMON_PID" ] && kill -0 "$DAEMON_PID" 2>/dev/null; then
+    kill "$DAEMON_PID" 2>/dev/null
+    wait "$DAEMON_PID" 2>/dev/null
+  fi
+  rm -rf "$TMP"
+}
+trap cleanup EXIT INT TERM
+
+# run_expect WANT_EXIT cmd...: run cmd, capture output, assert the exit code.
+run_expect() {
+  want=$1; shift
+  "$@" >"$TMP/out" 2>"$TMP/err"
+  got=$?
+  if [ "$got" -ne "$want" ]; then
+    note "FAIL exit $got (want $want): $*"
+    sed 's/^/  stderr: /' "$TMP/err"
+    fail=1
+    return 1
+  fi
+  note "PASS exit $want: $*"
+}
+
+# out_check description jq_filter: assert jq filter over the last stdout.
+out_check() {
+  desc=$1; filter=$2
+  if jq -e "$filter" <"$TMP/out" >/dev/null 2>&1; then
+    note "PASS $desc"
+  else
+    note "FAIL $desc — output was:"
+    sed 's/^/  /' "$TMP/out"
+    fail=1
+  fi
+}
+
+# --- environment: config, template manifest, binaries ---
+
+mkdir -p "$TMP/state/templates" "$TMP/run" "$TMP/etc" "$TMP/bin"
+
+sed -e "s|127.0.0.1:8787|127.0.0.1:$PORT|g" \
+    -e "s|/var/lib/vmobs|$TMP/state|g" \
+    -e "s|/run/vmobs|$TMP/run|g" \
+    -e "s|/etc/vmobs|$TMP/etc|g" \
+    docs/examples/host-config.yaml >"$TMP/config.yaml"
+
+cat >"$TMP/state/templates/smoke-tpl.json" <<'EOF'
+{
+  "template_id": "smoke-tpl-v1",
+  "description": "smoke-test template; image paths are not resolvable on a dev host",
+  "kernel_image": "/nonexistent/vmlinuz",
+  "root_image": "/nonexistent/rootfs.ext4",
+  "guest_privilege_profiles": ["unprivileged"],
+  "sensors": [],
+  "protocol_versions": {"guest": "1"}
+}
+EOF
+
+if ! go build -o "$TMP/bin" ./cmd/vmobsd ./cmd/vmobs; then
+  note "FAIL build"
+  exit 1
+fi
+note "PASS build"
+
+VMOBS="$TMP/bin/vmobs"
+API="http://127.0.0.1:$PORT"
+
+"$TMP/bin/vmobsd" -config "$TMP/config.yaml" >"$TMP/daemon.log" 2>&1 &
+DAEMON_PID=$!
+
+i=0
+while ! curl -sf "$API/api/v1/meta" >/dev/null 2>&1; do
+  i=$((i + 1))
+  if [ "$i" -gt 50 ] || ! kill -0 "$DAEMON_PID" 2>/dev/null; then
+    note "FAIL daemon did not come up; log:"
+    sed 's/^/  /' "$TMP/daemon.log"
+    exit 1
+  fi
+  sleep 0.1
+done
+note "PASS daemon up on $API"
+
+# --- exercise the CLI ---
+
+run_expect 0 "$VMOBS" --api "$API" --json meta &&
+  out_check "meta reports vms built" '.features.vms == true'
+
+run_expect 0 "$VMOBS" --api "$API" --json template list &&
+  out_check "template served with computed digest" \
+    '.templates[0].template_id == "smoke-tpl-v1" and (.templates[0].digest | startswith("sha256:"))'
+
+run_expect 0 "$VMOBS" --api "$API" --json host status &&
+  out_check "host status: runtime honestly unavailable on this host" \
+    '.runtime.available == false and (.runtime.reason | length > 0)'
+
+run_expect 0 "$VMOBS" --api "$API" --json vm list &&
+  out_check "vm list empty before create" '.vms | length == 0'
+
+# AT-001: with no runtime, create refuses with a typed error (exit 1)...
+run_expect 1 "$VMOBS" --api "$API" vm create --template smoke-tpl-v1 smokey
+
+# ...and persists nothing.
+run_expect 0 "$VMOBS" --api "$API" --json vm list &&
+  out_check "nothing persisted by the refused create (AT-001)" '.vms | length == 0'
+
+run_expect 0 "$VMOBS" --api "$API" situation
+run_expect 1 "$VMOBS" --api "$API" operation get op-000999
+run_expect 3 "$VMOBS" --api "$API" bogus-command
+
+# --- shutdown: clean exit, then transport failure is exit 2 ---
+
+kill "$DAEMON_PID"
+if wait "$DAEMON_PID"; then
+  note "PASS daemon shut down cleanly"
+else
+  note "FAIL daemon exited nonzero on SIGTERM"
+  fail=1
+fi
+DAEMON_PID=""
+
+run_expect 2 "$VMOBS" --api "$API" meta
+
+if [ "$fail" -ne 0 ]; then
+  note "smoke: FAILED"
+  exit 1
+fi
+note "smoke: all checks passed"
