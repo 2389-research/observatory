@@ -90,24 +90,36 @@ type Manager struct {
 	// ctx is the manager's root context; cancelled by Close to interrupt launches.
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	// reportGen is called after every run reaches a terminal phase. Task 7 wires
+	// the real generator. Nil means no-op (safe). Use SetReportGen to inject.
+	reportGen func(runID string)
 }
 
 // NewManager creates a Manager and immediately runs Reconcile to clean up any
 // state left over from a previous controller run.
 func NewManager(st *store.Store, rt Runtime, cfg ManagerConfig) (*Manager, error) {
+	return NewManagerWithReportGen(st, rt, cfg, nil)
+}
+
+// NewManagerWithReportGen creates a Manager with a pre-wired report generator,
+// then runs Reconcile. The generator is available during the initial reconcile,
+// which re-enqueues report generation for terminal runs missing stored reports.
+func NewManagerWithReportGen(st *store.Store, rt Runtime, cfg ManagerConfig, reportGen func(runID string)) (*Manager, error) {
 	n := cfg.Admission.MaxParallelProvisions
 	if n <= 0 {
 		n = 2
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	m := &Manager{
-		st:     st,
-		rt:     rt,
-		cfg:    cfg,
-		policy: Policy{Admission: cfg.Admission, Host: cfg.Host},
-		sem:    make(chan struct{}, n),
-		ctx:    ctx,
-		cancel: cancel,
+		st:        st,
+		rt:        rt,
+		cfg:       cfg,
+		policy:    Policy{Admission: cfg.Admission, Host: cfg.Host},
+		sem:       make(chan struct{}, n),
+		ctx:       ctx,
+		cancel:    cancel,
+		reportGen: reportGen,
 	}
 	if err := m.Reconcile(ctx); err != nil {
 		cancel()
@@ -131,6 +143,13 @@ func (m *Manager) Availability(ctx context.Context) error { return m.rt.Availabi
 func (m *Manager) Close() {
 	m.wg.Wait()
 	m.cancel()
+}
+
+// SetReportGen installs the run-report generation callback. It is called once
+// per terminal run with the runID. Task 7 wires the real generator; tests use
+// a recording stub on this seam.
+func (m *Manager) SetReportGen(fn func(runID string)) {
+	m.reportGen = fn
 }
 
 // Capacity returns the current usable/reserved/free view of host resources.
@@ -166,6 +185,10 @@ type CreateRequest struct {
 	RootDiskMiB      int64
 	WorkspaceDiskMiB int64
 	Labels           map[string]string
+	// Run is an optional launch-attached run. When non-nil, CreateVMWithOperation
+	// creates the run (phase pending) in the same tx as the VM. The manager's
+	// VM lifecycle hooks then advance it to running or conclude it on failure.
+	Run *store.RunAttachment
 }
 
 // CreateVM validates and creates a VM, then asynchronously provisions it.
@@ -271,6 +294,7 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*store.VM, *
 		IdempotencyKey:   req.IdempotencyKey,
 		RequestHash:      requestHash,
 		Admit:            admit,
+		Run:              req.Run,
 	})
 	if err != nil {
 		return vm, op, replayed, err
@@ -373,6 +397,9 @@ func (m *Manager) runLaunch(vm *store.VM, opID int64, tpl Template, vcpu int, me
 		return
 	}
 
+	// Hook: pending run → running when VM reaches running.
+	m.onVMRunning(ctx, vmID)
+
 	// Mark operation succeeded.
 	errCause := (*string)(nil)
 	errMsg := (*string)(nil)
@@ -400,6 +427,9 @@ func (m *Manager) failLaunch(ctx context.Context, vmID string, opID int64, stage
 		FailureReason:  &reason,
 		ReleaseCompute: true,
 	})
+	// Hook: conclude any active run on the VM with the launch-fail trigger (R8).
+	m.onVMLaunchFailed(ctx, vmID)
+
 	cause := "launch_failed"
 	// IfState pins the update to a still-running operation: a batch stop wave
 	// may already have finalized this op, and its verdict must stand.
@@ -493,6 +523,8 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 		if err != nil {
 			return m.failAction(ctx, vmID, opID, action, err)
 		}
+		// Hook: pending run → running when VM starts.
+		m.onVMRunning(ctx, vmID)
 		return m.succeedAction(ctx, vmID, opID, "running", updVM)
 
 	case "pause":
@@ -576,6 +608,13 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 	})
 	if err != nil {
 		return m.failAction(ctx, vmID, opID, action, err)
+	}
+	// VM lifecycle hooks: conclude active runs on terminal transitions.
+	switch newState {
+	case "stopped":
+		m.onVMTerminal(ctx, vmID)
+	case "running":
+		m.onVMRunning(ctx, vmID)
 	}
 	return m.succeedAction(ctx, vmID, opID, action, updVM)
 }
@@ -689,6 +728,9 @@ func (m *Manager) Delete(ctx context.Context, vmID string, force bool, expectedR
 // Reconcile cleans up state left over from a previous controller run (§5.5).
 // Portable core: no real runtime exists here, so nothing can be adopted.
 // Operations in flight → failed; VMs in transitional states → failed/stopped/deleted.
+// Runs: pending/running/concluding runs whose VM is no longer live are concluded
+// inconclusive with an interrupted reason (AT-093). Terminal runs missing reports
+// have report generation re-enqueued (R7).
 func (m *Manager) Reconcile(ctx context.Context) error {
 	// Fail in-flight operations (pending/running).
 	for _, state := range []string{"pending", "running"} {
@@ -760,7 +802,66 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 				ReleaseAll:  true,
 			})
 		}
-		// stopped, failed, deleted, deleted: no action needed.
+		// stopped, failed, deleted: no action needed.
+	}
+
+	// Reconcile runs: conclude interrupted runs and re-enqueue missing reports.
+	if err := m.reconcileRuns(ctx); err != nil {
+		return fmt.Errorf("reconcile runs: %w", err)
+	}
+
+	return nil
+}
+
+// reconcileRuns is the run portion of Reconcile. It processes two categories:
+//  1. Non-terminal runs (pending/running/concluding) whose VM is no longer live
+//     → conclude inconclusive with the interrupted reason (AT-093).
+//  2. Terminal runs with no stored report and no running report operation
+//     → re-enqueue report generation (R7).
+func (m *Manager) reconcileRuns(ctx context.Context) error {
+	// Category 1: active runs whose VM is no longer live.
+	activeRuns, err := m.st.ListRunsInPhases(ctx, "pending", "running", "concluding")
+	if err != nil {
+		return fmt.Errorf("list active runs: %w", err)
+	}
+
+	// Determine "live" VM states: only running/paused VMs are live.
+	// After the VM reconcile above, transitional VMs have been moved to terminal.
+	liveStates := map[string]bool{
+		"running": true, "paused": true,
+	}
+
+	for _, run := range activeRuns {
+		vm, err := m.st.GetVM(ctx, run.VMID)
+		if err != nil {
+			// VM deleted or unknown → conclude the run.
+			_, _ = m.concludeRun(ctx, run.RunID, triggerInterrupted)
+			continue
+		}
+		if !liveStates[vm.ObservedState] {
+			// VM is stopped/failed/starting/provisioning/stopping/deleting/deleted
+			// — no longer live; conclude with interrupted reason.
+			_, _ = m.concludeRun(ctx, run.RunID, triggerInterrupted)
+		}
+		// VM live: event-driven hooks own it; leave alone.
+	}
+
+	// Category 2: terminal runs missing reports (R7).
+	if m.reportGen == nil {
+		return nil // no generator installed yet; skip
+	}
+	// We need terminal runs without stored reports. There's no direct store method
+	// for this, so we use ListRunsInPhases for terminal phases and check reports.
+	terminalPhases := []string{"succeeded", "failed", "inconclusive", "aborted"}
+	terminalRuns, err := m.st.ListRunsInPhases(ctx, terminalPhases...)
+	if err != nil {
+		return fmt.Errorf("list terminal runs: %w", err)
+	}
+	for _, run := range terminalRuns {
+		if _, err := m.st.GetRunReport(ctx, run.RunID); errors.Is(err, store.ErrReportNotFound) {
+			// No report stored — re-enqueue.
+			m.reportGen(run.RunID)
+		}
 	}
 	return nil
 }

@@ -345,6 +345,9 @@ func (m *Manager) runBatchMemberLaunch(lm batchLaunchMember, coord *batchCoord) 
 		return false
 	}
 
+	// Hook: pending run → running when batch member VM reaches running.
+	m.onVMRunning(ctx, vm.VMID)
+
 	errCause := (*string)(nil)
 	_, _ = m.st.UpdateOperation(ctx, store.OperationUpdate{
 		OperationID:  opID,
