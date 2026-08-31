@@ -16,7 +16,7 @@ Two tracks:
 | P0 | Scaffold: module, plan, conventions, `scripts/check` | §0, §18 | done |
 | P1 | Evidence spine: `internal/events` (envelope, validation, kind registry), `internal/store` (WAL SQLite, dedup, integrity, keyset queries), `internal/api` (/meta, /meta/event-kinds, /events, structured errors), `cmd/vmobsd`, `cmd/vmobs` CLI | §12, §14, §14.1, R-04, R-12, R-17 partial | done |
 | P2 | Situation + attention + annotations: attention queue (collapse, ack, overflow health record), /situation snapshot + `?since` delta, /annotations | §12.7, R-15, R-14 partial | done |
-| P3 | VM registry, operations, admission reservations, runtime interface + fake runtime, lifecycle event emission | §5, §6, R-01, R-02, R-09 partial, R-10 partial | next |
+| P3 | VM registry, operations, admission reservations, runtime interface + fake runtime, lifecycle event emission | §5, §6, R-01, R-02, R-09 partial, R-10 partial | in progress — store/runtime/triggers landed; API, CLI, batches pending |
 | P4 | Declarative runs + reports: run state machine, criteria evaluation, report generation with reproduce_query rollups | §8.6, §8.7, R-16 | pending |
 | P5 | Auth (local operator, sessions, CSRF), owner scoping | §15.1, R-11 | pending — must land before any non-loopback bind or the web UI |
 | L0.. | Linux track per spec milestones M0–M5; then web/ frontend against the stabilized API | §18 | host chosen — pending |
@@ -39,7 +39,8 @@ None right now.
 - 2026-08-31 — Annotation `target_ref` format fixed as `<type>:<id>` with type ∈ {vm, boot, run, event, operation, template, artifact, host} and a printable non-space id (spec leaves the format open). Served through the target_ref_invalid remediation so agents learn it from the error.
 - 2026-08-31 — `/situation` omits `capacity_free_mib` (spec example shows it) until P3 admission bookkeeping exists: serving a number with no accounting behind it would be invented evidence. `changed_vms` is `[]` for the same reason (no VM registry yet). `sensors_degraded` is 0 because zero sensors exist, which is the truth of the host today.
 - 2026-08-31 — Attention/annotation events ride the store's own host-wide stream (`vm_id` null at the envelope level; VM linkage in event data and queue rows) so store-synthesized events never fight producer stream scope binding.
-- 2026-08-31 — Of the eight configured trigger classes, P2 implements only `telemetry_degraded` (from telemetry.loss / integrity_failure / unregistered_kind). `/meta` serves enabled∩implemented, so the other classes are honestly absent from the active set until their source events exist (P3+).
+- 2026-08-31 — Of the eight configured trigger classes, P2 implements only `telemetry_degraded`. P3 adds `lifecycle_failed`, `reconciliation_surprise`, and `capacity_exhausted` (sourced from vm.state_changed and operation.state_changed). Four now active; `run_concluded`, `spool_threshold`, `disk_reserve_threshold`, `policy_denial_anomaly` remain unimplemented until their source events exist (P4+). `/meta` keeps serving enabled∩implemented.
+- 2026-08-31 — Boot identity in P3 is a UUID carried in vm.state_changed events (`boot_id` on transitions that establish a new boot), not a boots table. The §5.1 Boot entity's other fields (guest boot id, runner instance, kernel/agent versions) only exist once a real runner boots a real guest (L0); a table of nulls would be invented structure.
 
 ## Session log
 
