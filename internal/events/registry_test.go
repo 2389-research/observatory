@@ -75,6 +75,34 @@ func TestAttentionAndAnnotationKindsRegistered(t *testing.T) {
 	}
 }
 
+func TestFamiliesReturnsSortedDistinctList(t *testing.T) {
+	// Families() must return a sorted, deduplicated list with at least the core set.
+	families := events.Families()
+	if len(families) == 0 {
+		t.Fatal("Families() returned empty list")
+	}
+	// Check sorted.
+	for i := 1; i < len(families); i++ {
+		if families[i] <= families[i-1] {
+			t.Errorf("Families() not sorted at index %d: %q <= %q", i, families[i], families[i-1])
+		}
+	}
+	// Check deduplication.
+	seen := map[string]bool{}
+	for _, f := range families {
+		if seen[f] {
+			t.Errorf("Families() has duplicate entry: %q", f)
+		}
+		seen[f] = true
+	}
+	// Every family in Kinds() must appear in Families().
+	for _, k := range events.Kinds() {
+		if !seen[k.Family] {
+			t.Errorf("Families() missing family %q (has kind %q)", k.Family, k.Kind)
+		}
+	}
+}
+
 func TestRunKindsRegistered(t *testing.T) {
 	// §12.2: run.* family is host_observed except run.progress (guest_reported).
 	cases := []struct {

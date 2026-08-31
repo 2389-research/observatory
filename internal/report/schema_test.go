@@ -4,10 +4,12 @@ package report_test
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync/atomic"
 	"testing"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
@@ -197,13 +199,13 @@ func mustCreateRunningVM(t *testing.T, st *store.Store) string {
 	return vmID
 }
 
-// mustSeq is a simple monotonic counter for unique IDs within a test run.
-var seqCounter int64
+// seqCounter is a monotonic counter for unique IDs within a test run.
+// Uses atomic to be safe under t.Parallel() and -race.
+var seqCounter atomic.Int64
 
 func mustSeq(t *testing.T) int64 {
 	t.Helper()
-	seqCounter++
-	return seqCounter
+	return seqCounter.Add(1)
 }
 
 // TestSchemaValidation_FourTerminalShapes validates that generated reports for
@@ -261,7 +263,7 @@ func TestSchemaValidation_Determinism(t *testing.T) {
 }
 
 // TestSchemaValidation_NonTerminalReturnsError asserts that Generate refuses
-// to generate for a non-terminal run.
+// to generate for a non-terminal run and wraps ErrNotTerminal.
 func TestSchemaValidation_NonTerminalReturnsError(t *testing.T) {
 	st := openStore(t)
 	vmID := mustCreateRunningVM(t, st)
@@ -277,6 +279,90 @@ func TestSchemaValidation_NonTerminalReturnsError(t *testing.T) {
 	_, _, err = report.Generate(t.Context(), st, run.RunID, report.Options{})
 	if err == nil {
 		t.Fatal("expected error for non-terminal run, got nil")
+	}
+	if !errors.Is(err, report.ErrNotTerminal) {
+		t.Errorf("expected errors.Is(err, report.ErrNotTerminal) to be true, got: %v", err)
+	}
+}
+
+// TestBootIDsFromEventData verifies that boot_ids in the report contains the
+// ID set via TransitionVM.BootID, which the store writes into event data
+// (not the envelope header). This is the RED→GREEN test for F1.
+//
+// The run is created in "pending" state before the VM transitions to "starting",
+// so the vm.state_changed event (with boot_id in data) falls inside the run
+// window (after CreatedEventID, before ConcludedEventID).
+func TestBootIDsFromEventData(t *testing.T) {
+	st := openStore(t)
+
+	bootID := "00000000-0000-4000-8000-bbbbbbbbbbbb"
+
+	// Create the VM, stopping before it boots.
+	vmID := fmt.Sprintf("00000000-0000-4000-8000-%012d", mustSeq(t))
+	_, _, _, err := st.CreateVMWithOperation(t.Context(), store.CreateVMInput{
+		VMID:             vmID,
+		Name:             "test-vm-boot-" + vmID[:8],
+		Owner:            "test",
+		TemplateID:       "tmpl-test",
+		TemplateDigest:   fmt.Sprintf("sha256:%064d", 1),
+		VCPUCount:        2,
+		MemoryMiB:        2048,
+		RootDiskMiB:      8192,
+		WorkspaceDiskMiB: 10240,
+		MemoryTotalMiB:   2048 + 768,
+		NetworkProfile:   "transport",
+		NetworkPolicyID:  "transport-public-web",
+		Labels:           map[string]string{},
+		Kind:             "vm.create",
+		RequestHash:      fmt.Sprintf("hash-boot-%s", vmID),
+		Admit:            func(store.ReservationTotals) error { return nil },
+	})
+	if err != nil {
+		t.Fatalf("CreateVMWithOperation: %v", err)
+	}
+
+	// Create the run while the VM is still in "provisioning" — InitialPhase pending.
+	// This anchors CreatedEventID BEFORE the boot transition.
+	run, _, err := st.CreateRun(t.Context(), store.CreateRunInput{
+		VMID: vmID, Owner: "test", Goal: "boot_id data field test",
+		CriteriaType: "operator_verdict", OnCompletion: "keep_running",
+		RequestHash: "hash-bootid", InitialPhase: "pending",
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	// Now boot the VM — the vm.state_changed event lands inside the run window.
+	starting := "provisioning"
+	if _, err := st.TransitionVM(t.Context(), store.TransitionInput{
+		VMID: vmID, From: &starting, To: "starting", Reason: "test_launch",
+		BootID: &bootID,
+	}); err != nil {
+		t.Fatalf("→starting: %v", err)
+	}
+	if _, err := st.TransitionVM(t.Context(), store.TransitionInput{
+		VMID: vmID, To: "running", Reason: "test_launch_complete",
+	}); err != nil {
+		t.Fatalf("→running: %v", err)
+	}
+
+	// Transition the run through to terminal.
+	mustTransitionRun(t, st, run.RunID, "pending", "concluding", "", "operator verdict")
+	mustTransitionRun(t, st, run.RunID, "concluding", "succeeded", "operator", "operator verdict: succeeded")
+
+	raw, _, err := report.Generate(t.Context(), st, run.RunID, report.Options{})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	var rep struct {
+		BootIDs []string `json:"boot_ids"`
+	}
+	if err := json.Unmarshal(raw, &rep); err != nil {
+		t.Fatalf("unmarshal report: %v", err)
+	}
+	if len(rep.BootIDs) != 1 || rep.BootIDs[0] != bootID {
+		t.Errorf("boot_ids = %v, want [%s]", rep.BootIDs, bootID)
 	}
 }
 

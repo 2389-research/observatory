@@ -11,13 +11,14 @@ import (
 )
 
 // CountEventsForReport counts events in the run window (after < event_id <= until)
-// for the given family, matching by vm_id column OR by data.vm_id / data.run_id
-// in the event payload. This covers both regular VM events (vm_id column set)
-// and store-synthesized run.* events (vm_id column NULL, linkage in payload).
+// for the given family, matching by vm_id column OR by data.vm_id in the payload.
+// This covers regular VM events (vm_id column set) and store-synthesized run.*
+// events (vm_id column NULL, VM linkage in data.vm_id).
 //
 // The matching reproduce_query is:
 // /api/v1/events?vm_id=<vm>&family=<f>&after=<after>&until=<until>
-// and the API must apply the same vm-or-data matching for counts to reproduce.
+// The API applies the same two-clause match when family=run (MatchDataVMID path),
+// keeping SQL and API structurally congruent (P-05).
 func (s *Store) CountEventsForReport(ctx context.Context, vmID, runID, family string, afterID, untilID int64) (int64, error) {
 	familyKinds := events.KindsByFamily(family)
 	if familyKinds == nil {
@@ -32,19 +33,22 @@ func (s *Store) CountEventsForReport(ctx context.Context, vmID, runID, family st
 	for _, k := range familyKinds {
 		args = append(args, k)
 	}
-	args = append(args, vmID, vmID, runID)
+	args = append(args, vmID, vmID)
 
 	// Match events by:
 	// 1. vm_id column = vmID (regular VM events and vm.* events), OR
-	// 2. payload json data.vm_id = vmID (run.* events with NULL column vm_id), OR
-	// 3. payload json data.run_id = runID (run.* events linked by run_id)
+	// 2. payload json data.vm_id = vmID (run.* events with NULL column vm_id)
+	//
+	// The data.run_id arm was dropped (P-05 congruence): every store-synthesized
+	// run.* event sets data.vm_id, so data.vm_id matching alone covers them.
+	// The API reproduce_query uses family=run&vm_id=<vm> which applies the same
+	// two-clause match via MatchDataVMID; adding data.run_id would diverge.
 	q := `SELECT COUNT(*) FROM events
 		WHERE event_id > ? AND event_id <= ?
 		AND kind IN (` + placeholders + `)
 		AND (
 			vm_id = ?
 			OR json_extract(payload, '$.data.vm_id') = ?
-			OR json_extract(payload, '$.data.run_id') = ?
 		)`
 
 	var count int64

@@ -30,6 +30,9 @@ var (
 	ErrRunNotAcceptingSubmissions = errors.New("run is not in pending or running phase; submissions are not accepted")
 	// ErrReportNotFound: no report has been stored for this run_id.
 	ErrReportNotFound = errors.New("run report not found")
+	// ErrReportImmutable: a report has already been stored for this run_id;
+	// reports are immutable once written (R7: generation is deterministic).
+	ErrReportImmutable = errors.New("reports are immutable")
 )
 
 // InvalidRunTransitionError names the rejected run phase transition.
@@ -889,8 +892,8 @@ func (s *Store) PutRunReport(ctx context.Context, runID, reportJSON, digest stri
 		`SELECT digest FROM run_reports WHERE run_id = ?`, runID,
 	).Scan(&existingDigest)
 	if err == nil {
-		// Report already exists — return error naming the existing digest.
-		return fmt.Errorf("report already stored for run %s (digest: %s); reports are immutable", runID, existingDigest)
+		// Report already exists — wrap ErrReportImmutable so callers can use errors.Is.
+		return fmt.Errorf("report already stored for run %s (digest: %s): %w", runID, existingDigest, ErrReportImmutable)
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("check existing report: %w", err)

@@ -121,6 +121,111 @@ func TestRoundTrip_AllCountedFieldsReproduce(t *testing.T) {
 			}
 		})
 	}
+
+	// F9: event_rollup must contain a "run" family row with count > 0.
+	var rep struct {
+		EventRollup []struct {
+			Family string `json:"family"`
+			Count  int64  `json:"count"`
+		} `json:"event_rollup"`
+	}
+	if err := json.Unmarshal(raw, &rep); err != nil {
+		t.Fatalf("unmarshal for event_rollup check: %v", err)
+	}
+	foundRun := false
+	for _, row := range rep.EventRollup {
+		if row.Family == "run" && row.Count > 0 {
+			foundRun = true
+			break
+		}
+	}
+	if !foundRun {
+		t.Error("event_rollup has no 'run' family row with count > 0 — rollup regression")
+	}
+}
+
+// TestTerminalEvidenceLinkReturnsOneEvent verifies that the terminal evidence link
+// in the report returns exactly 1 run.state_changed event with a terminal "to"
+// phase when executed against the real API server. This is the F2 regression test:
+// the link uses family=run (not kind=) so MatchDataVMID applies and the NULL
+// vm_id column on run.* events is handled correctly.
+func TestTerminalEvidenceLinkReturnsOneEvent(t *testing.T) {
+	st := openStore(t)
+	mgr := newManagerWithStore(t, st)
+	srv := newAPIServer(t, st, mgr)
+
+	vmID := mustCreateRunningVM(t, st)
+	run, _, err := st.CreateRun(t.Context(), store.CreateRunInput{
+		VMID: vmID, Owner: "test", Goal: "terminal evidence link test",
+		CriteriaType: "operator_verdict", OnCompletion: "keep_running",
+		RequestHash: "hash-evlink", InitialPhase: "running",
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	mustTransitionRun(t, st, run.RunID, "running", "concluding", "", "operator verdict")
+	mustTransitionRun(t, st, run.RunID, "concluding", "succeeded", "operator", "operator verdict: succeeded")
+
+	raw, _, err := report.Generate(t.Context(), st, run.RunID, report.Options{})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	// Extract the first evidence link from outcome.evidence_links.
+	var rep struct {
+		Outcome struct {
+			EvidenceLinks []string `json:"evidence_links"`
+		} `json:"outcome"`
+	}
+	if err := json.Unmarshal(raw, &rep); err != nil {
+		t.Fatalf("unmarshal report: %v", err)
+	}
+	if len(rep.Outcome.EvidenceLinks) == 0 {
+		t.Fatal("no evidence_links in report outcome")
+	}
+	terminalLink := rep.Outcome.EvidenceLinks[0]
+	t.Logf("terminal evidence link: %s", terminalLink)
+
+	// Execute the link against the server.
+	resp, err := http.Get(srv.URL + terminalLink)
+	if err != nil {
+		t.Fatalf("GET %s: %v", terminalLink, err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s = %d: %s", terminalLink, resp.StatusCode, body)
+	}
+
+	var page struct {
+		Events []json.RawMessage `json:"events"`
+	}
+	if err := json.Unmarshal(body, &page); err != nil {
+		t.Fatalf("decode events page: %v\nbody: %s", err, body)
+	}
+	if len(page.Events) != 1 {
+		t.Fatalf("terminal evidence link returned %d events, want exactly 1\nbody: %s", len(page.Events), body)
+	}
+
+	// Confirm the event is run.state_changed with a terminal "to".
+	var ev struct {
+		Kind string `json:"kind"`
+		Data struct {
+			To string `json:"to"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(page.Events[0], &ev); err != nil {
+		t.Fatalf("decode event: %v", err)
+	}
+	if ev.Kind != "run.state_changed" {
+		t.Errorf("event kind = %q, want run.state_changed", ev.Kind)
+	}
+	terminalPhases := map[string]bool{
+		"succeeded": true, "failed": true, "inconclusive": true, "aborted": true,
+	}
+	if !terminalPhases[ev.Data.To] {
+		t.Errorf("event data.to = %q, want a terminal phase", ev.Data.To)
+	}
 }
 
 // countedEntry is a {count, reproduce_query} pair found in the report.
@@ -412,37 +517,31 @@ func TestManagerWiring_ReconcileReEnqueues(t *testing.T) {
 	t.Fatalf("report never appeared via reconcile for run %s", runID)
 }
 
-// TestManagerWiring_ReconcileGuard tests that the reconcile guard prevents
-// a second report op from being created when one is already running.
+// TestManagerWiring_ReconcileGuard asserts the guard outcome: after reconcile
+// on a terminal run that had a pre-seeded running report op, exactly one report
+// row exists and exactly one succeeded op was recorded for that run.
+//
+// Reconcile fails ALL running operations at startup (controller_restart),
+// including the pre-seeded one. Then category 2 re-enqueues generation via
+// the MakeReportGenFn guard (HasRunningReportOp is now false), which creates
+// exactly one new op. No duplicate op is created because MakeReportGenFn's own
+// HasRunningReportOp guard runs before InsertReportOperation.
 func TestManagerWiring_ReconcileGuard(t *testing.T) {
 	st := openStore(t)
 
 	// Seed a terminal run.
 	runID := buildScenario(t, st, scenarioAborted)
+	vmID := mustRunVMID(t, st, runID)
 
-	// Manually insert a running report op to simulate one already in flight.
-	opID, err := st.InsertReportOperation(t.Context(), "test", mustRunVMID(t, st, runID), runID)
+	// Pre-seed a running report op to simulate one already in flight.
+	preOpID, err := st.InsertReportOperation(t.Context(), "test", vmID, runID)
 	if err != nil {
 		t.Fatalf("InsertReportOperation: %v", err)
 	}
-	t.Logf("pre-seeded report op %d", opID)
+	t.Logf("pre-seeded report op %d for run %s", preOpID, runID)
 
-	// Count ops before reconcile.
-	opsBefore, err := st.ListOperationsByState(t.Context(), "running")
-	if err != nil {
-		t.Fatalf("ListOperationsByState: %v", err)
-	}
-	countBefore := 0
-	for _, op := range opsBefore {
-		if op.Kind == "run.report_generate" {
-			countBefore++
-		}
-	}
-	if countBefore != 1 {
-		t.Fatalf("expected 1 running report op before reconcile, got %d", countBefore)
-	}
-
-	// Create manager — reconcile fires but must NOT add a second report op.
+	// Create manager — reconcile fires. The guard must see the running op and skip
+	// re-enqueueing, leaving exactly one report op for this run.
 	reportGenFn := report.MakeReportGenFn(st, "test", report.Options{})
 	mgr, err := runtime.NewManagerWithReportGen(st, runtimetest.NewFake(), runtime.ManagerConfig{
 		Admission:  config.Admission{CPUOvercommitRatio: 4.0},
@@ -454,31 +553,37 @@ func TestManagerWiring_ReconcileGuard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManagerWithReportGen: %v", err)
 	}
-	// Wait briefly for any async work to settle.
-	time.Sleep(200 * time.Millisecond)
 	mgr.Close()
 
-	// Reconcile will have failed the pre-seeded "running" op (controller_restart).
-	// The guard should prevent a second report op being created.
-	// Check that only one report op exists total (the reconcile may have failed it).
-	allOps, err := st.ListOperationsByState(t.Context(), "failed")
+	// Reconcile fails ALL running operations at startup (controller_restart). The
+	// pre-seeded running op is therefore failed (1 failed op). After that,
+	// HasRunningReportOp returns false, so reconcile re-enqueues generation.
+	// MakeReportGenFn creates one new op and stores the report synchronously during
+	// reconcile (gotcha: reconcile report gen stays synchronous). By the time
+	// NewManagerWithReportGen + Close return, the report is stored.
+	//
+	// The guard invariant: at no point were two ops IN FLIGHT simultaneously. We
+	// verify the outcome: exactly one op is in "succeeded" state for this run,
+	// and the report exists.
+	succeededOps := 0
+	ops, err := st.ListOperationsByState(t.Context(), "succeeded")
 	if err != nil {
-		t.Fatalf("ListOperationsByState failed: %v", err)
+		t.Fatalf("ListOperationsByState(succeeded): %v", err)
 	}
-	reportOpCount := 0
-	for _, op := range allOps {
-		if op.Kind == "run.report_generate" {
-			reportOpCount++
+	for _, op := range ops {
+		if op.Kind == "run.report_generate" && op.RequestHash == runID {
+			succeededOps++
 		}
 	}
-	// The pre-seeded running op was failed by reconcile (controller_restart).
-	// The guard should have allowed the reconcile re-enqueue since the old op
-	// is now failed. That's correct: we check HasRunningReportOp AFTER reconcile
-	// fails the old ops. So a new report op may be created and succeed.
-	// The key invariant is: the report exists or is being generated — not that no
-	// extra ops were created.
-	// Just ensure the test manager completed without panicking.
-	t.Logf("report ops in failed state: %d", reportOpCount)
+	if succeededOps != 1 {
+		t.Errorf("expected exactly 1 succeeded report op for run %s, got %d",
+			runID, succeededOps)
+	}
+
+	// Report must exist.
+	if _, err := st.GetRunReport(t.Context(), runID); err != nil {
+		t.Errorf("GetRunReport: expected stored report, got %v", err)
+	}
 }
 
 // mustRunVMID reads the vm_id for a run from the store.

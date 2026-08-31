@@ -10,8 +10,8 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
-	"strings"
 
+	"github.com/2389-research/observatory-v2/internal/events"
 	"github.com/2389-research/observatory-v2/internal/store"
 )
 
@@ -30,7 +30,7 @@ func Generate(ctx context.Context, st *store.Store, runID string, opts Options) 
 		"succeeded": true, "failed": true, "inconclusive": true, "aborted": true,
 	}
 	if !terminalPhases[run.Phase] {
-		return nil, "", fmt.Errorf("run %s is in phase %q — only terminal runs generate reports", runID, run.Phase)
+		return nil, "", fmt.Errorf("run %s is in phase %q — only terminal runs generate reports: %w", runID, run.Phase, ErrNotTerminal)
 	}
 	if run.ConcludedEventID == 0 {
 		return nil, "", fmt.Errorf("run %s: concluded_event_id is 0 in a terminal phase — store inconsistency", runID)
@@ -52,8 +52,10 @@ func Generate(ctx context.Context, st *store.Store, runID string, opts Options) 
 
 	// --- outcome ---
 	evidenceLinks := []string{
-		// The terminal record: the event just before and including concluded.
-		fmt.Sprintf("/api/v1/events?kind=run.state_changed&vm_id=%s&after=%d&until=%d",
+		// The terminal record: the run.state_changed event at conclusion.
+		// Uses family=run (not kind=) so the API applies MatchDataVMID, which is
+		// required for run.* events that ride the host-wide stream with NULL vm_id column.
+		fmt.Sprintf("/api/v1/events?family=run&vm_id=%s&after=%d&until=%d",
 			run.VMID, run.ConcludedEventID-1, run.ConcludedEventID),
 	}
 	if run.ResultJSON != "" {
@@ -193,29 +195,35 @@ func Generate(ctx context.Context, st *store.Store, runID string, opts Options) 
 }
 
 // collectBootIDs returns distinct non-empty boot_id values from vm.state_changed
-// events in the run window. Events ride the host stream (vm_id is NULL on run.*
-// events); vm.state_changed has vm_id set directly.
+// events in the run window.
+//
+// vm.state_changed events are store-synthesized via systemEnvelope, which does
+// not set the envelope VMID field — so they ride the host-wide stream with a
+// NULL vm_id column, just like run.* events. VM linkage lives in data.vm_id.
+// MatchDataVMID: true extends the filter to OR on json_extract(payload,'$.data.vm_id').
 func collectBootIDs(ctx context.Context, st *store.Store, vmID, _ string, after, until int64) ([]string, error) {
-	// vm.state_changed events have the vm_id column set, so standard Query works.
 	seen := map[string]bool{}
 	var ids []string
 	afterCursor := strconv.FormatInt(after, 10)
 	untilStr := strconv.FormatInt(until, 10)
 	for {
 		res, err := st.Query(ctx, store.Query{
-			VMID:  &vmID,
-			Kind:  "vm.state_changed",
-			After: afterCursor,
-			Until: untilStr,
-			Limit: 1000,
+			VMID:          &vmID,
+			Kind:          "vm.state_changed",
+			After:         afterCursor,
+			Until:         untilStr,
+			Limit:         1000,
+			MatchDataVMID: true,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("query vm.state_changed: %w", err)
 		}
 		for _, ev := range res.Events {
-			if ev.BootID != nil && *ev.BootID != "" && !seen[*ev.BootID] {
-				seen[*ev.BootID] = true
-				ids = append(ids, *ev.BootID)
+			// boot_id lives in event data, not the envelope header; the store writes
+			// it into stateData["boot_id"] when TransitionVM is called with BootID set.
+			if bid, ok := ev.Data["boot_id"].(string); ok && bid != "" && !seen[bid] {
+				seen[bid] = true
+				ids = append(ids, bid)
 			}
 		}
 		if len(res.Events) < 1000 {
@@ -261,28 +269,11 @@ func buildEventRollup(ctx context.Context, st *store.Store, vmID, runID string, 
 	return rows, nil
 }
 
-// registeredFamilies returns all distinct family names known to the event
-// registry. We use the store's Query method's family validation indirectly —
-// we enumerate them from the registry package to avoid an import cycle.
-// The store package knows about the events package already; we call
-// KindsByFamily for a known set of families.
+// registeredFamilies returns all distinct family names from the event registry,
+// sorted alphabetically. Driven by events.Families() so a newly registered
+// family is automatically included in every report's rollup enumeration.
 func registeredFamilies(_ *store.Store) []string {
-	// Hard-coded family list from the registry. This list is extended when new
-	// families are registered; there is no dynamic enumeration API today.
-	// Families that produce no events in the typical run window return 0 and
-	// are omitted from the rollup — that is the honest answer.
-	return []string{
-		"annotation",
-		"attention",
-		"dns",
-		"fs",
-		"net.flow",
-		"operation",
-		"policy",
-		"run",
-		"telemetry",
-		"vm",
-	}
+	return events.Families()
 }
 
 // collectAttention returns up to 128 attention items relevant to this run:
@@ -370,8 +361,7 @@ func MakeReportGenFn(st *store.Store, owner string, opts Options) func(runID str
 		if putErr != nil {
 			// Report already stored by a concurrent generator — that is the R7
 			// idempotent case. Mark the op as succeeded anyway (the report exists).
-			// Check whether this looks like the immutability guard string.
-			if strings.Contains(putErr.Error(), "reports are immutable") {
+			if errors.Is(putErr, store.ErrReportImmutable) {
 				_, _ = st.UpdateOperation(ctx, store.OperationUpdate{
 					OperationID: opID,
 					IfState:     "running",

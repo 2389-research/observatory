@@ -238,3 +238,18 @@ func KindsByFamily(family string) []string {
 	}
 	return out
 }
+
+// Families returns all distinct family names in the registry, sorted
+// alphabetically. The order is deterministic regardless of registry slice order.
+func Families() []string {
+	seen := make(map[string]struct{}, len(registry))
+	for _, k := range registry {
+		seen[k.Family] = struct{}{}
+	}
+	out := make([]string, 0, len(seen))
+	for f := range seen {
+		out = append(out, f)
+	}
+	sort.Strings(out)
+	return out
+}
