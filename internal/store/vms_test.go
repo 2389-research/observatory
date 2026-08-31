@@ -255,6 +255,65 @@ func TestVMCreateAdmissionRefusal(t *testing.T) {
 	}
 }
 
+func TestVMCreateRefusalIdempotentReplay(t *testing.T) {
+	// SPEC §14 / AT-006: a repeated identical request returns the original
+	// outcome. When the original was an admission refusal, the replay must
+	// return the same failed operation AND the refusal error — without
+	// re-running admission, even if capacity has since freed.
+	st := openStore(t)
+	key := "refused-once"
+	input := store.CreateVMInput{
+		VMID:             testUUID(3),
+		Name:             "echo",
+		Owner:            "test-owner",
+		TemplateID:       "tmpl-001",
+		TemplateDigest:   "sha256:abc",
+		VCPUCount:        2,
+		MemoryMiB:        2048,
+		RootDiskMiB:      8192,
+		WorkspaceDiskMiB: 10240,
+		MemoryTotalMiB:   2048 + 768,
+		NetworkProfile:   "transport",
+		NetworkPolicyID:  "transport-public-web",
+		Labels:           map[string]string{},
+		Kind:             "vm.create",
+		IdempotencyKey:   &key,
+		RequestHash:      strings.Repeat("f", 64),
+		Admit: func(store.ReservationTotals) error {
+			return &store.AdmissionRefusal{Cause: "insufficient_capacity", Message: "host RAM full"}
+		},
+	}
+	_, op1, err := st.CreateVMWithOperation(t.Context(), input)
+	var ar *store.AdmissionRefusal
+	if !errors.As(err, &ar) || op1 == nil {
+		t.Fatalf("setup: err=%v op=%v", err, op1)
+	}
+
+	// Capacity has "freed": this Admit would allow. It must not be consulted.
+	input.Admit = func(store.ReservationTotals) error {
+		t.Error("Admit re-ran on idempotent replay of a refusal")
+		return nil
+	}
+	vm, op2, err := st.CreateVMWithOperation(t.Context(), input)
+	if vm != nil {
+		t.Errorf("replayed refusal produced a vm: %+v", vm)
+	}
+	if op2 == nil || op2.OperationID != op1.OperationID {
+		t.Fatalf("replay op = %+v, want operation %d", op2, op1.OperationID)
+	}
+	ar = nil
+	if !errors.As(err, &ar) {
+		t.Fatalf("replay error = %v, want *AdmissionRefusal", err)
+	}
+	if ar.Cause != "insufficient_capacity" || ar.Message != "host RAM full" {
+		t.Errorf("replayed refusal = %+v, want original cause and message", ar)
+	}
+	vms, err := st.ListVMs(t.Context(), store.VMQuery{})
+	if err != nil || len(vms) != 0 {
+		t.Errorf("after replay: vms=%d err=%v, want 0 rows", len(vms), err)
+	}
+}
+
 func TestVMConcurrentAdmission(t *testing.T) {
 	// AT-012: 10 goroutines, Admit allows only while ActiveVMs < 3.
 	// Exactly 3 admitted, 7 refused; totals consistent.

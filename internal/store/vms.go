@@ -35,6 +35,21 @@ func (a *AdmissionRefusal) Error() string {
 	return fmt.Sprintf("admission refused: %s: %s", a.Cause, a.Message)
 }
 
+// replayedRefusal reconstructs the original refusal outcome from its durable
+// operation, for idempotent replays of a refused create. The operation row is
+// the source of truth; only rows our own refusal path wrote reach here, so a
+// missing cause is reported as the storage inconsistency it would be.
+func replayedRefusal(op *Operation) error {
+	if op.State != "failed" || op.ErrorCause == nil {
+		return fmt.Errorf("operation %d has no vm and no recorded refusal: state %q", op.OperationID, op.State)
+	}
+	msg := ""
+	if op.ErrorMessage != nil {
+		msg = *op.ErrorMessage
+	}
+	return &AdmissionRefusal{Cause: *op.ErrorCause, Message: msg}
+}
+
 // RevisionMismatchError carries the revision that was current when the
 // conflict was detected, so callers can retry with a fresh read.
 type RevisionMismatchError struct {
@@ -255,7 +270,11 @@ func (s *Store) CreateVMWithOperation(ctx context.Context, in CreateVMInput) (*V
 			}
 			// Replay: load the existing VM and operation.
 			var existingVMID sql.NullString
-			tx.QueryRowContext(ctx, `SELECT vm_id FROM operations WHERE operation_id = ?`, existingOpID).Scan(&existingVMID) //nolint:errcheck
+			if err := tx.QueryRowContext(ctx,
+				`SELECT vm_id FROM operations WHERE operation_id = ?`, existingOpID,
+			).Scan(&existingVMID); err != nil {
+				return nil, nil, fmt.Errorf("replay vm lookup: %w", err)
+			}
 			if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
 				return nil, nil, fmt.Errorf("rollback replay: %w", err)
 			}
@@ -264,7 +283,11 @@ func (s *Store) CreateVMWithOperation(ctx context.Context, in CreateVMInput) (*V
 				return nil, nil, err
 			}
 			if !existingVMID.Valid {
-				return nil, op, nil
+				// The original request was refused at admission. A repeated
+				// identical request returns the original outcome (SPEC §14),
+				// reconstructed from the durable operation — admission is not
+				// re-run; a fresh attempt needs a fresh idempotency key.
+				return nil, op, replayedRefusal(op)
 			}
 			vm, err := s.GetVM(ctx, existingVMID.String)
 			if err != nil {
@@ -300,7 +323,7 @@ func (s *Store) CreateVMWithOperation(ctx context.Context, in CreateVMInput) (*V
 			return nil, nil, fmt.Errorf("insert failed operation: %w", err)
 		}
 		opID, _ := res.LastInsertId()
-		s.appendSystemInTx(ctx, tx, s.systemEnvelope("operation.state_changed", "registry", notApplicableQuality(), map[string]any{ //nolint:errcheck
+		if _, err := s.appendSystemInTx(ctx, tx, s.systemEnvelope("operation.state_changed", "registry", notApplicableQuality(), map[string]any{
 			"operation_id": strconv.FormatInt(opID, 10),
 			"kind":         in.Kind,
 			"vm_id":        nil,
@@ -308,7 +331,9 @@ func (s *Store) CreateVMWithOperation(ctx context.Context, in CreateVMInput) (*V
 			"state":        "failed",
 			"attempt":      1,
 			"error":        map[string]any{"cause": refusal.Cause, "message": refusal.Message},
-		}))
+		})); err != nil {
+			return nil, nil, fmt.Errorf("append refusal event: %w", err)
+		}
 
 		op, err := scanOperationInTx(ctx, tx, opID)
 		if err != nil {
