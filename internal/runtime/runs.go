@@ -356,9 +356,17 @@ func (m *Manager) postConclude(run *store.Run) {
 		m.stopVMAfterRun(run.VMID)
 	}
 
-	// Enqueue report generation (Task 7 wires the real generator).
+	// Enqueue report generation in a tracked goroutine so Close()'s wg.Wait()
+	// drains it before cancelling context. wg.Add precedes the go statement per
+	// the goroutine discipline rule (gotchas.md).
 	if m.reportGen != nil {
-		m.reportGen(run.RunID)
+		gen := m.reportGen
+		runID := run.RunID
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			gen(runID)
+		}()
 	}
 }
 

@@ -816,8 +816,11 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 // reconcileRuns is the run portion of Reconcile. It processes two categories:
 //  1. Non-terminal runs (pending/running/concluding) whose VM is no longer live
 //     → conclude inconclusive with the interrupted reason (AT-093).
-//  2. Terminal runs with no stored report and no running report operation
-//     → re-enqueue report generation (R7).
+//  2. Terminal runs with no stored report and no running/pending report operation
+//     → re-enqueue report generation (R7). Guard uses HasRunningReportOp
+//     (store.report.go) which queries for kind=run.report_generate, state IN
+//     (running, pending). Any previously running ops are failed by category 1's
+//     reconcile before this check runs.
 func (m *Manager) reconcileRuns(ctx context.Context) error {
 	// Category 1: active runs whose VM is no longer live.
 	activeRuns, err := m.st.ListRunsInPhases(ctx, "pending", "running", "concluding")
@@ -859,11 +862,21 @@ func (m *Manager) reconcileRuns(ctx context.Context) error {
 	}
 	for _, run := range terminalRuns {
 		if _, err := m.st.GetRunReport(ctx, run.RunID); errors.Is(err, store.ErrReportNotFound) {
-			// No report stored — re-enqueue.
-			// Guard for "no running report op" deferred to Task 7: the report-
-			// operation kind does not exist until Task 7 wires the real generator.
-			// Double-enqueue is safe per R7 (generation is deterministic and
-			// idempotent), so the cost of a spurious re-enqueue is bounded.
+			// No report stored. Check whether a report op is already running so we
+			// don't pile up duplicate ops (guard closed in Task 7 now that the
+			// run.report_generate op kind exists and HasRunningReportOp queries it).
+			// Note: category 1 above has already failed any previously-running ops,
+			// so this guard catches only ops created by a concurrent goroutine, not
+			// stale ones from the previous controller run.
+			hasOp, err := m.st.HasRunningReportOp(ctx, run.RunID)
+			if err == nil && hasOp {
+				continue // already in flight; skip
+			}
+			// Call the generator directly: reconcile runs synchronously at startup,
+			// before any external requests arrive, so blocking here is safe and keeps
+			// the test's enqueued-check simple. The real generator (MakeReportGenFn)
+			// is async internally via its own goroutine in MakeReportGenFn; here we
+			// just call the wrapper that is assigned to m.reportGen.
 			m.reportGen(run.RunID)
 		}
 	}

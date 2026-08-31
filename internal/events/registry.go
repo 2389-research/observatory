@@ -169,6 +169,39 @@ var registry = []KindInfo{
 			"rejection is bounded and durable; the refused payload is not retained",
 		},
 	},
+	// net.flow, dns, and policy families: reserved for the network inspection
+	// subsystem (L1). Registered now so run-report reproduce_queries are valid
+	// today (zero counts are honest); actual ingress awaits the network emitter.
+	{
+		Kind:          "net.flow.observed",
+		Family:        "net.flow",
+		SchemaVersion: 1,
+		Provenance:    HostObserved,
+		Semantics:     "A network flow was observed for the VM. Reserved for the network inspection subsystem; not yet emitted in this build.",
+		Caveats: []string{
+			"not emitted in the portable core; queries return zero results until the network subsystem lands",
+		},
+	},
+	{
+		Kind:          "dns.query",
+		Family:        "dns",
+		SchemaVersion: 1,
+		Provenance:    HostObserved,
+		Semantics:     "A DNS query was observed for the VM. Reserved for the network inspection subsystem; not yet emitted in this build.",
+		Caveats: []string{
+			"not emitted in the portable core; queries return zero results until the network subsystem lands",
+		},
+	},
+	{
+		Kind:          "policy.denial",
+		Family:        "policy",
+		SchemaVersion: 1,
+		Provenance:    HostObserved,
+		Semantics:     "A network policy denial was observed for the VM. Reserved for the network inspection subsystem; not yet emitted in this build.",
+		Caveats: []string{
+			"not emitted in the portable core; queries return zero results until the network subsystem lands",
+		},
+	},
 }
 
 var registryByKind = func() map[string]KindInfo {
