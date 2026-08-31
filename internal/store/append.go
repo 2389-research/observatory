@@ -109,9 +109,24 @@ func (s *Store) appendTx(ctx context.Context, env *events.Envelope, payload, has
 	// Rollback after a successful Commit returns ErrTxDone; nothing to act on.
 	defer func() { _ = tx.Rollback() }()
 
+	res, err := s.appendInTx(ctx, tx, env, payload, hash)
+	if err != nil {
+		return res, err
+	}
+	if err := tx.Commit(); err != nil {
+		return zero, fmt.Errorf("commit append: %w", err)
+	}
+	return res, nil
+}
+
+// appendInTx is the bind/dedup/insert protocol inside a caller-owned
+// transaction, so attention and annotation writes can land atomically with
+// their durable events.
+func (s *Store) appendInTx(ctx context.Context, tx *sql.Tx, env *events.Envelope, payload, hash []byte) (AppendResult, error) {
+	var zero AppendResult
 	var boundVM sql.NullString
 	streamKnown := true
-	err = tx.QueryRowContext(ctx,
+	err := tx.QueryRowContext(ctx,
 		`SELECT vm_id FROM streams WHERE source_instance_id = ?`, env.SourceInstanceID,
 	).Scan(&boundVM)
 	switch {
@@ -167,30 +182,60 @@ func (s *Store) appendTx(ctx context.Context, env *events.Envelope, payload, has
 	if err != nil {
 		return zero, fmt.Errorf("read cursor: %w", err)
 	}
-	if err := tx.Commit(); err != nil {
-		return zero, fmt.Errorf("commit append: %w", err)
-	}
 	return AppendResult{EventID: strconv.FormatInt(id, 10)}, nil
+}
+
+// systemEnvelope builds an envelope on the store's own host-wide stream for
+// events the store synthesizes (health, attention, annotations).
+func (s *Store) systemEnvelope(kind, sensor string, quality events.Quality, data map[string]any) *events.Envelope {
+	return &events.Envelope{
+		SchemaVersion:    1,
+		SourceInstanceID: s.instanceID,
+		SourceSeq:        strconv.FormatInt(s.systemSeq.Add(1), 10),
+		Kind:             kind,
+		Provenance:       events.HostObserved,
+		Sensor:           sensor,
+		HostReceivedAt:   events.Timestamp{Time: time.Now().UTC()},
+		Quality:          quality,
+		Data:             data,
+	}
+}
+
+func notApplicableQuality() events.Quality {
+	return events.Quality{
+		PathResolution: events.PathNotApplicable,
+		Attribution:    events.AttributionNotApplicable,
+	}
+}
+
+// appendSystemInTx validates and inserts a store-synthesized envelope inside
+// tx and returns its cursor. Failures propagate; there is no health-event
+// recursion from system appends.
+func (s *Store) appendSystemInTx(ctx context.Context, tx *sql.Tx, env *events.Envelope) (int64, error) {
+	if err := env.Validate(); err != nil {
+		return 0, fmt.Errorf("system envelope %s: %w", env.Kind, err)
+	}
+	payload, err := json.Marshal(env)
+	if err != nil {
+		return 0, fmt.Errorf("marshal system envelope: %w", err)
+	}
+	hash := sha256.Sum256(payload)
+	res, err := s.appendInTx(ctx, tx, env, payload, hash[:])
+	if err != nil {
+		return 0, err
+	}
+	id, err := strconv.ParseInt(res.EventID, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse system event cursor: %w", err)
+	}
+	return id, nil
 }
 
 // withHealth records a host-wide health event about cause and returns cause,
 // joined with the recording error if that fails too. Health events use the
 // store's own stream (host-wide scope) and reference the offender in data.
 func (s *Store) withHealth(ctx context.Context, cause error, kind string, data map[string]any) error {
-	env := &events.Envelope{
-		SchemaVersion:    1,
-		SourceInstanceID: s.instanceID,
-		SourceSeq:        strconv.FormatInt(s.healthSeq.Add(1), 10),
-		Kind:             kind,
-		Provenance:       events.HostObserved,
-		Sensor:           "store",
-		HostReceivedAt:   events.Timestamp{Time: time.Now().UTC()},
-		Quality: events.Quality{
-			PathResolution: events.PathNotApplicable,
-			Attribution:    events.AttributionNotApplicable,
-		},
-		Data: data,
-	}
+	env := s.systemEnvelope(kind, "store", notApplicableQuality(), data)
 	if _, err := s.append(ctx, env, false); err != nil {
 		return errors.Join(cause, fmt.Errorf("record health event %s: %w", kind, err))
 	}

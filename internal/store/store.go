@@ -36,6 +36,44 @@ var migrations = []string{
 		vm_id TEXT,
 		created_at TEXT NOT NULL
 	);`,
+	// v2: the attention queue (a materialized view over attention.* events plus
+	// ack state, SPEC §12.7), annotations, and trigger-engine cursors.
+	`CREATE TABLE attention_items (
+		attention_id INTEGER PRIMARY KEY AUTOINCREMENT,
+		raised_event_id INTEGER NOT NULL,
+		last_event_id INTEGER NOT NULL,
+		vm_id TEXT,
+		run_id TEXT,
+		trigger_class TEXT NOT NULL,
+		severity TEXT NOT NULL,
+		summary TEXT NOT NULL,
+		system_action TEXT NOT NULL,
+		evidence_links TEXT NOT NULL,
+		suggested_actions TEXT NOT NULL,
+		count INTEGER NOT NULL DEFAULT 1,
+		acked INTEGER NOT NULL DEFAULT 0,
+		acked_at TEXT,
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL
+	);
+	CREATE INDEX idx_attention_open ON attention_items (acked, attention_id);
+	CREATE INDEX idx_attention_collapse ON attention_items (trigger_class, vm_id) WHERE acked = 0;
+	CREATE TABLE annotations (
+		annotation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+		target_ref TEXT NOT NULL,
+		author TEXT NOT NULL,
+		text TEXT NOT NULL,
+		tags TEXT NOT NULL,
+		redacted INTEGER NOT NULL DEFAULT 0,
+		redaction_policy_id TEXT,
+		event_id INTEGER NOT NULL,
+		created_at TEXT NOT NULL
+	);
+	CREATE INDEX idx_annotations_ref ON annotations (target_ref, annotation_id);
+	CREATE TABLE engine_cursors (
+		name TEXT PRIMARY KEY,
+		cursor INTEGER NOT NULL
+	);`,
 }
 
 // Store owns one SQLite database. All writes go through the writer pool, which
@@ -45,11 +83,11 @@ type Store struct {
 	path    string
 	writer  *sql.DB
 	readers *sql.DB
-	// instanceID and healthSeq form the stream identity for health events this
-	// store synthesizes (integrity failures, unregistered kinds). A fresh
+	// instanceID and systemSeq form the stream identity for events this store
+	// synthesizes (health records, attention raises, annotations). A fresh
 	// instance per Open is correct: dedup keys never collide across restarts.
 	instanceID string
-	healthSeq  atomic.Int64
+	systemSeq  atomic.Int64
 }
 
 func dsn(path string, params url.Values) string {
