@@ -118,6 +118,13 @@ func NewManager(st *store.Store, rt Runtime, cfg ManagerConfig) (*Manager, error
 // Close waits for all in-flight launch jobs and then releases the manager's
 // context. In-flight jobs run to completion first; cancel only stops newly
 // queued work from starting.
+// Templates returns a copy of the approved template registry, keyed by ID.
+func (m *Manager) Templates() map[string]Template { return m.cfg.Templates }
+
+// Availability delegates to the underlying Runtime. Callers check the returned
+// error for *UnavailableError to surface honest host-status information.
+func (m *Manager) Availability(ctx context.Context) error { return m.rt.Availability(ctx) }
+
 func (m *Manager) Close() {
 	m.wg.Wait()
 	m.cancel()

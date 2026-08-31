@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/2389-research/observatory-v2/internal/events"
+	"github.com/2389-research/observatory-v2/internal/runtime"
 	"github.com/2389-research/observatory-v2/internal/situation"
 	"github.com/2389-research/observatory-v2/internal/store"
 )
@@ -18,10 +19,13 @@ const (
 	basePath   = "/api/v1"
 )
 
-// Server serves the /api/v1 surface over one store and one trigger engine.
+// Server serves the /api/v1 surface over one store, one trigger engine, and
+// the lifecycle manager. The manager is required; future refactors that make
+// it optional should be explicit (not a nil-guard, which hides bugs).
 type Server struct {
 	store    *store.Store
 	engine   *situation.Engine
+	manager  *runtime.Manager
 	mux      *http.ServeMux
 	features map[string]bool
 }
@@ -33,11 +37,12 @@ type route struct {
 	handler http.HandlerFunc // nil marks a specced-but-unbuilt route
 }
 
-// New wires the API over st. Every endpoint in SPEC §14 is present in the
-// table: built ones serve, unbuilt ones answer 501 missing_capability so an
-// agent probing the spec surface is taught, not stonewalled.
-func New(st *store.Store, eng *situation.Engine) http.Handler {
-	s := &Server{store: st, engine: eng, mux: http.NewServeMux()}
+// New wires the API over st, eng, and mgr. Every endpoint in SPEC §14 is
+// present in the table: built ones serve, unbuilt ones answer 501
+// missing_capability so an agent probing the spec surface is taught, not
+// stonewalled.
+func New(st *store.Store, eng *situation.Engine, mgr *runtime.Manager) http.Handler {
+	s := &Server{store: st, engine: eng, manager: mgr, mux: http.NewServeMux()}
 	table := []route{
 		{"GET", "/meta", "meta", s.handleMeta},
 		{"GET", "/meta/event-kinds", "meta", s.handleEventKinds},
@@ -47,15 +52,17 @@ func New(st *store.Store, eng *situation.Engine) http.Handler {
 		{"POST", "/attention/{id}/ack", "attention", s.handleAttentionAck},
 		{"POST", "/annotations", "annotations", s.handleAnnotationsCreate},
 		{"GET", "/annotations", "annotations", s.handleAnnotationsList},
+		{"GET", "/host/status", "host_status", s.handleHostStatus},
+		{"GET", "/templates", "templates", s.handleTemplates},
+		{"POST", "/vms", "vms", s.handleCreateVM},
+		{"GET", "/vms", "vms", s.handleListVMs},
+		{"GET", "/vms/{id}", "vms", s.handleGetVM},
+		{"POST", "/vms/{id}/actions", "vms", s.handleVMAction},
+		{"DELETE", "/vms/{id}", "vms", s.handleDeleteVM},
+		{"GET", "/operations/{id}", "operations", s.handleGetOperation},
 
 		{"", "/events/stream", "events_stream", nil},
-		{"", "/host/status", "host_status", nil},
-		{"", "/templates", "templates", nil},
-		{"", "/vms", "vms", nil},
-		{"", "/vms/{id}", "vms", nil},
-		{"", "/vms/{id}/actions", "vms", nil},
 		{"", "/vm-batches", "vm_batches", nil},
-		{"", "/operations/{id}", "operations", nil},
 		{"", "/vms/{id}/terminals", "terminals", nil},
 		{"", "/terminals/{id}", "terminals", nil},
 		{"", "/terminals/{id}/stream", "terminals", nil},
@@ -174,6 +181,9 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 			"situation":   basePath + "/situation",
 			"attention":   basePath + "/attention",
 			"annotations": basePath + "/annotations",
+			"host_status": basePath + "/host/status",
+			"templates":   basePath + "/templates",
+			"vms":         basePath + "/vms",
 		},
 	})
 }

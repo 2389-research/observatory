@@ -15,7 +15,10 @@ import (
 	"time"
 
 	"github.com/2389-research/observatory-v2/internal/api"
+	"github.com/2389-research/observatory-v2/internal/config"
 	"github.com/2389-research/observatory-v2/internal/events"
+	"github.com/2389-research/observatory-v2/internal/runtime"
+	"github.com/2389-research/observatory-v2/internal/runtime/runtimetest"
 	"github.com/2389-research/observatory-v2/internal/situation"
 	"github.com/2389-research/observatory-v2/internal/store"
 )
@@ -38,7 +41,18 @@ func newServer(t *testing.T) (*httptest.Server, *store.Store) {
 		CollapseDuplicates:        true,
 		SituationMaxResponseBytes: 65536,
 	})
-	srv := httptest.NewServer(api.New(st, eng))
+	mgr, err := runtime.NewManager(st, runtimetest.NewFake(), runtime.ManagerConfig{
+		Admission:  config.Admission{},
+		VMDefaults: config.VMDefaults{},
+		Owner:      "local_operator",
+		Templates:  map[string]runtime.Template{},
+		Host:       runtime.HostResources{TotalMemoryMiB: 8192, CPUCores: 4, StateDiskFreeMiB: 100 * 1024},
+	})
+	if err != nil {
+		t.Fatalf("create manager: %v", err)
+	}
+	t.Cleanup(func() { mgr.Close() })
+	srv := httptest.NewServer(api.New(st, eng, mgr))
 	t.Cleanup(srv.Close)
 	return srv, st
 }
@@ -127,7 +141,8 @@ func TestMetaIsHonest(t *testing.T) {
 	for feature, want := range map[string]bool{
 		"meta": true, "events": true,
 		"situation": true, "attention": true, "annotations": true,
-		"vms": false, "runs": false, "terminals": false, "execs": false,
+		"host_status": true, "templates": true, "vms": true, "operations": true,
+		"runs": false, "terminals": false, "execs": false,
 		"events_stream": false,
 	} {
 		got, present := meta.Features[feature]
@@ -302,7 +317,7 @@ func TestUnbuiltEndpointsTeachCapability(t *testing.T) {
 	for _, probe := range []struct {
 		method, path, feature string
 	}{
-		{http.MethodPost, "/api/v1/vms", "vms"},
+		{http.MethodGet, "/api/v1/vm-batches", "vm_batches"},
 		{http.MethodGet, "/api/v1/runs", "runs"},
 		{http.MethodGet, "/api/v1/vms/" + testUUID(1) + "/coverage", "coverage"},
 	} {

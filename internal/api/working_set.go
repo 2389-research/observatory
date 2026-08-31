@@ -113,28 +113,75 @@ type situationWatch struct {
 }
 
 type situationHost struct {
-	VMsRunning int            `json:"vms_running"`
-	VMsTotal   int            `json:"vms_total"`
-	Watch      situationWatch `json:"watch"`
+	VMsRunning      int            `json:"vms_running"`
+	VMsTotal        int            `json:"vms_total"`
+	CapacityFreeMiB int64          `json:"capacity_free_mib"`
+	Watch           situationWatch `json:"watch"`
 }
 
 type situationResponse struct {
-	AsOfCursor    string           `json:"as_of_cursor"`
-	SinceCursor   string           `json:"since_cursor,omitempty"`
-	Quiet         bool             `json:"quiet"`
-	Host          situationHost    `json:"host"`
-	ChangedVMs    []map[string]any `json:"changed_vms"`
-	AttentionHead []wireAttention  `json:"attention_head"`
+	AsOfCursor    string          `json:"as_of_cursor"`
+	SinceCursor   string          `json:"since_cursor,omitempty"`
+	Quiet         bool            `json:"quiet"`
+	Host          situationHost   `json:"host"`
+	ChangedVMs    []wireChangedVM `json:"changed_vms"`
+	AttentionHead []wireAttention `json:"attention_head"`
 }
 
 func (s *Server) handleSituation(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	if !s.evaluate(w, r) {
 		return
 	}
-	snap, err := s.engine.Snapshot(r.Context(), r.URL.Query().Get("since"))
+	since := r.URL.Query().Get("since")
+	snap, err := s.engine.Snapshot(ctx, since)
 	if err != nil {
 		writeQueryError(w, err)
 		return
+	}
+
+	// VM counts from the registry (real accounting replaces the P2 zeros).
+	vmCounts, err := s.store.CountVMsByObservedState(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, Error{
+			Code: "internal", Message: "vm count query failed", Retryable: true, Cause: "storage_failure",
+		})
+		return
+	}
+	vmRunning := vmCounts["running"]
+	vmTotal := 0
+	for state, count := range vmCounts {
+		if state != "deleted" {
+			vmTotal += count
+		}
+	}
+
+	// Capacity from the admission policy — real accounting closes the P2 deviation.
+	cap, err := s.manager.Capacity(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, Error{
+			Code: "internal", Message: "capacity query failed", Retryable: true, Cause: "storage_failure",
+		})
+		return
+	}
+
+	// changed_vms: populated only on since requests; a full-fleet dump belongs
+	// to GET /vms. The delta is bounded to 50 entries; byte-bound sheds first
+	// attention_head, then changed_vms if the response is still too large.
+	changedVMs := []wireChangedVM{}
+	if since != "" {
+		sinceID, _ := strconv.ParseInt(since, 10, 64) // already validated by engine.Snapshot
+		const changedVMsLimit = 50
+		changed, err := s.store.ChangedVMs(ctx, sinceID, changedVMsLimit)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, Error{
+				Code: "internal", Message: "changed_vms query failed", Retryable: true, Cause: "storage_failure",
+			})
+			return
+		}
+		for _, vm := range changed {
+			changedVMs = append(changedVMs, renderChangedVM(vm))
+		}
 	}
 
 	resp := situationResponse{
@@ -142,21 +189,21 @@ func (s *Server) handleSituation(w http.ResponseWriter, r *http.Request) {
 		SinceCursor: snap.SinceCursor,
 		Quiet:       snap.Quiet,
 		Host: situationHost{
-			// Zero VMs is this host's truth until the VM manager exists;
-			// capacity_free_mib is omitted rather than invented.
-			VMsRunning: snap.VMsRunning,
-			VMsTotal:   snap.VMsTotal,
+			VMsRunning:      vmRunning,
+			VMsTotal:        vmTotal,
+			CapacityFreeMiB: cap.FreeMemoryMiB,
 			Watch: situationWatch{
 				TriggerClassesActive: snap.ActiveClasses,
 				SensorsDegraded:      snap.SensorsDegraded,
 			},
 		},
-		ChangedVMs:    []map[string]any{},
+		ChangedVMs:    changedVMs,
 		AttentionHead: renderAttentionList(snap.Head),
 	}
 
-	// Bounded by config (P-01): shed head items, never the watch scope. The
-	// full queue stays reachable via GET /attention.
+	// Bounded by config (P-01): shed attention_head first (full queue is
+	// behind GET /attention), then changed_vms (full delta behind GET /vms).
+	// Never shed the watch scope — a truncated watch scope would violate P-03.
 	maxBytes := s.engine.Config().SituationMaxResponseBytes
 	for {
 		raw, err := json.Marshal(resp)
@@ -167,13 +214,23 @@ func (s *Server) handleSituation(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		if maxBytes <= 0 || int64(len(raw)) <= maxBytes || len(resp.AttentionHead) == 0 {
+		if maxBytes <= 0 || int64(len(raw)) <= maxBytes {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(raw)
 			return
 		}
-		resp.AttentionHead = resp.AttentionHead[:len(resp.AttentionHead)/2]
+		if len(resp.AttentionHead) > 0 {
+			resp.AttentionHead = resp.AttentionHead[:len(resp.AttentionHead)/2]
+		} else if len(resp.ChangedVMs) > 0 {
+			resp.ChangedVMs = resp.ChangedVMs[:len(resp.ChangedVMs)/2]
+		} else {
+			// Nothing left to shed; emit as-is (watch scope always included).
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(raw)
+			return
+		}
 	}
 }
 

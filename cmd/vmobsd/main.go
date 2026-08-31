@@ -18,6 +18,7 @@ import (
 
 	"github.com/2389-research/observatory-v2/internal/api"
 	"github.com/2389-research/observatory-v2/internal/config"
+	"github.com/2389-research/observatory-v2/internal/runtime"
 	"github.com/2389-research/observatory-v2/internal/situation"
 	"github.com/2389-research/observatory-v2/internal/store"
 )
@@ -85,8 +86,38 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready f
 		CollapseDuplicates:        cfg.AgentInterface.AttentionCollapseDuplicates,
 		SituationMaxResponseBytes: cfg.AgentInterface.SituationMaxResponseBytes,
 	})
+
+	// Templates: missing directory = empty registry (a host with no approved
+	// templates is a truthful state; this is not an error on a dev host).
+	tpls, err := runtime.LoadTemplates(cfg.Paths.ApprovedTemplates)
+	if err != nil {
+		return fmt.Errorf("load templates: %w", err)
+	}
+
+	// Probe host resources from the database directory; that directory must
+	// exist (we just called MkdirAll above). On macOS /var/lib/vmobs will not
+	// exist, but the temp dir created by MkdirAll works fine for dev runs.
+	host, err := runtime.ProbeHost(filepath.Dir(cfg.Storage.Database))
+	if err != nil {
+		return fmt.Errorf("probe host resources: %w", err)
+	}
+	logger.Info("host probed", "memory_mib", host.TotalMemoryMiB, "cpus", host.CPUCores, "disk_free_mib", host.StateDiskFreeMiB)
+
+	rt := runtime.ForHost()
+	mgr, err := runtime.NewManager(st, rt, runtime.ManagerConfig{
+		Admission:  cfg.Admission,
+		VMDefaults: cfg.VMDefaults,
+		Owner:      "local_operator", // P5 auth replaces this
+		Templates:  tpls,
+		Host:       host,
+	})
+	if err != nil {
+		return fmt.Errorf("create lifecycle manager: %w", err)
+	}
+	defer mgr.Close()
+
 	srv := &http.Server{
-		Handler:           api.New(st, eng),
+		Handler:           api.New(st, eng, mgr),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	serveErr := make(chan error, 1)

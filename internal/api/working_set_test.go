@@ -15,8 +15,11 @@ import (
 	"time"
 
 	"github.com/2389-research/observatory-v2/internal/api"
+	"github.com/2389-research/observatory-v2/internal/config"
 	"github.com/2389-research/observatory-v2/internal/events"
 	"github.com/2389-research/observatory-v2/internal/redact"
+	"github.com/2389-research/observatory-v2/internal/runtime"
+	"github.com/2389-research/observatory-v2/internal/runtime/runtimetest"
 	"github.com/2389-research/observatory-v2/internal/situation"
 	"github.com/2389-research/observatory-v2/internal/store"
 )
@@ -344,7 +347,18 @@ func TestSituationResponseByteBound(t *testing.T) {
 		CollapseDuplicates:        true,
 		SituationMaxResponseBytes: 700,
 	})
-	srv := httptest.NewServer(api.New(st, eng))
+	mgr, err := runtime.NewManager(st, runtimetest.NewFake(), runtime.ManagerConfig{
+		Admission:  config.Admission{},
+		VMDefaults: config.VMDefaults{},
+		Owner:      "local_operator",
+		Templates:  map[string]runtime.Template{},
+		Host:       runtime.HostResources{TotalMemoryMiB: 8192, CPUCores: 4, StateDiskFreeMiB: 100 * 1024},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { mgr.Close() })
+	srv := httptest.NewServer(api.New(st, eng, mgr))
 	t.Cleanup(srv.Close)
 
 	// Distinct VMs so items do not collapse; the head alone would exceed the

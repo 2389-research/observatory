@@ -13,7 +13,10 @@ import (
 	"time"
 
 	"github.com/2389-research/observatory-v2/internal/api"
+	"github.com/2389-research/observatory-v2/internal/config"
 	"github.com/2389-research/observatory-v2/internal/events"
+	"github.com/2389-research/observatory-v2/internal/runtime"
+	"github.com/2389-research/observatory-v2/internal/runtime/runtimetest"
 	"github.com/2389-research/observatory-v2/internal/situation"
 	"github.com/2389-research/observatory-v2/internal/store"
 )
@@ -31,7 +34,18 @@ func newServer(t *testing.T) (*httptest.Server, *store.Store) {
 		CollapseDuplicates:        true,
 		SituationMaxResponseBytes: 65536,
 	})
-	srv := httptest.NewServer(api.New(st, eng))
+	mgr, err := runtime.NewManager(st, runtimetest.NewFake(), runtime.ManagerConfig{
+		Admission:  config.Admission{},
+		VMDefaults: config.VMDefaults{},
+		Owner:      "local_operator",
+		Templates:  map[string]runtime.Template{},
+		Host:       runtime.HostResources{TotalMemoryMiB: 8192, CPUCores: 4, StateDiskFreeMiB: 100 * 1024},
+	})
+	if err != nil {
+		t.Fatalf("create manager: %v", err)
+	}
+	t.Cleanup(func() { mgr.Close() })
+	srv := httptest.NewServer(api.New(st, eng, mgr))
 	t.Cleanup(srv.Close)
 	return srv, st
 }
@@ -194,7 +208,7 @@ func TestRawAPIEscapeHatch(t *testing.T) {
 	}
 
 	// A specced-but-unbuilt endpoint is a structured failure, not transport.
-	code, _, stderr := runCLI(t, "--api", srv.URL, "api", "POST", "/api/v1/vms")
+	code, _, stderr := runCLI(t, "--api", srv.URL, "api", "GET", "/api/v1/runs")
 	if code != exitAPIError {
 		t.Fatalf("501 probe: exit %d, stderr: %s", code, stderr)
 	}
