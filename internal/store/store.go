@@ -171,6 +171,7 @@ var migrations = []string{
 		reason TEXT NOT NULL DEFAULT '',
 		result_json TEXT NOT NULL DEFAULT '',
 		result_status TEXT NOT NULL DEFAULT '',
+		progress_seq INTEGER NOT NULL DEFAULT 0,
 		idempotency_key TEXT,
 		request_hash TEXT NOT NULL,
 		created_event_id INTEGER NOT NULL,

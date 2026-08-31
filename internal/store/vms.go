@@ -176,6 +176,16 @@ type ReservationTotals struct {
 
 // --- inputs ---
 
+// RunAttachment is an optional declarative run attached to a VM at creation
+// time. When non-nil, CreateVMWithOperation creates the run (phase pending) in
+// the same tx. The VM create's idempotency key covers the whole submission.
+type RunAttachment struct {
+	Goal           string
+	CriteriaType   string // exec_exit_zero | guest_result | operator_verdict
+	OnCompletion   string // keep_running | stop
+	ProgressEvents bool
+}
+
 // CreateVMInput carries everything needed to atomically create a VM record,
 // reserve capacity, and open an operation — all in one transaction.
 type CreateVMInput struct {
@@ -196,6 +206,7 @@ type CreateVMInput struct {
 	IdempotencyKey   *string                       // nil means no idempotency tracking for this call
 	RequestHash      string                        // hex sha256 of the canonical request
 	Admit            func(ReservationTotals) error // evaluated inside the tx
+	Run              *RunAttachment                // nil = no launch-attached run
 }
 
 // TransitionInput carries everything needed to advance a VM's lifecycle state.
@@ -414,6 +425,24 @@ func (s *Store) CreateVMWithOperation(ctx context.Context, in CreateVMInput) (*V
 		"attempt":      1,
 	})); err != nil {
 		return nil, nil, false, err
+	}
+
+	// Launch-attached run: create in the same tx so the whole submission is
+	// atomic. On idempotent replay the run is returned via RunForVM, not here.
+	if in.Run != nil {
+		if err := s.createRunInTx(ctx, tx, CreateRunInput{
+			VMID:           in.VMID,
+			Owner:          in.Owner,
+			Goal:           in.Run.Goal,
+			CriteriaType:   in.Run.CriteriaType,
+			OnCompletion:   in.Run.OnCompletion,
+			ProgressEvents: in.Run.ProgressEvents,
+			InitialPhase:   "pending",
+			// No idempotency key on the run itself — the VM create's key covers
+			// the whole submission (brief requirement).
+		}); err != nil {
+			return nil, nil, false, fmt.Errorf("create launch-attached run: %w", err)
+		}
 	}
 
 	vm, err := scanVMInTx(ctx, tx, in.VMID)

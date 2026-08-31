@@ -41,6 +41,7 @@ type BatchMemberInput struct {
 	NetworkProfile   string
 	NetworkPolicyID  string
 	Labels           map[string]string
+	Run              *RunAttachment // nil = no launch-attached run for this member
 }
 
 // BatchMemberResult is one member's outcome after CreateVMBatch.
@@ -409,6 +410,21 @@ func (s *Store) insertOneMember(ctx context.Context, tx *sql.Tx, batchID int64, 
 		"attempt":      1,
 	})); err != nil {
 		return nil, fmt.Errorf("member %d op event: %w", pos, err)
+	}
+
+	// Launch-attached run for this batch member (optional).
+	if m.Run != nil {
+		if err := s.createRunInTx(ctx, tx, CreateRunInput{
+			VMID:           m.VMID,
+			Owner:          owner,
+			Goal:           m.Run.Goal,
+			CriteriaType:   m.Run.CriteriaType,
+			OnCompletion:   m.Run.OnCompletion,
+			ProgressEvents: m.Run.ProgressEvents,
+			InitialPhase:   "pending",
+		}); err != nil {
+			return nil, fmt.Errorf("member %d create run: %w", pos, err)
+		}
 	}
 
 	// vm_batch_members row.
