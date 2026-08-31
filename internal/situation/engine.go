@@ -46,25 +46,48 @@ func (e *Engine) Config() Config { return e.cfg }
 // rule maps one event kind to the attention it deserves. Summaries state what
 // happened; system actions state what the system already did — both from the
 // record, never speculation.
+// match is an optional predicate: nil means "match all events of this kind".
 type rule struct {
 	class        string
 	severity     string
+	match        func(env *events.Envelope) bool
 	summary      func(env *events.Envelope) string
 	systemAction string
 }
 
-// rulesByKind is the implemented trigger set. Classes configured but absent
+// reconciliationReasons are the reasons the controller uses when cleaning up
+// state after a restart. They distinguish expected reconciliation from genuine
+// unexpected failures so both can fire distinct trigger classes.
+var reconciliationReasons = map[string]bool{
+	"controller_restart":         true,
+	"vmm_disappeared_on_restart": true,
+}
+
+// envVMID returns the VM ID from the envelope if set, otherwise from event data.
+// Host-observed lifecycle events carry vm_id in data, not at the envelope level.
+func envVMID(env *events.Envelope) *string {
+	if env.VMID != nil {
+		return env.VMID
+	}
+	if s, ok := env.Data["vm_id"].(string); ok && s != "" {
+		return &s
+	}
+	return nil
+}
+
+// rulesByKind is the implemented trigger set. A kind may have multiple rules
+// when data content determines which class fires. Classes configured but absent
 // here are not watched, and ActiveClasses will not claim they are.
-var rulesByKind = map[string]rule{
-	"telemetry.loss": {
+var rulesByKind = map[string][]rule{
+	"telemetry.loss": {{
 		class:    "telemetry_degraded",
 		severity: store.SeverityNeedsDecision,
 		summary: func(env *events.Envelope) string {
 			return fmt.Sprintf("telemetry loss reported by sensor %q; counts are in the event record", env.Sensor)
 		},
 		systemAction: "recorded the loss as evidence; capture continues",
-	},
-	"telemetry.integrity_failure": {
+	}},
+	"telemetry.integrity_failure": {{
 		class:    "telemetry_degraded",
 		severity: store.SeverityNeedsDecision,
 		summary: func(env *events.Envelope) string {
@@ -75,8 +98,8 @@ var rulesByKind = map[string]rule{
 			return fmt.Sprintf("telemetry stream integrity failure (%s)", failure)
 		},
 		systemAction: "rejected the conflicting append; the original event stands",
-	},
-	"telemetry.unregistered_kind": {
+	}},
+	"telemetry.unregistered_kind": {{
 		class:    "telemetry_degraded",
 		severity: store.SeverityNeedsDecision,
 		summary: func(env *events.Envelope) string {
@@ -84,15 +107,72 @@ var rulesByKind = map[string]rule{
 			return fmt.Sprintf("producer sent unregistered event kind %q", kind)
 		},
 		systemAction: "rejected the append; kinds must be registered before ingest",
+	}},
+
+	// vm.state_changed fires two distinct classes depending on data.reason.
+	"vm.state_changed": {
+		{
+			class:    "lifecycle_failed",
+			severity: store.SeverityNeedsDecision,
+			match: func(env *events.Envelope) bool {
+				to, _ := env.Data["to"].(string)
+				reason, _ := env.Data["reason"].(string)
+				return to == "failed" && !reconciliationReasons[reason]
+			},
+			summary: func(env *events.Envelope) string {
+				vmID, _ := env.Data["vm_id"].(string)
+				from, _ := env.Data["from"].(string)
+				reason, _ := env.Data["reason"].(string)
+				return fmt.Sprintf("VM %s failed from %s: %s", vmID, from, reason)
+			},
+			systemAction: "recorded the failure; VM compute released, history preserved",
+		},
+		{
+			class:    "reconciliation_surprise",
+			severity: store.SeverityNeedsDecision,
+			match: func(env *events.Envelope) bool {
+				reason, _ := env.Data["reason"].(string)
+				return reconciliationReasons[reason]
+			},
+			summary: func(env *events.Envelope) string {
+				vmID, _ := env.Data["vm_id"].(string)
+				reason, _ := env.Data["reason"].(string)
+				return fmt.Sprintf("VM %s found in unexpected state on restart: %s", vmID, reason)
+			},
+			systemAction: "recorded the unexpected state; VM compute released, history preserved",
+		},
 	},
+
+	// operation.state_changed fires when a create is refused due to capacity.
+	"operation.state_changed": {{
+		class:    "capacity_exhausted",
+		severity: store.SeverityNeedsDecision,
+		match: func(env *events.Envelope) bool {
+			state, _ := env.Data["state"].(string)
+			if state != "failed" {
+				return false
+			}
+			errData, _ := env.Data["error"].(map[string]any)
+			cause, _ := errData["cause"].(string)
+			return cause == "insufficient_capacity"
+		},
+		summary: func(env *events.Envelope) string {
+			errData, _ := env.Data["error"].(map[string]any)
+			msg, _ := errData["message"].(string)
+			return fmt.Sprintf("create rejected: capacity exhausted — %s", msg)
+		},
+		systemAction: "rejected the create; no VM or reservation was written",
+	}},
 }
 
 // ActiveClasses is the honest watch scope: configured-enabled AND implemented.
 // Serving a configured-only set would present blind calm as monitored calm (P-03).
 func (e *Engine) ActiveClasses() []string {
 	implemented := map[string]bool{}
-	for _, r := range rulesByKind {
-		implemented[r.class] = true
+	for _, rules := range rulesByKind {
+		for _, r := range rules {
+			implemented[r.class] = true
+		}
 	}
 	var active []string
 	for class, enabled := range e.cfg.Triggers {
@@ -134,25 +214,33 @@ func (e *Engine) Evaluate(ctx context.Context) error {
 				return fmt.Errorf("stored cursor %q does not parse: %w", *env.EventID, err)
 			}
 			cursor = id
-			r, ok := rulesByKind[env.Kind]
-			if !ok || !e.cfg.Triggers[r.class] {
+			rules, ok := rulesByKind[env.Kind]
+			if !ok {
 				continue
 			}
-			if _, err := e.st.RaiseAttention(ctx, store.RaiseInput{
-				TriggerClass: r.class,
-				Severity:     r.severity,
-				VMID:         env.VMID,
-				Summary:      r.summary(env),
-				SystemAction: r.systemAction,
-				EvidenceLinks: []string{
-					fmt.Sprintf("/api/v1/events?after=%d&limit=1", id-1),
-				},
-				Collapse:   e.cfg.CollapseDuplicates,
-				QueueMax:   e.cfg.QueueMaxItems,
-				CursorName: CursorName,
-				CursorTo:   id,
-			}); err != nil {
-				return fmt.Errorf("raise for event %d: %w", id, err)
+			for _, r := range rules {
+				if !e.cfg.Triggers[r.class] {
+					continue
+				}
+				if r.match != nil && !r.match(env) {
+					continue
+				}
+				if _, err := e.st.RaiseAttention(ctx, store.RaiseInput{
+					TriggerClass: r.class,
+					Severity:     r.severity,
+					VMID:         envVMID(env),
+					Summary:      r.summary(env),
+					SystemAction: r.systemAction,
+					EvidenceLinks: []string{
+						fmt.Sprintf("/api/v1/events?after=%d&limit=1", id-1),
+					},
+					Collapse:   e.cfg.CollapseDuplicates,
+					QueueMax:   e.cfg.QueueMaxItems,
+					CursorName: CursorName,
+					CursorTo:   id,
+				}); err != nil {
+					return fmt.Errorf("raise for event %d: %w", id, err)
+				}
 			}
 		}
 		// Cover the trailing non-matching span; a no-op overwrite when the

@@ -112,9 +112,8 @@ func TestSituationEmptyStoreIsMonitoredCalm(t *testing.T) {
 		t.Errorf("situation = %+v, want as_of 0 and quiet", got)
 	}
 	// P-03: quiet must state the watch scope, or calm is indistinguishable
-	// from blindness.
-	if len(got.Host.Watch.TriggerClassesActive) != 1 ||
-		got.Host.Watch.TriggerClassesActive[0] != "telemetry_degraded" {
+	// from blindness. Four classes are now implemented.
+	if len(got.Host.Watch.TriggerClassesActive) != 4 {
 		t.Errorf("watch scope = %v", got.Host.Watch.TriggerClassesActive)
 	}
 	if got.ChangedVMs == nil || len(got.ChangedVMs) != 0 {

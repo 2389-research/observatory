@@ -77,15 +77,23 @@ func breakTelemetry(t *testing.T, s *store.Store, source, seq string) {
 func TestActiveClassesIsEnabledIntersectImplemented(t *testing.T) {
 	s := openStore(t)
 
+	// Four classes are now implemented.
+	wantAll := []string{"capacity_exhausted", "lifecycle_failed", "reconciliation_surprise", "telemetry_degraded"}
 	got := engineOver(s, allTriggers()).ActiveClasses()
-	if len(got) != 1 || got[0] != "telemetry_degraded" {
-		t.Errorf("active = %v, want only telemetry_degraded (the sole implemented class)", got)
+	if len(got) != len(wantAll) {
+		t.Errorf("active = %v, want %v", got, wantAll)
+	} else {
+		for i, c := range wantAll {
+			if got[i] != c {
+				t.Errorf("active[%d] = %q, want %q", i, got[i], c)
+			}
+		}
 	}
 
 	off := allTriggers()
 	off["telemetry_degraded"] = false
-	if got := engineOver(s, off).ActiveClasses(); len(got) != 0 {
-		t.Errorf("disabled class still active: %v", got)
+	if got := engineOver(s, off).ActiveClasses(); len(got) != 3 {
+		t.Errorf("disabled class still active or missing: %v", got)
 	}
 
 	// A configured-but-unknown class never appears: presence would claim a
@@ -210,8 +218,8 @@ func TestSnapshotEmptyStoreIsMonitoredCalm(t *testing.T) {
 		t.Errorf("snapshot = %+v, want as_of 0 and quiet", snap)
 	}
 	// Quiet must carry the watch scope: calm is only meaningful when the
-	// response says who was watching (P-03).
-	if len(snap.ActiveClasses) != 1 || snap.ActiveClasses[0] != "telemetry_degraded" {
+	// response says who was watching (P-03). Now 4 classes are implemented.
+	if len(snap.ActiveClasses) != 4 {
 		t.Errorf("quiet without watch scope: %+v", snap.ActiveClasses)
 	}
 	if snap.VMsRunning != 0 || snap.VMsTotal != 0 || len(snap.Head) != 0 {
@@ -268,5 +276,179 @@ func TestSnapshotSinceDeltaAndOpenAttention(t *testing.T) {
 	// Bad cursor teaches, not 500s.
 	if _, err := eng.Snapshot(ctx, "not-a-cursor"); !errors.Is(err, store.ErrInvalidCursor) {
 		t.Errorf("bad since error = %v", err)
+	}
+}
+
+// makeTestVM creates a VM in "provisioning" state and returns its VMID.
+// Caller is responsible for transitioning further.
+func makeTestVM(t *testing.T, s *store.Store, vmID string) {
+	t.Helper()
+	_, _, err := s.CreateVMWithOperation(t.Context(), store.CreateVMInput{
+		VMID:             vmID,
+		Name:             "trigger-test-vm",
+		Owner:            "local_operator",
+		TemplateID:       "tmpl-test",
+		TemplateDigest:   "sha256:" + fmt.Sprintf("%064d", 0),
+		VCPUCount:        2,
+		MemoryMiB:        2048,
+		MemoryTotalMiB:   2816,
+		RootDiskMiB:      8192,
+		WorkspaceDiskMiB: 10240,
+		Labels:           map[string]string{},
+		Kind:             "vm.create",
+		RequestHash:      vmID,
+		Admit:            func(store.ReservationTotals) error { return nil },
+	})
+	if err != nil {
+		t.Fatalf("makeTestVM: %v", err)
+	}
+}
+
+func TestEvaluateRaisesOnLifecycleFailed(t *testing.T) {
+	// lifecycle_failed fires when a VM transitions to "failed" for a reason
+	// that is NOT a reconciliation reason (unexpected operational failure).
+	s := openStore(t)
+	eng := engineOver(s, allTriggers())
+	ctx := t.Context()
+
+	vmID := testUUID(100)
+	makeTestVM(t, s, vmID)
+
+	stage := "launch"
+	_, err := s.TransitionVM(ctx, store.TransitionInput{
+		VMID:           vmID,
+		To:             "failed",
+		Reason:         "launch_error",
+		OperationID:    0,
+		ReleaseCompute: true,
+		FailureStage:   &stage,
+		FailureReason:  &stage,
+	})
+	if err != nil {
+		t.Fatalf("TransitionVM to failed: %v", err)
+	}
+
+	if err := eng.Evaluate(ctx); err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+
+	items, err := s.ListAttention(ctx, store.AttentionQuery{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, it := range items {
+		if it.TriggerClass == "lifecycle_failed" {
+			found = true
+			if it.Summary == "" || it.SystemAction == "" {
+				t.Errorf("lifecycle_failed item lacks summary/action: %+v", it)
+			}
+		}
+		if it.TriggerClass == "reconciliation_surprise" {
+			t.Errorf("reconciliation_surprise should NOT fire for non-reconciliation reason; item: %+v", it)
+		}
+	}
+	if !found {
+		t.Errorf("lifecycle_failed not raised; items: %+v", items)
+	}
+}
+
+func TestEvaluateRaisesOnReconciliationSurprise(t *testing.T) {
+	// reconciliation_surprise fires when the controller marks a VM failed with
+	// a reconciliation reason (controller_restart or vmm_disappeared_on_restart).
+	s := openStore(t)
+	eng := engineOver(s, allTriggers())
+	ctx := t.Context()
+
+	vmID := testUUID(101)
+	makeTestVM(t, s, vmID)
+
+	stage := "provisioning"
+	_, err := s.TransitionVM(ctx, store.TransitionInput{
+		VMID:           vmID,
+		To:             "failed",
+		Reason:         "controller_restart",
+		OperationID:    0,
+		ReleaseCompute: true,
+		FailureStage:   &stage,
+		FailureReason:  &stage,
+	})
+	if err != nil {
+		t.Fatalf("TransitionVM to failed: %v", err)
+	}
+
+	if err := eng.Evaluate(ctx); err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+
+	items, err := s.ListAttention(ctx, store.AttentionQuery{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, it := range items {
+		if it.TriggerClass == "reconciliation_surprise" {
+			found = true
+		}
+		if it.TriggerClass == "lifecycle_failed" {
+			t.Errorf("lifecycle_failed should NOT fire for reconciliation reason; item: %+v", it)
+		}
+	}
+	if !found {
+		t.Errorf("reconciliation_surprise not raised; items: %+v", items)
+	}
+}
+
+func TestEvaluateRaisesOnCapacityExhausted(t *testing.T) {
+	// capacity_exhausted fires when a create is refused with insufficient_capacity.
+	s := openStore(t)
+	eng := engineOver(s, allTriggers())
+	ctx := t.Context()
+
+	_, _, err := s.CreateVMWithOperation(ctx, store.CreateVMInput{
+		VMID:             testUUID(102),
+		Name:             "over-capacity",
+		Owner:            "local_operator",
+		TemplateID:       "tmpl-test",
+		TemplateDigest:   "sha256:" + fmt.Sprintf("%064d", 0),
+		VCPUCount:        2,
+		MemoryMiB:        2048,
+		MemoryTotalMiB:   2816,
+		RootDiskMiB:      8192,
+		WorkspaceDiskMiB: 10240,
+		Labels:           map[string]string{},
+		Kind:             "vm.create",
+		RequestHash:      testUUID(102),
+		Admit: func(store.ReservationTotals) error {
+			return &store.AdmissionRefusal{
+				Cause:   "insufficient_capacity",
+				Message: "memory: need 2816 MiB, only 0 MiB free",
+			}
+		},
+	})
+	// CreateVMWithOperation returns an error when Admit fails.
+	if err == nil {
+		t.Fatal("expected AdmissionRefusal, got nil")
+	}
+
+	if evalErr := eng.Evaluate(ctx); evalErr != nil {
+		t.Fatalf("evaluate: %v", evalErr)
+	}
+
+	items, err := s.ListAttention(ctx, store.AttentionQuery{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, it := range items {
+		if it.TriggerClass == "capacity_exhausted" {
+			found = true
+			if it.Summary == "" {
+				t.Errorf("capacity_exhausted item has empty summary: %+v", it)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("capacity_exhausted not raised; items: %+v", items)
 	}
 }

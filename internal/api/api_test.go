@@ -147,7 +147,9 @@ func TestMetaIsHonest(t *testing.T) {
 		t.Errorf("working-set limits missing: %v", meta.Limits)
 	}
 	// The active set is enabled-intersect-implemented, never the raw config.
-	if len(meta.AttentionTriggerClasses) != 1 || meta.AttentionTriggerClasses[0] != "telemetry_degraded" {
+	// Four classes are now implemented: capacity_exhausted, lifecycle_failed,
+	// reconciliation_surprise, telemetry_degraded.
+	if len(meta.AttentionTriggerClasses) != 4 {
 		t.Errorf("attention classes = %v, want exactly the implemented+enabled set", meta.AttentionTriggerClasses)
 	}
 	if len(meta.Links) == 0 {
