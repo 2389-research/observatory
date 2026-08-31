@@ -45,6 +45,11 @@ commands:
   meta                      capability manifest of the running daemon
   events [--vm ID] [--kind K] [--after CURSOR] [--limit N]
                             keyset-paged historical events
+  situation [--since CURSOR]
+                            bounded snapshot: watch scope, attention head, as_of cursor
+  attention [--all] [--after N] [--limit N]
+                            the attention queue (--all includes acknowledged items)
+  attention ack ATT-ID      acknowledge one item; durable and idempotent
   api [-d BODY] METHOD PATH raw authenticated request, e.g. api GET /api/v1/meta
 
 flags:
@@ -86,6 +91,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return c.meta()
 	case "events":
 		return c.events(rest[1:])
+	case "situation":
+		return c.situation(rest[1:])
+	case "attention":
+		if len(rest) > 1 && rest[1] == "ack" {
+			return c.attentionAck(rest[2:])
+		}
+		return c.attention(rest[1:])
 	case "api":
 		return c.raw(rest[1:])
 	default:
