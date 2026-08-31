@@ -72,8 +72,8 @@ type wireChangedVM struct {
 	Name            string            `json:"name"`
 	LifecycleState  string            `json:"lifecycle_state"`
 	TelemetryHealth string            `json:"telemetry_health"`
-	ActiveRun       any               `json:"active_run"`     // null until P4 runs exist
-	AttentionOpen   int               `json:"attention_open"` // 0 until per-VM attention query exists
+	ActiveRun       any               `json:"active_run"` // null until P4 runs exist
+	AttentionOpen   int64             `json:"attention_open"`
 	Links           map[string]string `json:"links"`
 }
 
@@ -168,14 +168,14 @@ func renderOperation(op *store.Operation) wireOperation {
 	return w
 }
 
-func renderChangedVM(vm *store.VM) wireChangedVM {
+func renderChangedVM(vm *store.VM, attentionOpen int64) wireChangedVM {
 	return wireChangedVM{
 		VMID:            vm.VMID,
 		Name:            vm.Name,
 		LifecycleState:  vm.ObservedState,
 		TelemetryHealth: "unknown", // honest: no sensors exist yet
 		ActiveRun:       nil,       // null until P4 runs land
-		AttentionOpen:   0,         // per-VM attention query not yet in store
+		AttentionOpen:   attentionOpen,
 		Links: map[string]string{
 			"vm": basePath + "/vms/" + vm.VMID,
 		},

@@ -179,8 +179,18 @@ func (s *Server) handleSituation(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+		var openByVM map[string]int64
+		if len(changed) > 0 {
+			openByVM, err = s.store.CountOpenAttentionByVM(ctx)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, Error{
+					Code: "internal", Message: "attention count query failed", Retryable: true, Cause: "storage_failure",
+				})
+				return
+			}
+		}
 		for _, vm := range changed {
-			changedVMs = append(changedVMs, renderChangedVM(vm))
+			changedVMs = append(changedVMs, renderChangedVM(vm, openByVM[vm.VMID]))
 		}
 	}
 

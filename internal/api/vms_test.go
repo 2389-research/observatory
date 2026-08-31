@@ -257,6 +257,14 @@ func TestCreateVMUnavailableRuntime(t *testing.T) {
 	if e.Cause != "runtime_unavailable" {
 		t.Errorf("cause = %q, want runtime_unavailable", e.Cause)
 	}
+
+	// AT-001: the refusal precedes persistence — no VM row, no operation row.
+	var list map[string]any
+	getJSON(t, srv.URL+"/api/v1/vms", http.StatusOK, &list)
+	if vms, _ := list["vms"].([]any); len(vms) != 0 {
+		t.Errorf("VM persisted after refused create: %v", vms)
+	}
+	doRequest(t, http.MethodGet, srv.URL+"/api/v1/operations/op-000001", nil, http.StatusNotFound, nil)
 }
 
 func TestCreateVMShape(t *testing.T) {
@@ -558,6 +566,65 @@ func TestSituationChangedVMs(t *testing.T) {
 	// telemetry_health must be a known value (not omitted).
 	if entry["telemetry_health"] == nil {
 		t.Error("changed_vm.telemetry_health must be present (P-03 monitored calm)")
+	}
+}
+
+func TestSituationChangedVMsAttentionOpen(t *testing.T) {
+	srv, st, _ := newTemplateServer(t)
+
+	var created map[string]any
+	doRequest(t, http.MethodPost, srv.URL+"/api/v1/vms",
+		map[string]any{"name": "doomed-vm", "template_id": testTemplateDef.TemplateID},
+		http.StatusCreated, &created)
+	opID := created["operation"].(map[string]any)["operation_id"].(string)
+	pollOpState(t, srv.URL, opID, "succeeded")
+	vmID := created["vm"].(map[string]any)["vm_id"].(string)
+
+	// The same transition the manager records when a VMM dies; lifecycle_failed
+	// is enabled in this server's trigger config, so an attention item raises.
+	stage := "runtime"
+	if _, err := st.TransitionVM(t.Context(), store.TransitionInput{
+		VMID:           vmID,
+		To:             "failed",
+		Reason:         "vmm_exited",
+		ReleaseCompute: true,
+		FailureStage:   &stage,
+		FailureReason:  &stage,
+	}); err != nil {
+		t.Fatalf("TransitionVM to failed: %v", err)
+	}
+
+	// Queue truth first: how many open items reference this VM.
+	var attn map[string]any
+	getJSON(t, srv.URL+"/api/v1/attention", http.StatusOK, &attn)
+	open := 0
+	items, _ := attn["items"].([]any)
+	for _, it := range items {
+		m := it.(map[string]any)
+		if v, _ := m["vm_id"].(string); v == vmID && m["acked"] == false {
+			open++
+		}
+	}
+	if open == 0 {
+		t.Fatal("precondition failed: no open attention item for the failed VM")
+	}
+
+	var got map[string]any
+	getJSON(t, srv.URL+"/api/v1/situation?since=0", http.StatusOK, &got)
+	var entry map[string]any
+	changed, _ := got["changed_vms"].([]any)
+	for _, c := range changed {
+		e := c.(map[string]any)
+		if e["vm_id"] == vmID {
+			entry = e
+		}
+	}
+	if entry == nil {
+		t.Fatalf("changed_vms has no entry for %s: %v", vmID, changed)
+	}
+	// attention_open must report the queue's count, not an invented zero.
+	if entry["attention_open"] != float64(open) {
+		t.Errorf("attention_open = %v, want %d (open items in the queue)", entry["attention_open"], open)
 	}
 }
 

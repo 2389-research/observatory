@@ -295,3 +295,54 @@ func TestEngineCursorAdvancesWithRaise(t *testing.T) {
 		t.Errorf("cursor after advance = %d", c)
 	}
 }
+
+func TestCountOpenAttentionByVM(t *testing.T) {
+	s := openStore(t)
+	ctx := t.Context()
+	vmA, vmB := testUUID(1), testUUID(2)
+
+	// Two classes on A (collapse is per class+vm), one on B, one host-scoped.
+	itemA, err := s.RaiseAttention(ctx, raiseInput("telemetry_degraded", &vmA))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RaiseAttention(ctx, raiseInput("lifecycle_failed", &vmA)); err != nil {
+		t.Fatal(err)
+	}
+	itemB, err := s.RaiseAttention(ctx, raiseInput("telemetry_degraded", &vmB))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RaiseAttention(ctx, raiseInput("capacity_exhausted", nil)); err != nil {
+		t.Fatal(err)
+	}
+
+	counts, err := s.CountOpenAttentionByVM(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts[vmA] != 2 || counts[vmB] != 1 {
+		t.Errorf("counts = %v, want %s:2 %s:1", counts, vmA, vmB)
+	}
+	if len(counts) != 2 {
+		t.Errorf("host-scoped item leaked into per-VM counts: %v", counts)
+	}
+
+	// Acked items leave the count; a fully acked VM leaves the map.
+	if _, err := s.AckAttention(ctx, itemA.AttentionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AckAttention(ctx, itemB.AttentionID); err != nil {
+		t.Fatal(err)
+	}
+	counts, err = s.CountOpenAttentionByVM(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts[vmA] != 1 {
+		t.Errorf("count for %s after ack = %d, want 1", vmA, counts[vmA])
+	}
+	if _, present := counts[vmB]; present {
+		t.Errorf("%s still in counts after its only item was acked: %v", vmB, counts)
+	}
+}

@@ -303,6 +303,30 @@ func (s *Store) CountOpenAttention(ctx context.Context) (int64, error) {
 	return n, nil
 }
 
+// CountOpenAttentionByVM reports how many unacknowledged items reference each
+// VM. Host-scoped items (no vm_id) are not in the map.
+func (s *Store) CountOpenAttentionByVM(ctx context.Context) (map[string]int64, error) {
+	rows, err := s.readers.QueryContext(ctx,
+		`SELECT vm_id, COUNT(*) FROM attention_items WHERE acked = 0 AND vm_id IS NOT NULL GROUP BY vm_id`)
+	if err != nil {
+		return nil, fmt.Errorf("count open attention by vm: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]int64{}
+	for rows.Next() {
+		var vmID string
+		var n int64
+		if err := rows.Scan(&vmID, &n); err != nil {
+			return nil, fmt.Errorf("scan attention count: %w", err)
+		}
+		out[vmID] = n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("count open attention by vm: %w", err)
+	}
+	return out, nil
+}
+
 // ReadEngineCursor returns the persisted cursor for name, 0 if never advanced.
 func (s *Store) ReadEngineCursor(ctx context.Context, name string) (int64, error) {
 	var c int64
