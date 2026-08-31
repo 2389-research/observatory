@@ -349,6 +349,13 @@ func TestCreateVMIdempotentReplay(t *testing.T) {
 		t.Errorf("idempotent replay returned different operation_id: %v vs %v",
 			firstOp["operation_id"], secondOp["operation_id"])
 	}
+	// The replay is marked honestly; the original is not.
+	if _, present := first["is_replay"]; present {
+		t.Errorf("first response carries is_replay = %v, want absent", first["is_replay"])
+	}
+	if second["is_replay"] != true {
+		t.Errorf("second response is_replay = %v, want true", second["is_replay"])
+	}
 }
 
 func TestCreateVMAdmissionRefusal(t *testing.T) {

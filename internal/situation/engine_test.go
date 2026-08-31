@@ -283,7 +283,7 @@ func TestSnapshotSinceDeltaAndOpenAttention(t *testing.T) {
 // Caller is responsible for transitioning further.
 func makeTestVM(t *testing.T, s *store.Store, vmID string) {
 	t.Helper()
-	_, _, err := s.CreateVMWithOperation(t.Context(), store.CreateVMInput{
+	_, _, _, err := s.CreateVMWithOperation(t.Context(), store.CreateVMInput{
 		VMID:             vmID,
 		Name:             "trigger-test-vm",
 		Owner:            "local_operator",
@@ -405,7 +405,7 @@ func TestEvaluateRaisesOnCapacityExhausted(t *testing.T) {
 	eng := engineOver(s, allTriggers())
 	ctx := t.Context()
 
-	_, _, err := s.CreateVMWithOperation(ctx, store.CreateVMInput{
+	_, _, _, err := s.CreateVMWithOperation(ctx, store.CreateVMInput{
 		VMID:             testUUID(102),
 		Name:             "over-capacity",
 		Owner:            "local_operator",

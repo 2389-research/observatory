@@ -169,16 +169,17 @@ type CreateRequest struct {
 }
 
 // CreateVM validates and creates a VM, then asynchronously provisions it.
-// On idempotent replay, returns the stored result without re-provisioning.
-func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*store.VM, *store.Operation, error) {
+// On idempotent replay the bool is true and the stored result is returned
+// without re-provisioning.
+func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*store.VM, *store.Operation, bool, error) {
 	// AT-001: check runtime availability first; nothing persisted on failure.
 	if err := m.rt.Availability(ctx); err != nil {
-		return nil, nil, fmt.Errorf("runtime not available: %w", err)
+		return nil, nil, false, fmt.Errorf("runtime not available: %w", err)
 	}
 
 	// Template lookup.
 	if req.TemplateID == "" {
-		return nil, nil, &ErrInvalidRequest{Reason: "template_id is required"}
+		return nil, nil, false, &ErrInvalidRequest{Reason: "template_id is required"}
 	}
 	tpl, ok := m.cfg.Templates[req.TemplateID]
 	if !ok {
@@ -186,19 +187,19 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*store.VM, *
 		for id := range m.cfg.Templates {
 			known = append(known, id)
 		}
-		return nil, nil, &ErrTemplateUnknown{Requested: req.TemplateID, KnownIDs: known}
+		return nil, nil, false, &ErrTemplateUnknown{Requested: req.TemplateID, KnownIDs: known}
 	}
 
 	// Name validation.
 	if req.Name == "" {
-		return nil, nil, &ErrInvalidRequest{Reason: "name is required"}
+		return nil, nil, false, &ErrInvalidRequest{Reason: "name is required"}
 	}
 	if len(req.Name) > 128 {
-		return nil, nil, &ErrInvalidRequest{Reason: "name exceeds 128 bytes"}
+		return nil, nil, false, &ErrInvalidRequest{Reason: "name exceeds 128 bytes"}
 	}
 	for _, r := range req.Name {
 		if r < ' ' || r > '~' {
-			return nil, nil, &ErrInvalidRequest{Reason: "name contains non-printable characters"}
+			return nil, nil, false, &ErrInvalidRequest{Reason: "name contains non-printable characters"}
 		}
 	}
 
@@ -220,7 +221,7 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*store.VM, *
 		wsDisk = m.cfg.VMDefaults.WorkspaceDiskMiB
 	}
 	if vcpu <= 0 || memMiB <= 0 || rootDisk <= 0 || wsDisk <= 0 {
-		return nil, nil, &ErrInvalidRequest{Reason: "resource values must be positive"}
+		return nil, nil, false, &ErrInvalidRequest{Reason: "resource values must be positive"}
 	}
 
 	memTotal := memMiB + m.cfg.Admission.ReservePerVMHostOverheadMiB
@@ -252,7 +253,7 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*store.VM, *
 		return m.policy.Admit(totals, memTotal, vcpu, diskTotal)
 	}
 
-	vm, op, err := m.st.CreateVMWithOperation(ctx, store.CreateVMInput{
+	vm, op, replayed, err := m.st.CreateVMWithOperation(ctx, store.CreateVMInput{
 		VMID:             vmID,
 		Name:             req.Name,
 		Owner:            m.cfg.Owner,
@@ -272,16 +273,22 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*store.VM, *
 		Admit:            admit,
 	})
 	if err != nil {
-		return vm, op, err
+		return vm, op, replayed, err
 	}
 	if vm == nil {
 		// Idempotent replay of a refused create; op carries the refusal.
-		return nil, op, err
+		return nil, op, replayed, err
+	}
+	if replayed {
+		// Replay of a completed create: return the stored result without
+		// enqueueing another launch. A relaunch could revive a VM that was
+		// stopped after the original create succeeded.
+		return vm, op, true, nil
 	}
 
 	// Admission succeeded — enqueue the async launch job.
 	m.enqueueLaunch(vm, op.OperationID, tpl, vcpu, memMiB, rootDisk, wsDisk)
-	return vm, op, nil
+	return vm, op, false, nil
 }
 
 // enqueueLaunch acquires a semaphore slot and runs the launch job in a goroutine.
@@ -322,9 +329,13 @@ func (m *Manager) runLaunch(vm *store.VM, opID int64, tpl Template, vcpu int, me
 		TemplateDigest:   tpl.Digest,
 	}
 
-	// provisioning → starting
+	// provisioning → starting. The From pin keeps a VM that was stopped while
+	// this job was queued in its stopped state: without it, stopped→starting
+	// is a legal restart edge and the launch would revive it.
+	from := "provisioning"
 	if _, err := m.st.TransitionVM(ctx, store.TransitionInput{
 		VMID:        vmID,
+		From:        &from,
 		To:          "starting",
 		Reason:      "launch",
 		OperationID: opID,
@@ -346,8 +357,10 @@ func (m *Manager) runLaunch(vm *store.VM, opID int64, tpl Template, vcpu int, me
 	}
 
 	// starting → running
+	from = "starting"
 	if _, err := m.st.TransitionVM(ctx, store.TransitionInput{
 		VMID:        vmID,
+		From:        &from,
 		To:          "running",
 		Reason:      "launch_complete",
 		OperationID: opID,
@@ -365,6 +378,7 @@ func (m *Manager) runLaunch(vm *store.VM, opID int64, tpl Template, vcpu int, me
 	errMsg := (*string)(nil)
 	if _, err := m.st.UpdateOperation(ctx, store.OperationUpdate{
 		OperationID:  opID,
+		IfState:      "running",
 		Phase:        "running",
 		State:        "succeeded",
 		ErrorCause:   errCause,
@@ -387,8 +401,11 @@ func (m *Manager) failLaunch(ctx context.Context, vmID string, opID int64, stage
 		ReleaseCompute: true,
 	})
 	cause := "launch_failed"
+	// IfState pins the update to a still-running operation: a batch stop wave
+	// may already have finalized this op, and its verdict must stand.
 	_, _ = m.st.UpdateOperation(ctx, store.OperationUpdate{
 		OperationID:  opID,
+		IfState:      "running",
 		Phase:        stage,
 		State:        "failed",
 		ErrorCause:   &cause,

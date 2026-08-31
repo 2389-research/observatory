@@ -105,7 +105,7 @@ func TestManagerCreateAndLaunchHappyPath(t *testing.T) {
 	fk := runtimetest.NewFake()
 	mgr := newManager(t, st, fk)
 
-	vm, op, err := mgr.CreateVM(t.Context(), createReq("alpha"))
+	vm, op, _, err := mgr.CreateVM(t.Context(), createReq("alpha"))
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
@@ -186,7 +186,7 @@ func TestManagerLaunchFailure(t *testing.T) {
 	}
 	defer mgr2.Close()
 
-	vm, op, createErr := mgr2.CreateVM(t.Context(), createReq("beta"))
+	vm, op, _, createErr := mgr2.CreateVM(t.Context(), createReq("beta"))
 	if createErr != nil {
 		t.Fatalf("CreateVM: %v", createErr)
 	}
@@ -226,7 +226,7 @@ func TestManagerRuntimeUnavailable(t *testing.T) {
 	st := openStoreForManager(t)
 	mgr := newManager(t, st, runtime.ForHost()) // darwin → unavailable
 
-	vm, op, err := mgr.CreateVM(t.Context(), createReq("gamma"))
+	vm, op, _, err := mgr.CreateVM(t.Context(), createReq("gamma"))
 	if err == nil {
 		t.Fatal("expected error from unavailable runtime, got nil")
 	}
@@ -247,7 +247,7 @@ func TestManagerTemplateUnknown(t *testing.T) {
 	st := openStoreForManager(t)
 	mgr := newManager(t, st, runtimetest.NewFake())
 
-	_, _, err := mgr.CreateVM(t.Context(), runtime.CreateRequest{
+	_, _, _, err := mgr.CreateVM(t.Context(), runtime.CreateRequest{
 		Name:       "delta",
 		TemplateID: "tmpl-no-such",
 	})
@@ -268,7 +268,7 @@ func TestManagerDefaultsApplied(t *testing.T) {
 	mgr := newManager(t, st, runtimetest.NewFake())
 
 	// Zero-valued resources should pick up VMDefaults.
-	vm, _, err := mgr.CreateVM(t.Context(), runtime.CreateRequest{
+	vm, _, _, err := mgr.CreateVM(t.Context(), runtime.CreateRequest{
 		Name:       "defaults-check",
 		TemplateID: "tmpl-test",
 		// No VCPUCount, MemoryMiB, etc.
@@ -293,7 +293,7 @@ func TestManagerActionPauseKeepsReservation(t *testing.T) {
 	fk := runtimetest.NewFake()
 	mgr := newManager(t, st, fk)
 
-	vm, _, err := mgr.CreateVM(t.Context(), createReq("pause-test"))
+	vm, _, _, err := mgr.CreateVM(t.Context(), createReq("pause-test"))
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
@@ -325,7 +325,7 @@ func TestManagerStopRecordsGracefulVsForced(t *testing.T) {
 	mgr := newManager(t, st, fk)
 
 	// --- graceful stop ---
-	vm, _, err := mgr.CreateVM(t.Context(), createReq("stop-graceful"))
+	vm, _, _, err := mgr.CreateVM(t.Context(), createReq("stop-graceful"))
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
@@ -358,7 +358,7 @@ func TestManagerStopRecordsGracefulVsForced(t *testing.T) {
 	mgr2, _ := runtime.NewManager(st2, fk2, defaultCfg())
 	defer mgr2.Close()
 
-	vm2, _, _ := mgr2.CreateVM(t.Context(), createReq("stop-forced"))
+	vm2, _, _, _ := mgr2.CreateVM(t.Context(), createReq("stop-forced"))
 	mgr2.Close()
 	fk2.FailNext("Stop", vm2.VMID, &runtimetest.ForcedStop{})
 	_, _, err = mgr2.Action(t.Context(), vm2.VMID, "stop", nil)
@@ -385,7 +385,7 @@ func TestManagerForceStopFromPaused(t *testing.T) {
 	fk := runtimetest.NewFake()
 	mgr := newManager(t, st, fk)
 
-	vm, _, err := mgr.CreateVM(t.Context(), createReq("force-paused"))
+	vm, _, _, err := mgr.CreateVM(t.Context(), createReq("force-paused"))
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
@@ -409,7 +409,7 @@ func TestManagerRevisionMismatch(t *testing.T) {
 	fk := runtimetest.NewFake()
 	mgr := newManager(t, st, fk)
 
-	vm, _, err := mgr.CreateVM(t.Context(), createReq("rev-check"))
+	vm, _, _, err := mgr.CreateVM(t.Context(), createReq("rev-check"))
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
@@ -441,7 +441,7 @@ func TestManagerStopDuringLaunchCleansUp(t *testing.T) {
 	}
 	defer mgr.Close()
 
-	vm, _, err := mgr.CreateVM(t.Context(), createReq("race-stop"))
+	vm, _, _, err := mgr.CreateVM(t.Context(), createReq("race-stop"))
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
@@ -489,7 +489,7 @@ func TestManagerDeleteIdempotency(t *testing.T) {
 	fk := runtimetest.NewFake()
 	mgr := newManager(t, st, fk)
 
-	vm, _, err := mgr.CreateVM(t.Context(), createReq("delete-test"))
+	vm, _, _, err := mgr.CreateVM(t.Context(), createReq("delete-test"))
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
@@ -536,7 +536,7 @@ func TestManagerDeleteLiveVMRequiresForce(t *testing.T) {
 	fk := runtimetest.NewFake()
 	mgr := newManager(t, st, fk)
 
-	vm, _, err := mgr.CreateVM(t.Context(), createReq("delete-live"))
+	vm, _, _, err := mgr.CreateVM(t.Context(), createReq("delete-live"))
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
@@ -567,7 +567,7 @@ func TestManagerReconcile(t *testing.T) {
 	// Insert VMs directly via CreateVM (which leaves them in provisioning),
 	// then manually transition to various states before starting the manager.
 	createRaw := func(name string) string {
-		vm, _, err := st.CreateVMWithOperation(t.Context(), store.CreateVMInput{
+		vm, _, _, err := st.CreateVMWithOperation(t.Context(), store.CreateVMInput{
 			VMID:             uuid.NewString(),
 			Name:             name,
 			Owner:            "local_operator",
@@ -669,7 +669,7 @@ func TestManagerParallelLaunchCapped(t *testing.T) {
 	const n = 5
 	gates := make([]chan struct{}, n)
 	for i := range n {
-		vm, _, err := mgr.CreateVM(t.Context(), createReq(fmt.Sprintf("parallel-%d", i)))
+		vm, _, _, err := mgr.CreateVM(t.Context(), createReq(fmt.Sprintf("parallel-%d", i)))
 		if err != nil {
 			t.Fatalf("CreateVM %d: %v", i, err)
 		}
@@ -729,7 +729,7 @@ func TestManagerCapacity(t *testing.T) {
 	}
 
 	// Create a VM; capacity changes.
-	_, _, err = mgr.CreateVM(t.Context(), createReq("cap-check"))
+	_, _, _, err = mgr.CreateVM(t.Context(), createReq("cap-check"))
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
@@ -754,4 +754,46 @@ func queryEvents(t *testing.T, st *store.Store, kind string, limit int) ([]*even
 		return nil, err
 	}
 	return result.Events, nil
+}
+
+func TestManagerCreateVMReplayNoRelaunch(t *testing.T) {
+	// AT-006 corollary: a replayed create returns the stored result and must
+	// not enqueue another launch — a relaunch could revive a stopped VM.
+	st := openStoreForManager(t)
+	fk := runtimetest.NewFake()
+	mgr := newManager(t, st, fk)
+
+	ikey := "vm-replay-key"
+	req := createReq("replay-vm")
+	req.IdempotencyKey = &ikey
+
+	vm1, _, replayed1, err := mgr.CreateVM(t.Context(), req)
+	if err != nil {
+		t.Fatalf("CreateVM: %v", err)
+	}
+	if replayed1 {
+		t.Error("first CreateVM replayed = true, want false")
+	}
+
+	vm2, _, replayed2, err := mgr.CreateVM(t.Context(), req)
+	if err != nil {
+		t.Fatalf("CreateVM replay: %v", err)
+	}
+	if !replayed2 {
+		t.Error("second CreateVM replayed = false, want true")
+	}
+	if vm2.VMID != vm1.VMID {
+		t.Errorf("replay VMID %s != original %s", vm2.VMID, vm1.VMID)
+	}
+
+	mgr.Close() // drain launch goroutines before counting
+	launches := 0
+	for _, m := range fk.MethodCalls() {
+		if m == "Launch" {
+			launches++
+		}
+	}
+	if launches != 1 {
+		t.Errorf("Launch calls = %d, want 1 (none from the replay)", launches)
+	}
 }

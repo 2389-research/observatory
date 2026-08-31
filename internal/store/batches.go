@@ -258,7 +258,7 @@ func (s *Store) processAtomicBatch(ctx context.Context, tx *sql.Tx, batchID int6
 	}
 
 	// Admission granted — create all members.
-	members, err := s.insertAdmittedMembers(ctx, tx, batchID, in.Members)
+	members, err := s.insertAdmittedMembers(ctx, tx, batchID, in.Owner, in.Members)
 	if err != nil {
 		return nil, "", nil, err
 	}
@@ -303,7 +303,7 @@ func (s *Store) processBestEffortBatch(ctx context.Context, tx *sql.Tx, batchID 
 		}
 
 		// Admitted: insert VM, op, reservation, events.
-		admitted, err := s.insertOneMember(ctx, tx, batchID, i, m)
+		admitted, err := s.insertOneMember(ctx, tx, batchID, i, in.Owner, m)
 		if err != nil {
 			return nil, "", nil, err
 		}
@@ -322,10 +322,10 @@ func (s *Store) processBestEffortBatch(ctx context.Context, tx *sql.Tx, batchID 
 
 // insertAdmittedMembers creates all VM/op/reservation/event rows for a fully
 // admitted batch (atomic_reservation path). Each member is independent.
-func (s *Store) insertAdmittedMembers(ctx context.Context, tx *sql.Tx, batchID int64, members []BatchMemberInput) ([]*BatchMemberResult, error) {
+func (s *Store) insertAdmittedMembers(ctx context.Context, tx *sql.Tx, batchID int64, owner string, members []BatchMemberInput) ([]*BatchMemberResult, error) {
 	results := make([]*BatchMemberResult, len(members))
 	for i, m := range members {
-		r, err := s.insertOneMember(ctx, tx, batchID, i, m)
+		r, err := s.insertOneMember(ctx, tx, batchID, i, owner, m)
 		if err != nil {
 			return nil, err
 		}
@@ -336,7 +336,7 @@ func (s *Store) insertAdmittedMembers(ctx context.Context, tx *sql.Tx, batchID i
 
 // insertOneMember creates one VM+op+reservation+events inside the batch tx.
 // Mirrors the admitted path in CreateVMWithOperation but shares the batch tx.
-func (s *Store) insertOneMember(ctx context.Context, tx *sql.Tx, batchID int64, pos int, m BatchMemberInput) (*BatchMemberResult, error) {
+func (s *Store) insertOneMember(ctx context.Context, tx *sql.Tx, batchID int64, pos int, owner string, m BatchMemberInput) (*BatchMemberResult, error) {
 	labels := m.Labels
 	if labels == nil {
 		labels = map[string]string{}
@@ -350,9 +350,9 @@ func (s *Store) insertOneMember(ctx context.Context, tx *sql.Tx, batchID int64, 
 		`INSERT INTO vms (vm_id, name, owner, template_id, template_digest, desired_state, observed_state, revision,
 		                  vcpu, memory_mib, root_disk_mib, workspace_disk_mib, network_profile, network_policy_id, labels,
 		                  created_at, updated_at)
-		 VALUES (?, ?, 'local_operator', ?, ?, 'running', 'provisioning', 1, ?, ?, ?, ?, ?, ?, ?,
+		 VALUES (?, ?, ?, ?, ?, 'running', 'provisioning', 1, ?, ?, ?, ?, ?, ?, ?,
 		         strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
-		m.VMID, m.Name, m.TemplateID, m.TemplateDigest,
+		m.VMID, m.Name, owner, m.TemplateID, m.TemplateDigest,
 		m.VCPUCount, m.MemoryMiB, m.RootDiskMiB, m.WorkspaceDiskMiB,
 		m.NetworkProfile, m.NetworkPolicyID, string(labelsJSON)); err != nil {
 		return nil, fmt.Errorf("insert member %d vm: %w", pos, err)
@@ -360,9 +360,9 @@ func (s *Store) insertOneMember(ctx context.Context, tx *sql.Tx, batchID int64, 
 
 	opRes, err := tx.ExecContext(ctx,
 		`INSERT INTO operations (owner, kind, idempotency_key, request_hash, vm_id, phase, state, created_at, updated_at)
-		 VALUES ('local_operator', 'vm.create', NULL, '', ?, 'admitted', 'running',
+		 VALUES (?, 'vm.create', NULL, '', ?, 'admitted', 'running',
 		         strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
-		m.VMID)
+		owner, m.VMID)
 	if err != nil {
 		return nil, fmt.Errorf("insert member %d op: %w", pos, err)
 	}
@@ -383,7 +383,7 @@ func (s *Store) insertOneMember(ctx context.Context, tx *sql.Tx, batchID int64, 
 		"template_id":     m.TemplateID,
 		"template_digest": m.TemplateDigest,
 		"operation_id":    strconv.FormatInt(opID, 10),
-		"owner":           "local_operator",
+		"owner":           owner,
 		"resources": map[string]any{
 			"vcpu":               m.VCPUCount,
 			"memory_mib":         m.MemoryMiB,
@@ -466,10 +466,9 @@ func (s *Store) GetVMBatch(ctx context.Context, batchID int64) (*CreateVMBatchRe
 	for rows.Next() {
 		var pos int
 		var name string
-		var vmID, opIDStr sql.NullString
+		var vmID sql.NullString
 		var opIDInt sql.NullInt64
 		var refCause, refMsg sql.NullString
-		_ = opIDStr // vm_id is TEXT, operation_id is INTEGER
 		if err := rows.Scan(&pos, &name, &vmID, &opIDInt, &refCause, &refMsg); err != nil {
 			return nil, fmt.Errorf("scan member: %w", err)
 		}

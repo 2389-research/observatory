@@ -32,13 +32,26 @@ type Fake struct {
 	// blocks maps (method, vmID) → channel that must be closed before the call
 	// returns. Tests hold a reference to each channel and close it when ready.
 	blocks map[string]chan struct{}
+
+	// failCalls maps method → {n, err}: the nth call of method (1-based, any
+	// vmID, counted from Fake creation) returns err. For call sites where the
+	// VM ID is server-generated and unknowable at injection time.
+	failCalls map[string]callFailure
+	counts    map[string]int
+}
+
+type callFailure struct {
+	n   int
+	err error
 }
 
 // NewFake returns an idle fake with no injected failures or blocks.
 func NewFake() *Fake {
 	return &Fake{
-		failNext: map[string]error{},
-		blocks:   map[string]chan struct{}{},
+		failNext:  map[string]error{},
+		blocks:    map[string]chan struct{}{},
+		failCalls: map[string]callFailure{},
+		counts:    map[string]int{},
 	}
 }
 
@@ -49,6 +62,14 @@ func (f *Fake) FailNext(method, vmID string, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.failNext[key(method, vmID)] = err
+}
+
+// FailCall injects err for the nth call of method (1-based, counted from Fake
+// creation), regardless of which VM the call targets.
+func (f *Fake) FailCall(method string, n int, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failCalls[method] = callFailure{n: n, err: err}
 }
 
 // Block returns a channel that must be closed before the next call of method on
@@ -64,9 +85,16 @@ func (f *Fake) Block(method, vmID string) chan struct{} {
 func (f *Fake) record(method, vmID string) (block chan struct{}, err error) {
 	f.mu.Lock()
 	f.Calls = append(f.Calls, Call{Method: method, VMID: vmID})
+	f.counts[method]++
 	k := key(method, vmID)
 	err = f.failNext[k]
 	delete(f.failNext, k)
+	if err == nil {
+		if fc, ok := f.failCalls[method]; ok && f.counts[method] == fc.n {
+			delete(f.failCalls, method)
+			err = fc.err
+		}
+	}
 	block = f.blocks[k]
 	delete(f.blocks, k)
 	f.mu.Unlock()

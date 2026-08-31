@@ -197,14 +197,14 @@ func (s *Server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 		IdempotencyKey:  body.IdempotencyKey,
 	})
 	if err != nil {
-		writeBatchError(w, err)
+		// Batch errors are the same class as single-VM create errors and must
+		// teach identically (same codes, same remediations).
+		writeVMError(w, err)
 		return
 	}
-	status := http.StatusCreated
-	if result.IsReplay {
-		status = http.StatusOK
-	}
-	writeJSON(w, status, renderBatchResult(result))
+	// Replays return the same 201 as the original request (retry-transparent
+	// status); is_replay in the body marks the truth of what happened.
+	writeJSON(w, http.StatusCreated, renderBatchResult(result))
 }
 
 func (s *Server) handleGetBatch(w http.ResponseWriter, r *http.Request) {
@@ -241,55 +241,4 @@ func (s *Server) handleGetBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, renderBatchResult(result))
-}
-
-// writeBatchError maps manager/store errors for batch operations.
-func writeBatchError(w http.ResponseWriter, err error) {
-	var inv *runtime.ErrInvalidRequest
-	if errors.As(err, &inv) {
-		writeError(w, http.StatusBadRequest, Error{
-			Code:      "malformed_request",
-			Message:   inv.Error(),
-			Retryable: false,
-			Cause:     "request_invalid",
-		})
-		return
-	}
-	var tplUnknown *runtime.ErrTemplateUnknown
-	if errors.As(err, &tplUnknown) {
-		writeError(w, http.StatusUnprocessableEntity, Error{
-			Code:      "template_unknown",
-			Message:   tplUnknown.Error(),
-			Retryable: false,
-			Cause:     "template_not_found",
-			Details:   map[string]any{"requested": tplUnknown.Requested, "known": tplUnknown.KnownIDs},
-		})
-		return
-	}
-	var unavail *runtime.UnavailableError
-	if errors.As(err, &unavail) {
-		writeError(w, http.StatusServiceUnavailable, Error{
-			Code:      "runtime_unavailable",
-			Message:   unavail.Error(),
-			Retryable: true,
-			Cause:     "host_not_ready",
-			Details:   map[string]any{"reason": unavail.Reason},
-		})
-		return
-	}
-	if errors.Is(err, store.ErrIdempotencyConflict) {
-		writeError(w, http.StatusConflict, Error{
-			Code:      "idempotency_conflict",
-			Message:   "an existing batch has the same idempotency_key but different parameters",
-			Retryable: false,
-			Cause:     "idempotency_key_reuse",
-		})
-		return
-	}
-	writeError(w, http.StatusInternalServerError, Error{
-		Code:      "internal",
-		Message:   fmt.Sprintf("create batch failed: %v", err),
-		Retryable: true,
-		Cause:     "internal_error",
-	})
 }

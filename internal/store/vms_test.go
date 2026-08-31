@@ -22,7 +22,7 @@ func mustCreateVM(t *testing.T, st *store.Store, vmID, name string, admit func(s
 	if admit == nil {
 		admit = func(store.ReservationTotals) error { return nil }
 	}
-	vm, op, err := st.CreateVMWithOperation(t.Context(), store.CreateVMInput{
+	vm, op, _, err := st.CreateVMWithOperation(t.Context(), store.CreateVMInput{
 		VMID:             vmID,
 		Name:             name,
 		Owner:            "test-owner",
@@ -53,7 +53,7 @@ func TestVMCreateHappyPath(t *testing.T) {
 	st := openStore(t)
 	vmID := testUUID(1)
 
-	vm, op, err := st.CreateVMWithOperation(t.Context(), store.CreateVMInput{
+	vm, op, _, err := st.CreateVMWithOperation(t.Context(), store.CreateVMInput{
 		VMID:             vmID,
 		Name:             "alpha",
 		Owner:            "test-owner",
@@ -145,13 +145,13 @@ func TestVMCreateIdempotentReplay(t *testing.T) {
 		Admit:            func(store.ReservationTotals) error { return nil },
 	}
 
-	vm1, op1, err := st.CreateVMWithOperation(t.Context(), in)
+	vm1, op1, _, err := st.CreateVMWithOperation(t.Context(), in)
 	if err != nil {
 		t.Fatalf("first create: %v", err)
 	}
 
 	// exact replay: same key, same hash — no new writes
-	vm2, op2, err := st.CreateVMWithOperation(t.Context(), in)
+	vm2, op2, _, err := st.CreateVMWithOperation(t.Context(), in)
 	if err != nil {
 		t.Fatalf("replay: %v", err)
 	}
@@ -193,13 +193,13 @@ func TestVMCreateIdempotencyConflict(t *testing.T) {
 		RequestHash:      strings.Repeat("c", 64),
 		Admit:            func(store.ReservationTotals) error { return nil },
 	}
-	if _, _, err := st.CreateVMWithOperation(t.Context(), base); err != nil {
+	if _, _, _, err := st.CreateVMWithOperation(t.Context(), base); err != nil {
 		t.Fatalf("first create: %v", err)
 	}
 
 	// same key, different hash → conflict
 	base.RequestHash = strings.Repeat("d", 64)
-	_, _, err := st.CreateVMWithOperation(t.Context(), base)
+	_, _, _, err := st.CreateVMWithOperation(t.Context(), base)
 	if !errors.Is(err, store.ErrIdempotencyConflict) {
 		t.Errorf("expected ErrIdempotencyConflict, got %v", err)
 	}
@@ -208,7 +208,7 @@ func TestVMCreateIdempotencyConflict(t *testing.T) {
 func TestVMCreateAdmissionRefusal(t *testing.T) {
 	st := openStore(t)
 	refusal := &store.AdmissionRefusal{Cause: "insufficient_capacity", Message: "host RAM full"}
-	vm, op, err := st.CreateVMWithOperation(t.Context(), store.CreateVMInput{
+	vm, op, _, err := st.CreateVMWithOperation(t.Context(), store.CreateVMInput{
 		VMID:             testUUID(2),
 		Name:             "delta",
 		Owner:            "test-owner",
@@ -283,7 +283,7 @@ func TestVMCreateRefusalIdempotentReplay(t *testing.T) {
 			return &store.AdmissionRefusal{Cause: "insufficient_capacity", Message: "host RAM full"}
 		},
 	}
-	_, op1, err := st.CreateVMWithOperation(t.Context(), input)
+	_, op1, _, err := st.CreateVMWithOperation(t.Context(), input)
 	var ar *store.AdmissionRefusal
 	if !errors.As(err, &ar) || op1 == nil {
 		t.Fatalf("setup: err=%v op=%v", err, op1)
@@ -294,7 +294,7 @@ func TestVMCreateRefusalIdempotentReplay(t *testing.T) {
 		t.Error("Admit re-ran on idempotent replay of a refusal")
 		return nil
 	}
-	vm, op2, err := st.CreateVMWithOperation(t.Context(), input)
+	vm, op2, _, err := st.CreateVMWithOperation(t.Context(), input)
 	if vm != nil {
 		t.Errorf("replayed refusal produced a vm: %+v", vm)
 	}
@@ -328,7 +328,7 @@ func TestVMConcurrentAdmission(t *testing.T) {
 			defer wg.Done()
 			vmID := testUUID(i + 10)
 			reqHash := fmt.Sprintf("%064x", i)
-			_, _, err := st.CreateVMWithOperation(t.Context(), store.CreateVMInput{
+			_, _, _, err := st.CreateVMWithOperation(t.Context(), store.CreateVMInput{
 				VMID:             vmID,
 				Name:             fmt.Sprintf("vm-%d", i),
 				Owner:            "test-owner",
@@ -824,5 +824,140 @@ func TestCountVMsByObservedState(t *testing.T) {
 	}
 	if counts["provisioning"] != 1 || counts["starting"] != 1 {
 		t.Errorf("counts after transition = %v, want {provisioning:1, starting:1}", counts)
+	}
+}
+
+// A From guard pins a transition to its intended origin. stopped→starting is
+// legal (restart), so a launch racing a stop wave must declare it means
+// provisioning→starting — otherwise it would revive a VM the wave stopped.
+func TestTransitionFromGuard(t *testing.T) {
+	st := openStore(t)
+	ctx := t.Context()
+	vmID := testUUID(41)
+	mustCreateVM(t, st, vmID, "guard-vm", nil)
+
+	if _, err := st.TransitionVM(ctx, store.TransitionInput{
+		VMID: vmID, To: "starting", Reason: "launch", From: ptr("provisioning"),
+	}); err != nil {
+		t.Fatalf("guarded launch transition: %v", err)
+	}
+	for _, to := range []string{"stopping", "stopped"} {
+		if _, err := st.TransitionVM(ctx, store.TransitionInput{
+			VMID: vmID, To: to, Reason: "stop", ReleaseCompute: to == "stopped",
+		}); err != nil {
+			t.Fatalf("transition to %s: %v", to, err)
+		}
+	}
+
+	// The VM is stopped. A launch guarded on provisioning must refuse even
+	// though stopped→starting is a legal edge.
+	_, err := st.TransitionVM(ctx, store.TransitionInput{
+		VMID: vmID, To: "starting", Reason: "launch", From: ptr("provisioning"),
+	})
+	var invalid *store.InvalidTransitionError
+	if !errors.As(err, &invalid) {
+		t.Fatalf("stale-From launch: err = %v, want InvalidTransitionError", err)
+	}
+	if invalid.From != "stopped" {
+		t.Errorf("error names From = %q, want stopped (the actual state)", invalid.From)
+	}
+
+	// A restart guarded on stopped goes through.
+	if _, err := st.TransitionVM(ctx, store.TransitionInput{
+		VMID: vmID, To: "starting", Reason: "restart", From: ptr("stopped"),
+	}); err != nil {
+		t.Fatalf("guarded restart: %v", err)
+	}
+}
+
+// IfState makes operation updates conditional so a terminal record cannot be
+// silently rewritten (a stop wave must not flip a succeeded create to failed).
+func TestUpdateOperationIfState(t *testing.T) {
+	st := openStore(t)
+	ctx := t.Context()
+	_, op := mustCreateVM(t, st, testUUID(42), "ifstate-vm", nil)
+
+	if _, err := st.UpdateOperation(ctx, store.OperationUpdate{
+		OperationID: op.OperationID, Phase: "complete", State: "succeeded", IfState: "running",
+	}); err != nil {
+		t.Fatalf("guarded succeed: %v", err)
+	}
+
+	before, err := st.Query(ctx, store.Query{Kind: "operation.state_changed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cause := "batch_stop_successful"
+	_, err = st.UpdateOperation(ctx, store.OperationUpdate{
+		OperationID: op.OperationID, Phase: "stopped", State: "failed",
+		ErrorCause: &cause, ErrorMessage: &cause, IfState: "running",
+	})
+	if !errors.Is(err, store.ErrOperationStale) {
+		t.Fatalf("stale update: err = %v, want ErrOperationStale", err)
+	}
+
+	got, err := st.GetOperation(ctx, op.OperationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != "succeeded" || got.ErrorCause != nil {
+		t.Errorf("op after stale update = %s/%v, want succeeded with no error", got.State, got.ErrorCause)
+	}
+	after, err := st.Query(ctx, store.Query{Kind: "operation.state_changed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.Events) != len(before.Events) {
+		t.Errorf("stale update emitted an event: %d → %d", len(before.Events), len(after.Events))
+	}
+
+	// Unknown op stays its own error.
+	_, err = st.UpdateOperation(ctx, store.OperationUpdate{
+		OperationID: 999999, Phase: "complete", State: "failed", IfState: "running",
+	})
+	if !errors.Is(err, store.ErrOperationUnknown) {
+		t.Errorf("unknown op: err = %v, want ErrOperationUnknown", err)
+	}
+}
+
+// The replay flag is how the API serves is_replay honestly (AT-006 replays
+// return the original outcome and must say so).
+func TestCreateVMReplayFlag(t *testing.T) {
+	st := openStore(t)
+	in := store.CreateVMInput{
+		VMID:             testUUID(43),
+		Name:             "replay-flag",
+		Owner:            "test-owner",
+		TemplateID:       "tmpl-001",
+		TemplateDigest:   "sha256:abc",
+		VCPUCount:        1,
+		MemoryMiB:        1024,
+		RootDiskMiB:      4096,
+		WorkspaceDiskMiB: 4096,
+		MemoryTotalMiB:   1024 + 768,
+		NetworkProfile:   "transport",
+		NetworkPolicyID:  "p",
+		Kind:             "vm.create",
+		IdempotencyKey:   ptr("replay-flag-key"),
+		RequestHash:      strings.Repeat("b", 64),
+		Admit:            func(store.ReservationTotals) error { return nil },
+	}
+	_, _, replayed, err := st.CreateVMWithOperation(t.Context(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed {
+		t.Error("first create marked as replay")
+	}
+	vm2, _, replayed2, err := st.CreateVMWithOperation(t.Context(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !replayed2 {
+		t.Error("second create not marked as replay")
+	}
+	if vm2.VMID != testUUID(43) {
+		t.Errorf("replay vm = %q, want original", vm2.VMID)
 	}
 }

@@ -62,11 +62,13 @@ func TestCreateBatchUnavailableRuntime(t *testing.T) {
 
 	fake.FailNext("Availability", "", &runtime.UnavailableError{Reason: "test-unavailable"})
 
+	// Same contract as single-VM create (AT-001): an unavailable runtime is a
+	// missing capability (501), not a transient 503.
 	var e api.Error
 	doRequest(t, http.MethodPost, srv.URL+"/api/v1/vm-batches",
 		batchBody("atomic_reservation", "keep_successful", "vm-x"),
-		http.StatusServiceUnavailable, &e)
-	requireTeaching(t, e, "runtime_unavailable")
+		http.StatusNotImplemented, &e)
+	requireTeaching(t, e, "missing_capability")
 }
 
 func TestCreateBatchUnknownTemplate(t *testing.T) {
@@ -77,9 +79,10 @@ func TestCreateBatchUnknownTemplate(t *testing.T) {
 		"reservation_mode": "atomic_reservation",
 		"on_failure":       "keep_successful",
 	}
+	// Same contract as single-VM create: unknown template is a 400.
 	var e api.Error
 	doRequest(t, http.MethodPost, srv.URL+"/api/v1/vm-batches", body,
-		http.StatusUnprocessableEntity, &e)
+		http.StatusBadRequest, &e)
 	requireTeaching(t, e, "template_unknown")
 }
 
@@ -116,8 +119,10 @@ func TestCreateBatchIdempotentReplay(t *testing.T) {
 	var first map[string]any
 	doRequest(t, http.MethodPost, srv.URL+"/api/v1/vm-batches", body, http.StatusCreated, &first)
 
+	// Replays are retry-transparent: same 201 as the original, is_replay in
+	// the body carries the truth.
 	var second map[string]any
-	doRequest(t, http.MethodPost, srv.URL+"/api/v1/vm-batches", body, http.StatusOK, &second)
+	doRequest(t, http.MethodPost, srv.URL+"/api/v1/vm-batches", body, http.StatusCreated, &second)
 
 	if second["is_replay"] != true {
 		t.Errorf("second response is_replay = %v, want true", second["is_replay"])

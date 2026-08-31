@@ -21,6 +21,9 @@ var (
 	ErrOperationUnknown = errors.New("operation not found")
 	// ErrIdempotencyConflict: same (owner, kind, key) exists with a different request hash.
 	ErrIdempotencyConflict = errors.New("idempotency key conflict: same key used for a different request; use a different key or retrieve the original result")
+	// ErrOperationStale: an IfState-guarded update found the operation in a
+	// different state; the record was left untouched.
+	ErrOperationStale = errors.New("operation not in expected state; update skipped")
 )
 
 // AdmissionRefusal is the typed error an Admit callback returns when the host
@@ -198,7 +201,8 @@ type CreateVMInput struct {
 // TransitionInput carries everything needed to advance a VM's lifecycle state.
 type TransitionInput struct {
 	VMID             string
-	ExpectedRevision *int64 // nil skips the optimistic-concurrency check
+	ExpectedRevision *int64  // nil skips the optimistic-concurrency check
+	From             *string // non-nil pins the transition to this origin state
 	To               string
 	Reason           string
 	OperationID      int64
@@ -215,6 +219,7 @@ type OperationUpdate struct {
 	OperationID  int64
 	Phase        string
 	State        string
+	IfState      string // non-empty: apply only if the operation is in this state
 	ErrorCause   *string
 	ErrorMessage *string
 }
@@ -231,16 +236,16 @@ type VMQuery struct {
 // CreateVMWithOperation atomically creates a VM record, checks admission, and
 // records a durable operation — all in one writer transaction. On admission
 // refusal it still commits a failed operation for evidence (AT-012).
-func (s *Store) CreateVMWithOperation(ctx context.Context, in CreateVMInput) (*VM, *Operation, error) {
+func (s *Store) CreateVMWithOperation(ctx context.Context, in CreateVMInput) (*VM, *Operation, bool, error) {
 	// Idempotency check first (quick readers path before we take the writer lock).
 	// We re-check inside the tx; this is an optimistic early exit.
 	if in.IdempotencyKey != nil {
 		vm, op, err := s.lookupByIdempotencyKey(ctx, in.Owner, in.Kind, *in.IdempotencyKey, in.RequestHash)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, false, err
 		}
 		if vm != nil {
-			return vm, op, nil
+			return vm, op, true, nil
 		}
 	}
 
@@ -250,12 +255,12 @@ func (s *Store) CreateVMWithOperation(ctx context.Context, in CreateVMInput) (*V
 	}
 	labelsJSON, err := json.Marshal(labels)
 	if err != nil {
-		return nil, nil, fmt.Errorf("marshal labels: %w", err)
+		return nil, nil, false, fmt.Errorf("marshal labels: %w", err)
 	}
 
 	tx, err := s.writer.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, nil, fmt.Errorf("begin create-vm: %w", err)
+		return nil, nil, false, fmt.Errorf("begin create-vm: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
@@ -270,43 +275,43 @@ func (s *Store) CreateVMWithOperation(ctx context.Context, in CreateVMInput) (*V
 		switch {
 		case err == nil:
 			if existingHash != in.RequestHash {
-				return nil, nil, ErrIdempotencyConflict
+				return nil, nil, false, ErrIdempotencyConflict
 			}
 			// Replay: load the existing VM and operation.
 			var existingVMID sql.NullString
 			if err := tx.QueryRowContext(ctx,
 				`SELECT vm_id FROM operations WHERE operation_id = ?`, existingOpID,
 			).Scan(&existingVMID); err != nil {
-				return nil, nil, fmt.Errorf("replay vm lookup: %w", err)
+				return nil, nil, false, fmt.Errorf("replay vm lookup: %w", err)
 			}
 			if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
-				return nil, nil, fmt.Errorf("rollback replay: %w", err)
+				return nil, nil, false, fmt.Errorf("rollback replay: %w", err)
 			}
 			op, err := s.GetOperation(ctx, existingOpID)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, false, err
 			}
 			if !existingVMID.Valid {
 				// The original request was refused at admission. A repeated
 				// identical request returns the original outcome (SPEC §14),
 				// reconstructed from the durable operation — admission is not
 				// re-run; a fresh attempt needs a fresh idempotency key.
-				return nil, op, replayedRefusal(op)
+				return nil, op, true, replayedRefusal(op)
 			}
 			vm, err := s.GetVM(ctx, existingVMID.String)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, false, err
 			}
-			return vm, op, nil
+			return vm, op, true, nil
 		case !errors.Is(err, sql.ErrNoRows):
-			return nil, nil, fmt.Errorf("idempotency lookup: %w", err)
+			return nil, nil, false, fmt.Errorf("idempotency lookup: %w", err)
 		}
 	}
 
 	// Compute admission totals inside the tx.
 	totals, err := reservationTotalsInTx(ctx, tx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("read reservations: %w", err)
+		return nil, nil, false, fmt.Errorf("read reservations: %w", err)
 	}
 
 	admitErr := in.Admit(totals)
@@ -315,7 +320,7 @@ func (s *Store) CreateVMWithOperation(ctx context.Context, in CreateVMInput) (*V
 		// an internal error that aborts without committing.
 		var refusal *AdmissionRefusal
 		if !errors.As(admitErr, &refusal) {
-			return nil, nil, fmt.Errorf("admit callback internal error: %w", admitErr)
+			return nil, nil, false, fmt.Errorf("admit callback internal error: %w", admitErr)
 		}
 
 		// Insert a failed operation as durable evidence.
@@ -324,7 +329,7 @@ func (s *Store) CreateVMWithOperation(ctx context.Context, in CreateVMInput) (*V
 			 VALUES (?, ?, ?, ?, NULL, 'admission', 'failed', ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
 			in.Owner, in.Kind, nullable(in.IdempotencyKey), in.RequestHash, refusal.Cause, refusal.Message)
 		if err != nil {
-			return nil, nil, fmt.Errorf("insert failed operation: %w", err)
+			return nil, nil, false, fmt.Errorf("insert failed operation: %w", err)
 		}
 		opID, _ := res.LastInsertId()
 		if _, err := s.appendSystemInTx(ctx, tx, s.systemEnvelope("operation.state_changed", "registry", notApplicableQuality(), map[string]any{
@@ -336,17 +341,17 @@ func (s *Store) CreateVMWithOperation(ctx context.Context, in CreateVMInput) (*V
 			"attempt":      1,
 			"error":        map[string]any{"cause": refusal.Cause, "message": refusal.Message},
 		})); err != nil {
-			return nil, nil, fmt.Errorf("append refusal event: %w", err)
+			return nil, nil, false, fmt.Errorf("append refusal event: %w", err)
 		}
 
 		op, err := scanOperationInTx(ctx, tx, opID)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, false, err
 		}
 		if err := tx.Commit(); err != nil {
-			return nil, nil, fmt.Errorf("commit failed-op: %w", err)
+			return nil, nil, false, fmt.Errorf("commit failed-op: %w", err)
 		}
-		return nil, op, admitErr
+		return nil, op, false, admitErr
 	}
 
 	// Admission granted — insert vm, operation, reservation rows.
@@ -357,7 +362,7 @@ func (s *Store) CreateVMWithOperation(ctx context.Context, in CreateVMInput) (*V
 		in.VCPUCount, in.MemoryMiB, in.RootDiskMiB, in.WorkspaceDiskMiB,
 		in.NetworkProfile, in.NetworkPolicyID, string(labelsJSON))
 	if err != nil {
-		return nil, nil, fmt.Errorf("insert vm: %w", err)
+		return nil, nil, false, fmt.Errorf("insert vm: %w", err)
 	}
 	_ = vmRes // row_id not needed; vm_id is the identity
 
@@ -366,7 +371,7 @@ func (s *Store) CreateVMWithOperation(ctx context.Context, in CreateVMInput) (*V
 		 VALUES (?, ?, ?, ?, ?, 'admitted', 'running', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
 		in.Owner, in.Kind, nullable(in.IdempotencyKey), in.RequestHash, in.VMID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("insert operation: %w", err)
+		return nil, nil, false, fmt.Errorf("insert operation: %w", err)
 	}
 	opID, _ := opRes.LastInsertId()
 
@@ -375,7 +380,7 @@ func (s *Store) CreateVMWithOperation(ctx context.Context, in CreateVMInput) (*V
 		`INSERT INTO reservations (vm_id, memory_total_mib, vcpu, disk_mib, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
 		in.VMID, in.MemoryTotalMiB, in.VCPUCount, diskMiB); err != nil {
-		return nil, nil, fmt.Errorf("insert reservation: %w", err)
+		return nil, nil, false, fmt.Errorf("insert reservation: %w", err)
 	}
 
 	// Durable events.
@@ -394,11 +399,11 @@ func (s *Store) CreateVMWithOperation(ctx context.Context, in CreateVMInput) (*V
 		},
 	}))
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE vms SET last_event_id = ? WHERE vm_id = ?`, createdCursor, in.VMID); err != nil {
-		return nil, nil, fmt.Errorf("set last_event_id: %w", err)
+		return nil, nil, false, fmt.Errorf("set last_event_id: %w", err)
 	}
 	if _, err := s.appendSystemInTx(ctx, tx, s.systemEnvelope("operation.state_changed", "registry", notApplicableQuality(), map[string]any{
 		"operation_id": strconv.FormatInt(opID, 10),
@@ -408,21 +413,21 @@ func (s *Store) CreateVMWithOperation(ctx context.Context, in CreateVMInput) (*V
 		"state":        "running",
 		"attempt":      1,
 	})); err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 
 	vm, err := scanVMInTx(ctx, tx, in.VMID)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 	op, err := scanOperationInTx(ctx, tx, opID)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, nil, fmt.Errorf("commit create-vm: %w", err)
+		return nil, nil, false, fmt.Errorf("commit create-vm: %w", err)
 	}
-	return vm, op, nil
+	return vm, op, false, nil
 }
 
 // lookupByIdempotencyKey is the optimistic readers-path check before taking the writer.
@@ -495,6 +500,12 @@ func (s *Store) TransitionVM(ctx context.Context, in TransitionInput) (*VM, erro
 
 	if in.ExpectedRevision != nil && *in.ExpectedRevision != current.Revision {
 		return nil, &RevisionMismatchError{Current: current.Revision}
+	}
+	// A From pin refuses even legal edges when the VM moved: stopped→starting
+	// is valid for a restart, but a launch that meant provisioning→starting
+	// must not revive a VM something else stopped in between.
+	if in.From != nil && *in.From != current.ObservedState {
+		return nil, &InvalidTransitionError{From: current.ObservedState, To: in.To}
 	}
 	if !transitionAllowed(current.ObservedState, in.To) {
 		return nil, &InvalidTransitionError{From: current.ObservedState, To: in.To}
@@ -581,17 +592,36 @@ func (s *Store) UpdateOperation(ctx context.Context, upd OperationUpdate) (*Oper
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	res, err := tx.ExecContext(ctx,
-		`UPDATE operations SET phase = ?, state = ?, error_cause = ?, error_message = ?,
-		                       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-		 WHERE operation_id = ?`,
-		upd.Phase, upd.State, upd.ErrorCause, upd.ErrorMessage, upd.OperationID)
+	query := `UPDATE operations SET phase = ?, state = ?, error_cause = ?, error_message = ?,
+	                               updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+	          WHERE operation_id = ?`
+	args := []any{upd.Phase, upd.State, upd.ErrorCause, upd.ErrorMessage, upd.OperationID}
+	if upd.IfState != "" {
+		query += ` AND state = ?`
+		args = append(args, upd.IfState)
+	}
+	res, err := tx.ExecContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("update operation: %w", err)
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return nil, ErrOperationUnknown
+		if upd.IfState == "" {
+			return nil, ErrOperationUnknown
+		}
+		// Distinguish a missing row from a state mismatch. A stale guarded
+		// update leaves the record untouched and emits no event: terminal
+		// evidence must not be rewritten by late-arriving updates.
+		var state string
+		err := tx.QueryRowContext(ctx,
+			`SELECT state FROM operations WHERE operation_id = ?`, upd.OperationID).Scan(&state)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrOperationUnknown
+		}
+		if err != nil {
+			return nil, fmt.Errorf("check operation state: %w", err)
+		}
+		return nil, ErrOperationStale
 	}
 
 	op, err := scanOperationInTx(ctx, tx, upd.OperationID)

@@ -323,3 +323,27 @@ func TestGetVMBatchUnknown(t *testing.T) {
 		t.Errorf("error = %v, want ErrBatchUnknown", err)
 	}
 }
+
+// Member rows must carry the batch's owner, not a hardcoded principal — P5
+// replaces the local-operator identity and the batch path must follow.
+func TestBatchMembersCarryOwner(t *testing.T) {
+	s := openStore(t)
+	result, err := s.CreateVMBatch(t.Context(), store.CreateVMBatchInput{
+		Owner:           "someone-else",
+		RequestHash:     "hash-owner-check",
+		ReservationMode: "atomic_reservation",
+		OnFailure:       "keep_successful",
+		Members:         []store.BatchMemberInput{batchMember("owned-vm")},
+		AdmitBatch:      admitAlwaysOK,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := result.Members[0]
+	if m.VM.Owner != "someone-else" {
+		t.Errorf("member vm owner = %q, want someone-else", m.VM.Owner)
+	}
+	if m.Operation.Owner != "someone-else" {
+		t.Errorf("member op owner = %q, want someone-else", m.Operation.Owner)
+	}
+}

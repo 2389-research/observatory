@@ -517,7 +517,7 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	vm, op, err := s.manager.CreateVM(r.Context(), runtime.CreateRequest{
+	vm, op, replayed, err := s.manager.CreateVM(r.Context(), runtime.CreateRequest{
 		Name:             body.Name,
 		TemplateID:       body.TemplateID,
 		IdempotencyKey:   body.IdempotencyKey,
@@ -531,10 +531,16 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 		writeVMError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{
+	// Replays return the same 201 as the original request (retry-transparent
+	// status) with is_replay marking the truth of what happened.
+	resp := map[string]any{
 		"vm":        renderVM(vm),
 		"operation": renderOperation(op),
-	})
+	}
+	if replayed {
+		resp["is_replay"] = true
+	}
+	writeJSON(w, http.StatusCreated, resp)
 }
 
 func (s *Server) handleListVMs(w http.ResponseWriter, r *http.Request) {

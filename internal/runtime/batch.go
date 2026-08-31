@@ -66,6 +66,9 @@ func (m *Manager) CreateBatch(ctx context.Context, req CreateBatchRequest) (*sto
 	if req.ReservationMode != "atomic_reservation" && req.ReservationMode != "best_effort" {
 		return nil, &ErrInvalidRequest{Reason: "reservation_mode must be atomic_reservation or best_effort"}
 	}
+	if req.OnFailure == "" {
+		req.OnFailure = "keep_successful" // SPEC §6.3: keep_successful by default
+	}
 	if req.OnFailure != "keep_successful" && req.OnFailure != "stop_successful" {
 		return nil, &ErrInvalidRequest{Reason: "on_failure must be keep_successful or stop_successful"}
 	}
@@ -204,6 +207,12 @@ func (m *Manager) CreateBatch(ctx context.Context, req CreateBatchRequest) (*sto
 				return
 			}
 			defer func() { <-m.sem }()
+			if coord.stopWaveStarted() {
+				// The stop wave already parked this member while it was queued
+				// behind the semaphore; launching now would defeat the wave.
+				coord.memberDone(false)
+				return
+			}
 			ok := m.runBatchMemberLaunch(lm, coord)
 			coord.memberDone(ok)
 		}()
@@ -291,16 +300,23 @@ func (m *Manager) runBatchMemberLaunch(lm batchLaunchMember, coord *batchCoord) 
 		TemplateDigest:   lm.tpl.Digest,
 	}
 
+	// From pins on both transitions keep this launch from reviving a VM the
+	// stop wave (or a concurrent stop) has already moved: a refused pin means
+	// someone superseded the launch, which is not a member failure — walk away
+	// without firing a wave of our own.
+	from := "provisioning"
 	if _, err := m.st.TransitionVM(ctx, store.TransitionInput{
 		VMID:        vm.VMID,
+		From:        &from,
 		To:          "starting",
 		Reason:      "launch",
 		OperationID: opID,
 		BootID:      &bootID,
 	}); err != nil {
-		if !errors.Is(err, new(store.InvalidTransitionError)) {
-			m.failLaunch(ctx, vm.VMID, opID, "starting", err.Error())
+		if errors.Is(err, new(store.InvalidTransitionError)) {
+			return false
 		}
+		m.failLaunch(ctx, vm.VMID, opID, "starting", err.Error())
 		coord.stopSiblings(vm.VMID)
 		return false
 	}
@@ -312,16 +328,19 @@ func (m *Manager) runBatchMemberLaunch(lm batchLaunchMember, coord *batchCoord) 
 		return false
 	}
 
+	from = "starting"
 	if _, err := m.st.TransitionVM(ctx, store.TransitionInput{
 		VMID:        vm.VMID,
+		From:        &from,
 		To:          "running",
 		Reason:      "launch_complete",
 		OperationID: opID,
 	}); err != nil {
-		if !errors.Is(err, new(store.InvalidTransitionError)) {
-			m.failLaunch(ctx, vm.VMID, opID, "running", err.Error())
-			_ = m.rt.ForceStop(ctx, vm.VMID)
+		if errors.Is(err, new(store.InvalidTransitionError)) {
+			return false
 		}
+		m.failLaunch(ctx, vm.VMID, opID, "running", err.Error())
+		_ = m.rt.ForceStop(ctx, vm.VMID)
 		coord.stopSiblings(vm.VMID)
 		return false
 	}
@@ -329,6 +348,7 @@ func (m *Manager) runBatchMemberLaunch(lm batchLaunchMember, coord *batchCoord) 
 	errCause := (*string)(nil)
 	_, _ = m.st.UpdateOperation(ctx, store.OperationUpdate{
 		OperationID:  opID,
+		IfState:      "running",
 		Phase:        "running",
 		State:        "succeeded",
 		ErrorCause:   errCause,
@@ -359,8 +379,18 @@ func newBatchCoord(m *Manager, onFailure string, batchOpID int64, members []batc
 	return c
 }
 
-// stopSiblings stops all other admitted VMs when on_failure=stop_successful and
-// a member fails. Idempotent: only the first failure triggers the stop wave.
+// stopWaveStarted reports whether the stop wave has been triggered.
+func (c *batchCoord) stopWaveStarted() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.stopped
+}
+
+// stopSiblings stops every other admitted member when on_failure=stop_successful
+// and a member fails (AT-014). Idempotent: only the first failure starts the wave.
+// Each member gets a short read-act retry loop because its launch goroutine may
+// be moving it concurrently; every transition carries a From pin, so a lost race
+// shows up as a refused pin and the loop re-reads instead of clobbering.
 func (c *batchCoord) stopSiblings(failedVMID string) {
 	if c.onFailure != "stop_successful" {
 		return
@@ -375,44 +405,70 @@ func (c *batchCoord) stopSiblings(failedVMID string) {
 
 	ctx := c.m.ctx
 	grace := time.Duration(c.m.cfg.VMDefaults.StopGraceSeconds) * time.Second
+	cause := "batch_stop_successful"
+	msg := "sibling member failed, on_failure=stop_successful"
+	failOp := func(opID int64) {
+		// IfState keeps an already-succeeded launch op honest: the wave stops
+		// the VM but must not rewrite evidence of a launch that did succeed.
+		_, _ = c.m.st.UpdateOperation(ctx, store.OperationUpdate{
+			OperationID:  opID,
+			IfState:      "running",
+			Phase:        "stopped",
+			State:        "failed",
+			ErrorCause:   &cause,
+			ErrorMessage: &msg,
+		})
+	}
+
 	for _, lm := range c.members {
 		if lm.result.VM == nil || lm.result.VM.VMID == failedVMID {
 			continue
 		}
 		vmID := lm.result.VM.VMID
 		opID := lm.result.Operation.OperationID
-		vm, err := c.m.st.GetVM(ctx, vmID)
-		if err != nil {
-			continue
-		}
-		switch vm.ObservedState {
-		case "running", "paused", "starting":
-			// transition through stopping
-			if vm.ObservedState != "stopping" {
-				_, _ = c.m.st.TransitionVM(ctx, store.TransitionInput{
-					VMID:        vmID,
-					To:          "stopping",
-					Reason:      "batch_stop_successful",
-					OperationID: opID,
-				})
+		for attempt := 0; attempt < 3; attempt++ {
+			vm, err := c.m.st.GetVM(ctx, vmID)
+			if err != nil {
+				break
 			}
-			_, _ = c.m.rt.Stop(ctx, vmID, grace)
-			cause := "batch_stop_successful"
-			msg := "sibling member failed, on_failure=stop_successful"
-			_, _ = c.m.st.TransitionVM(ctx, store.TransitionInput{
+			state := vm.ObservedState
+			if state == "stopped" || state == "failed" || state == "deleting" || state == "deleted" {
+				break // already down; nothing to stop
+			}
+			if state == "stopping" {
+				// A synchronous stop is mid-flight and will land the VM in
+				// stopped; mark the launch op and leave the VM to it.
+				failOp(opID)
+				break
+			}
+			from := state
+			if _, err := c.m.st.TransitionVM(ctx, store.TransitionInput{
+				VMID:        vmID,
+				From:        &from,
+				To:          "stopping",
+				Reason:      cause,
+				OperationID: opID,
+			}); err != nil {
+				continue // state moved under us; re-read
+			}
+			// A member still in provisioning was queued behind the semaphore:
+			// no VMM exists yet, so there is nothing for the runtime to stop.
+			if state != "provisioning" {
+				_, _ = c.m.rt.Stop(ctx, vmID, grace)
+			}
+			fromStopping := "stopping"
+			if _, err := c.m.st.TransitionVM(ctx, store.TransitionInput{
 				VMID:           vmID,
+				From:           &fromStopping,
 				To:             "stopped",
 				Reason:         cause,
 				OperationID:    opID,
 				ReleaseCompute: true,
-			})
-			_, _ = c.m.st.UpdateOperation(ctx, store.OperationUpdate{
-				OperationID:  opID,
-				Phase:        "stopped",
-				State:        "failed",
-				ErrorCause:   &cause,
-				ErrorMessage: &msg,
-			})
+			}); err != nil {
+				continue
+			}
+			failOp(opID)
+			break
 		}
 	}
 }
@@ -433,17 +489,36 @@ func (c *batchCoord) memberDone(ok bool) {
 		return
 	}
 	ctx := c.m.ctx
-	if c.succeeded.Load() > 0 {
+	succeeded := c.succeeded.Load()
+	failed := c.failed.Load()
+	switch {
+	case c.onFailure == "stop_successful" && failed > 0:
+		// The contract was "all or stop": any failure fails the batch even
+		// though some members launched before the wave stopped them. The
+		// per-member operations carry each member's own story.
+		cause := "member_failed"
+		msg := fmt.Sprintf("batch stopped: %d of %d members did not complete (on_failure=stop_successful)", failed, c.total)
+		_, _ = c.m.st.UpdateOperation(ctx, store.OperationUpdate{
+			OperationID:  c.batchOpID,
+			IfState:      "running",
+			Phase:        "complete",
+			State:        "failed",
+			ErrorCause:   &cause,
+			ErrorMessage: &msg,
+		})
+	case succeeded > 0:
 		_, _ = c.m.st.UpdateOperation(ctx, store.OperationUpdate{
 			OperationID: c.batchOpID,
+			IfState:     "running",
 			Phase:       "complete",
 			State:       "succeeded",
 		})
-	} else {
+	default:
 		cause := "all_members_failed"
 		msg := "every admitted batch member failed to launch"
 		_, _ = c.m.st.UpdateOperation(ctx, store.OperationUpdate{
 			OperationID:  c.batchOpID,
+			IfState:      "running",
 			Phase:        "complete",
 			State:        "failed",
 			ErrorCause:   &cause,
