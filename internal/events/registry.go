@@ -118,6 +118,57 @@ var registry = []KindInfo{
 		Provenance:    HostObserved,
 		Semantics:     "Operation progress event. Data carries operation_id, kind, vm_id (nullable), phase, state, attempt, and error {cause, message} when failed. Terminal states are succeeded and failed.",
 	},
+	{
+		Kind:          "run.created",
+		Family:        "run",
+		SchemaVersion: 1,
+		Provenance:    HostObserved,
+		Semantics:     "A declarative run was created and bound to a VM. Data carries run_id, vm_id, goal, success_criteria, on_completion, progress_events, and the initial phase.",
+		Caveats: []string{
+			"creation is not evaluation; the outcome exists only in the terminal run.state_changed",
+		},
+	},
+	{
+		Kind:          "run.state_changed",
+		Family:        "run",
+		SchemaVersion: 1,
+		Provenance:    HostObserved,
+		Semantics:     "A run phase transition. Data carries run_id, vm_id, from, to, and on terminal transitions outcome fields (evaluated_by, reason).",
+		Caveats: []string{
+			"terminal outcome stands even if a later report generation fails",
+		},
+	},
+	{
+		Kind:          "run.progress",
+		Family:        "run",
+		SchemaVersion: 1,
+		Provenance:    GuestReported,
+		Semantics:     "Bounded structured progress submitted by the guest workload. Data carries run_id, vm_id, seq, and the payload.",
+		Caveats: []string{
+			"guest-supplied content: tamperable in developer_root and not verified by the host",
+			"seq orders submissions within one run",
+		},
+	},
+	{
+		Kind:          "run.result_recorded",
+		Family:        "run",
+		SchemaVersion: 1,
+		Provenance:    HostObserved,
+		Semantics:     "Trusted ingress recorded a guest-submitted final result. Data carries run_id, vm_id, status, and size_bytes; the full result is served on the run resource.",
+		Caveats: []string{
+			"the event is host_observed (the recording); the result content itself is guest-supplied and labeled guest_reported where served",
+		},
+	},
+	{
+		Kind:          "run.submission_rejected",
+		Family:        "run",
+		SchemaVersion: 1,
+		Provenance:    HostObserved,
+		Semantics:     "Ingress refused an oversized or malformed guest submission. Data carries run_id, vm_id, submission (progress|result), reason, and size_bytes.",
+		Caveats: []string{
+			"rejection is bounded and durable; the refused payload is not retained",
+		},
+	},
 }
 
 var registryByKind = func() map[string]KindInfo {

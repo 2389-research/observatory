@@ -74,3 +74,37 @@ func TestAttentionAndAnnotationKindsRegistered(t *testing.T) {
 		}
 	}
 }
+
+func TestRunKindsRegistered(t *testing.T) {
+	// §12.2: run.* family is host_observed except run.progress (guest_reported).
+	cases := []struct {
+		kind       string
+		provenance events.Provenance
+	}{
+		{"run.created", events.HostObserved},
+		{"run.state_changed", events.HostObserved},
+		{"run.progress", events.GuestReported},
+		{"run.result_recorded", events.HostObserved},
+		{"run.submission_rejected", events.HostObserved},
+	}
+	for _, tc := range cases {
+		t.Run(tc.kind, func(t *testing.T) {
+			info, ok := events.LookupKind(tc.kind)
+			if !ok {
+				t.Fatalf("%q not registered", tc.kind)
+			}
+			if info.Family != "run" {
+				t.Errorf("family = %q, want \"run\"", info.Family)
+			}
+			if info.SchemaVersion != 1 {
+				t.Errorf("schema_version = %d, want 1", info.SchemaVersion)
+			}
+			if info.Provenance != tc.provenance {
+				t.Errorf("provenance = %q, want %q", info.Provenance, tc.provenance)
+			}
+			if info.Semantics == "" {
+				t.Error("semantics must not be empty")
+			}
+		})
+	}
+}
