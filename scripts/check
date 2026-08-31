@@ -31,6 +31,14 @@ fi
 
 if go test ./...; then note "PASS go test"; else note "FAIL go test"; fail=1; fi
 
+# Ensure the test-only fake runtime never reaches a served binary (SPEC §18).
+if env -u GOROOT mise exec -- go list -deps ./cmd/... 2>/dev/null | grep -qF "internal/runtime/runtimetest"; then
+  note "FAIL fake runtime reachable from cmd/ — runtimetest must only appear in _test.go imports"
+  fail=1
+else
+  note "PASS fake runtime not reachable from cmd/"
+fi
+
 if command -v uv >/dev/null 2>&1; then
   if uv run docs/validation/check.py >/dev/null 2>&1; then
     note "PASS docs package check"
