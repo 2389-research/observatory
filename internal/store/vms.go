@@ -129,6 +129,9 @@ type VM struct {
 	FailureReason    *string
 	CreatedAt        string
 	UpdatedAt        string
+	// LastEventID is the event cursor of the last change to this VM row.
+	// It is the source of truth for changed_vms in the situation delta (P-08).
+	LastEventID int64
 }
 
 // Operation is one row of the operations log.
@@ -376,7 +379,7 @@ func (s *Store) CreateVMWithOperation(ctx context.Context, in CreateVMInput) (*V
 	}
 
 	// Durable events.
-	if _, err := s.appendSystemInTx(ctx, tx, s.systemEnvelope("vm.created", "registry", notApplicableQuality(), map[string]any{
+	createdCursor, err := s.appendSystemInTx(ctx, tx, s.systemEnvelope("vm.created", "registry", notApplicableQuality(), map[string]any{
 		"vm_id":           in.VMID,
 		"name":            in.Name,
 		"template_id":     in.TemplateID,
@@ -389,8 +392,13 @@ func (s *Store) CreateVMWithOperation(ctx context.Context, in CreateVMInput) (*V
 			"root_disk_mib":      in.RootDiskMiB,
 			"workspace_disk_mib": in.WorkspaceDiskMiB,
 		},
-	})); err != nil {
+	}))
+	if err != nil {
 		return nil, nil, err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE vms SET last_event_id = ? WHERE vm_id = ?`, createdCursor, in.VMID); err != nil {
+		return nil, nil, fmt.Errorf("set last_event_id: %w", err)
 	}
 	if _, err := s.appendSystemInTx(ctx, tx, s.systemEnvelope("operation.state_changed", "registry", notApplicableQuality(), map[string]any{
 		"operation_id": strconv.FormatInt(opID, 10),
@@ -466,7 +474,7 @@ func (s *Store) TransitionVM(ctx context.Context, in TransitionInput) (*VM, erro
 	err = tx.QueryRowContext(ctx,
 		`SELECT row_id, vm_id, name, owner, template_id, template_digest, desired_state, observed_state, revision,
 		        vcpu, memory_mib, root_disk_mib, workspace_disk_mib, network_profile, network_policy_id, labels,
-		        failure_stage, failure_reason, created_at, updated_at
+		        failure_stage, failure_reason, created_at, updated_at, last_event_id
 		 FROM vms WHERE vm_id = ?`, in.VMID,
 	).Scan(&current.RowID, &current.VMID, &current.Name, &current.Owner,
 		&current.TemplateID, &current.TemplateDigest,
@@ -474,7 +482,7 @@ func (s *Store) TransitionVM(ctx context.Context, in TransitionInput) (*VM, erro
 		&current.VCPUCount, &current.MemoryMiB, &current.RootDiskMiB, &current.WorkspaceDiskMiB,
 		&current.NetworkProfile, &current.NetworkPolicyID, &labelsJSON,
 		&current.FailureStage, &current.FailureReason,
-		&current.CreatedAt, &current.UpdatedAt)
+		&current.CreatedAt, &current.UpdatedAt, &current.LastEventID)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return nil, ErrVMUnknown
@@ -533,8 +541,13 @@ func (s *Store) TransitionVM(ctx context.Context, in TransitionInput) (*VM, erro
 	if in.BootID != nil {
 		stateData["boot_id"] = *in.BootID
 	}
-	if _, err := s.appendSystemInTx(ctx, tx, s.systemEnvelope("vm.state_changed", "registry", notApplicableQuality(), stateData)); err != nil {
+	changedCursor, err := s.appendSystemInTx(ctx, tx, s.systemEnvelope("vm.state_changed", "registry", notApplicableQuality(), stateData))
+	if err != nil {
 		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE vms SET last_event_id = ? WHERE vm_id = ?`, changedCursor, in.VMID); err != nil {
+		return nil, fmt.Errorf("set last_event_id on transition: %w", err)
 	}
 	// vm.deleted marks the terminal resource-release; history and artifacts are
 	// not purged (SPEC §5.4) — the row stays in "deleted" state.
@@ -784,7 +797,7 @@ const vmColumns = `SELECT row_id, vm_id, name, owner, template_id, template_dige
 	desired_state, observed_state, revision,
 	vcpu, memory_mib, root_disk_mib, workspace_disk_mib,
 	network_profile, network_policy_id, labels,
-	failure_stage, failure_reason, created_at, updated_at`
+	failure_stage, failure_reason, created_at, updated_at, last_event_id`
 
 func scanVM(sc vmScanner) (*VM, error) {
 	var vm VM
@@ -796,7 +809,7 @@ func scanVM(sc vmScanner) (*VM, error) {
 		&vm.VCPUCount, &vm.MemoryMiB, &vm.RootDiskMiB, &vm.WorkspaceDiskMiB,
 		&vm.NetworkProfile, &vm.NetworkPolicyID, &labelsJSON,
 		&vm.FailureStage, &vm.FailureReason,
-		&vm.CreatedAt, &vm.UpdatedAt,
+		&vm.CreatedAt, &vm.UpdatedAt, &vm.LastEventID,
 	); err != nil {
 		return nil, err
 	}
@@ -840,6 +853,55 @@ func scanOperationInTx(ctx context.Context, tx *sql.Tx, id int64) (*Operation, e
 		return nil, fmt.Errorf("read operation back: %w", err)
 	}
 	return op, nil
+}
+
+// CountVMsByObservedState returns a map of observed_state → count for all
+// non-deleted VMs, used to populate /host/status and /situation host fields.
+func (s *Store) CountVMsByObservedState(ctx context.Context) (map[string]int, error) {
+	rows, err := s.readers.QueryContext(ctx,
+		`SELECT observed_state, COUNT(*) FROM vms GROUP BY observed_state`)
+	if err != nil {
+		return nil, fmt.Errorf("count vms by state: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var state string
+		var count int
+		if err := rows.Scan(&state, &count); err != nil {
+			return nil, fmt.Errorf("scan state count: %w", err)
+		}
+		out[state] = count
+	}
+	return out, rows.Err()
+}
+
+// ChangedVMs returns VMs whose last_event_id > sinceEventID, ordered by
+// last_event_id ASC (oldest change first), bounded to limit rows. This is the
+// feed for the ?since delta in GET /situation (P-08).
+func (s *Store) ChangedVMs(ctx context.Context, sinceEventID int64, limit int) ([]*VM, error) {
+	if limit <= 0 {
+		limit = DefaultPageLimit
+	}
+	if limit > MaxPageLimit {
+		limit = MaxPageLimit
+	}
+	rows, err := s.readers.QueryContext(ctx,
+		vmColumns+` FROM vms WHERE last_event_id > ? ORDER BY last_event_id ASC LIMIT ?`,
+		sinceEventID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("changed vms: %w", err)
+	}
+	defer rows.Close()
+	var out []*VM
+	for rows.Next() {
+		vm, err := scanVM(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan changed vm: %w", err)
+		}
+		out = append(out, vm)
+	}
+	return out, rows.Err()
 }
 
 // reservationTotalsInTx computes totals inside an open transaction so the

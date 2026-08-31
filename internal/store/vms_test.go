@@ -704,3 +704,125 @@ func TestTransitionVMDeletedEmitsVMDeleted(t *testing.T) {
 		t.Errorf("vm.deleted event vm_id = %q, want %q", vmID, vm.VMID)
 	}
 }
+
+// --- last_event_id and delta tests (P-08: changed_vms is a deterministic materialization) ---
+
+func TestLastEventIDAdvancesOnCreate(t *testing.T) {
+	st := openStore(t)
+	vm, _ := mustCreateVM(t, st, testUUID(1), "alpha", nil)
+	if vm.LastEventID == 0 {
+		t.Error("last_event_id must be non-zero after create")
+	}
+	// Reload from DB to confirm it was persisted.
+	got, err := st.GetVM(t.Context(), vm.VMID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.LastEventID != vm.LastEventID {
+		t.Errorf("persisted last_event_id %d != returned %d", got.LastEventID, vm.LastEventID)
+	}
+}
+
+func TestLastEventIDAdvancesOnTransition(t *testing.T) {
+	st := openStore(t)
+	vm, op := mustCreateVM(t, st, testUUID(1), "alpha", nil)
+	afterCreate := vm.LastEventID
+
+	vm2, err := st.TransitionVM(t.Context(), store.TransitionInput{
+		VMID: vm.VMID, To: "starting", Reason: "launch", OperationID: op.OperationID,
+	})
+	if err != nil {
+		t.Fatalf("transition: %v", err)
+	}
+	if vm2.LastEventID <= afterCreate {
+		t.Errorf("last_event_id did not advance after transition: %d <= %d",
+			vm2.LastEventID, afterCreate)
+	}
+}
+
+func TestChangedVMsDelta(t *testing.T) {
+	st := openStore(t)
+
+	// Create VM A; last_event_id = e1.
+	vmA, opA := mustCreateVM(t, st, testUUID(1), "alpha", nil)
+	e1 := vmA.LastEventID
+
+	// Create VM B; last_event_id = e2 > e1.
+	vmB, _ := mustCreateVM(t, st, testUUID(2), "beta", nil)
+	e2 := vmB.LastEventID
+
+	// ChangedVMs(e1) → only B (A's last_event_id == e1, not > e1).
+	delta, err := st.ChangedVMs(t.Context(), e1, 100)
+	if err != nil {
+		t.Fatalf("ChangedVMs: %v", err)
+	}
+	if len(delta) != 1 || delta[0].VMID != vmB.VMID {
+		t.Errorf("ChangedVMs(%d) = %d VMs, want 1 (vmB)", e1, len(delta))
+	}
+
+	// ChangedVMs(e2) → empty (nothing newer than B's creation).
+	delta, err = st.ChangedVMs(t.Context(), e2, 100)
+	if err != nil {
+		t.Fatalf("ChangedVMs: %v", err)
+	}
+	if len(delta) != 0 {
+		t.Errorf("ChangedVMs(%d) = %d VMs, want 0", e2, len(delta))
+	}
+
+	// Transition A → starting; A's last_event_id becomes e3 > e2.
+	vmAtransitioned, err := st.TransitionVM(t.Context(), store.TransitionInput{
+		VMID: vmA.VMID, To: "starting", Reason: "launch", OperationID: opA.OperationID,
+	})
+	if err != nil {
+		t.Fatalf("transition A: %v", err)
+	}
+	if vmAtransitioned.LastEventID <= e2 {
+		t.Fatalf("expected last_event_id > e2 after transition, got %d", vmAtransitioned.LastEventID)
+	}
+
+	// ChangedVMs(e2) must now include A (transitioned after e2).
+	delta, err = st.ChangedVMs(t.Context(), e2, 100)
+	if err != nil {
+		t.Fatalf("ChangedVMs after transition: %v", err)
+	}
+	found := false
+	for _, v := range delta {
+		if v.VMID == vmA.VMID {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("vmA (transitioned) missing from ChangedVMs(%d), got %v", e2, delta)
+	}
+}
+
+func TestCountVMsByObservedState(t *testing.T) {
+	st := openStore(t)
+
+	// Two provisioning VMs.
+	vm1, op1 := mustCreateVM(t, st, testUUID(1), "alpha", nil)
+	vm2, _ := mustCreateVM(t, st, testUUID(2), "beta", nil)
+	_ = vm2
+
+	counts, err := st.CountVMsByObservedState(t.Context())
+	if err != nil {
+		t.Fatalf("CountVMsByObservedState: %v", err)
+	}
+	if counts["provisioning"] != 2 {
+		t.Errorf("counts[provisioning] = %d, want 2", counts["provisioning"])
+	}
+
+	// Transition vm1 to starting.
+	if _, err := st.TransitionVM(t.Context(), store.TransitionInput{
+		VMID: vm1.VMID, To: "starting", Reason: "launch", OperationID: op1.OperationID,
+	}); err != nil {
+		t.Fatalf("transition: %v", err)
+	}
+	counts, err = st.CountVMsByObservedState(t.Context())
+	if err != nil {
+		t.Fatalf("CountVMsByObservedState after transition: %v", err)
+	}
+	if counts["provisioning"] != 1 || counts["starting"] != 1 {
+		t.Errorf("counts after transition = %v, want {provisioning:1, starting:1}", counts)
+	}
+}

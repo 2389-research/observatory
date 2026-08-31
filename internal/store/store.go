@@ -124,6 +124,11 @@ var migrations = []string{
 		created_at TEXT NOT NULL,
 		updated_at TEXT NOT NULL
 	);`,
+	// v4: VM change cursors — last_event_id on each VM row enables the
+	// ?since delta in GET /situation (P-08: changed_vms is a deterministic
+	// materialization of durable records, not a parallel truth).
+	`ALTER TABLE vms ADD COLUMN last_event_id INTEGER NOT NULL DEFAULT 0;
+	CREATE INDEX idx_vms_changed ON vms (last_event_id);`,
 }
 
 // Store owns one SQLite database. All writes go through the writer pool, which
