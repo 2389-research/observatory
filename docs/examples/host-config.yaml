@@ -1,0 +1,120 @@
+# Proposed configuration contract, not an installer or measured sizing result.
+# Resolve real paths, image manifests, credentials and policy files during setup.
+config_version: 1
+
+server:
+  listen: "127.0.0.1:8787"
+  public_origin: "http://127.0.0.1:8787"
+  mode: loopback_only
+  # Non-loopback use must require HTTPS/WSS and exact-origin enforcement.
+  trust_forwarded_identity: false
+
+auth:
+  mode: local_operator
+  require_authentication: true
+  credential_store: "/var/lib/vmobs/auth"
+  csrf_protection: true
+  session_cookie_http_only: true
+  session_cookie_same_site: strict
+  # Secure cookies are mandatory in HTTPS mode; HTTP is loopback-only.
+  session_cookie_secure: false
+
+paths:
+  state: "/var/lib/vmobs"
+  runtime: "/run/vmobs"
+  approved_templates: "/var/lib/vmobs/templates"
+  runtime_lock: "/etc/vmobs/runtime.lock.json"
+  # Parent directory ownership is part of privileged-helper preflight.
+  privileged_socket: "/run/vmobs/privd.sock"
+
+admission:
+  allow_memory_overcommit: false
+  cpu_overcommit_ratio: 1.0
+  reserve_host_cpu_cores: 2
+  reserve_host_memory_min_mib: 4096
+  reserve_host_memory_fraction: 0.20
+  reserve_per_vm_host_overhead_mib: 768
+  reserve_inspection_slots: 1
+  # Inspector resources must ALSO have a concrete RAM/CPU/disk reservation.
+  reserve_inspector_memory_mib: 1024
+  reserve_inspector_cpu_cores: 1
+  reserve_inspector_scratch_mib: 20480
+  max_parallel_provisions: 2
+  max_batch_size: 8
+  default_batch_reservation: atomic_reservation
+  default_batch_on_failure: keep_successful
+
+vm_defaults:
+  vcpu_count: 2
+  memory_mib: 2048
+  root_disk_mib: 8192
+  workspace_disk_mib: 10240
+  guest_privilege: unprivileged
+  network_profile: transport
+  network_policy_id: transport-public-web
+  disk_allocation: preallocate
+  max_terminal_sessions: 4
+  stop_grace_seconds: 30
+
+network:
+  ipv4_only_guest_boundary: true
+  drop_guest_ipv6_on_host: true
+  deny_cross_vm: true
+  deny_host_and_special_use_destinations: true
+  # Policies require actual deployment-specific routes/address classification.
+  policy_directory: "/etc/vmobs/network-policies"
+  proxy_per_vm: true
+  proxy_ca_per_vm: true
+  proxy_upstream_tls_verify: true
+  proxy_failure: fail_closed
+  raw_pcap_default: false
+
+observation:
+  filesystem_reads_default: false
+  required_by_default: false
+  failure_action_default: degrade
+  heartbeat_interval_seconds: 1
+  heartbeat_timeout_seconds: 5
+  max_frame_bytes: 262144
+  max_guest_pending_bytes: 16777216
+  max_runner_spool_bytes: 536870912
+  # A separate reserve allows health/control records during event saturation.
+  host_emergency_reserve_bytes: 1073741824
+  spool_ack_barrier: durable_flush
+  source_deduplication: source_instance_and_sequence
+
+terminal:
+  max_replay_bytes_per_session: 4194304
+  max_wire_chunk_bytes: 16384
+  max_inflight_browser_bytes: 262144
+  writer_lease_seconds: 30
+  record_input: false
+  persist_output_default: false
+  automatic_clipboard_write: false
+  automatic_download: false
+
+capture:
+  http_headers_default: redacted
+  http_bodies_default: "off"
+  max_header_bytes: 65536
+  max_body_preview_bytes: 65536
+  max_file_preview_bytes: 262144
+  redact_before_persistence: true
+  allow_unredacted_proxy_flow_dump: false
+
+storage:
+  database: "/var/lib/vmobs/vmobs.sqlite"
+  sqlite_journal_mode: WAL
+  sqlite_synchronous: FULL
+  logical_writers: 1
+  event_retention_days: 30
+  artifact_retention_days: 7
+  raw_disk_export_requires_separate_authorization: true
+  untrusted_host_kernel_mounts: prohibited
+
+performance_targets:
+  # Targets only: acceptance must measure these on the documented test host.
+  reference_concurrent_vms: 4
+  terminal_echo_p95_ms: 150
+  event_visibility_p95_ms: 1000
+  steady_metadata_events_per_second: 1000

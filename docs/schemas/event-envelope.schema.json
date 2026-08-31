@@ -1,0 +1,222 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vmobs:schema:event-envelope:1",
+  "title": "Firecracker Observatory normalized event envelope v1",
+  "description": "Host-normalized record. event_id is absent/null before indexing and assigned by SQLite ingestion. Schema validation does not establish provenance; trusted ingress must bind identity.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "vm_id",
+    "boot_id",
+    "source_instance_id",
+    "source_seq",
+    "kind",
+    "provenance",
+    "sensor",
+    "host_received_at",
+    "quality",
+    "data"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "event_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "vm_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "boot_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "source_instance_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "source_seq": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)$"
+    },
+    "kind": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 96,
+      "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$"
+    },
+    "provenance": {
+      "enum": [
+        "host_observed",
+        "guest_reported",
+        "derived"
+      ]
+    },
+    "sensor": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "host_received_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "host_boot_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "host_monotonic_ns": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)$"
+    },
+    "guest_wall_at": {
+      "anyOf": [
+        {
+          "type": "string",
+          "format": "date-time"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "guest_monotonic_ns": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "process_key": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "run_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "related_event_ids": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "string",
+        "pattern": "^(0|[1-9][0-9]*)$"
+      },
+      "uniqueItems": true
+    },
+    "quality": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path_resolution",
+        "attribution",
+        "truncated",
+        "redacted"
+      ],
+      "properties": {
+        "path_resolution": {
+          "enum": [
+            "exact_at_capture",
+            "inferred",
+            "unresolved",
+            "not_applicable"
+          ]
+        },
+        "attribution": {
+          "enum": [
+            "exact",
+            "inferred",
+            "unknown",
+            "not_applicable"
+          ]
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "redacted": {
+          "type": "boolean"
+        },
+        "redaction_policy_id": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "notes": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "string",
+            "maxLength": 512
+          }
+        }
+      }
+    },
+    "data": {
+      "type": "object",
+      "description": "Validate additionally against the versioned schema for kind. Bound total encoded event bytes before parsing; JSON Schema alone is not a memory or authority boundary."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "vm_id": {
+            "type": "null"
+          }
+        },
+        "required": [
+          "vm_id"
+        ]
+      },
+      "then": {
+        "properties": {
+          "boot_id": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ]
+}

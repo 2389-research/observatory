@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "event_id": "18442",
+  "vm_id": "1ed7fdbf-7007-43f3-b5b2-8071e96b2df5",
+  "boot_id": "10e6210d-d21f-4f8d-8c69-5370f1e6d44f",
+  "source_instance_id": "190be15a-9470-40c6-b7df-c1b541a8e005",
+  "source_seq": "918",
+  "kind": "fs.modify",
+  "provenance": "guest_reported",
+  "sensor": "fanotify",
+  "host_received_at": "2026-08-30T20:00:00.000000Z",
+  "host_boot_id": "8918ee94-330c-4d85-90a4-341f231dd6e1",
+  "host_monotonic_ns": "900241998888",
+  "guest_monotonic_ns": "4138100021",
+  "process_key": "10e6210d-d21f-4f8d-8c69-5370f1e6d44f:441:3900100000",
+  "run_id": null,
+  "quality": {
+    "path_resolution": "exact_at_capture",
+    "attribution": "exact",
+    "truncated": false,
+    "redacted": false
+  },
+  "data": {
+    "path_display": "/workspace/server.py",
+    "path_bytes_base64": "L3dvcmtzcGFjZS9zZXJ2ZXIucHk=",
+    "filesystem_id": "workspace",
+    "content_capture": "not_requested"
+  }
+}
