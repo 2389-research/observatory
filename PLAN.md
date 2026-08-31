@@ -19,13 +19,17 @@ Two tracks:
 | P3 | VM registry, operations, admission reservations, runtime interface + fake runtime, lifecycle event emission | §5, §6, R-01, R-02, R-09 partial, R-10 partial | pending |
 | P4 | Declarative runs + reports: run state machine, criteria evaluation, report generation with reproduce_query rollups | §8.6, §8.7, R-16 | pending |
 | P5 | Auth (local operator, sessions, CSRF), owner scoping | §15.1, R-11 | pending — must land before any non-loopback bind or the web UI |
-| L0.. | Linux track per spec milestones M0–M5; then web/ frontend against the stabilized API | §18 | blocked on host decision |
+| L0.. | Linux track per spec milestones M0–M5; then web/ frontend against the stabilized API | §18 | host chosen — pending |
 
 Auth note: P1–P4 expose read endpoints plus idempotent mutations on loopback only; `mode: loopback_only` is enforced in the listener. First non-loopback capability requires P5 done.
 
 ## Open questions for Doctor Biz
 
-1. Which Linux/KVM host do we target for the real track — a tailnet box, a rented bare-metal machine, or a local VM? Architecture (x86_64 vs arm64) decides the kernel/image pipeline and doesn't need answering until L0.
+None right now.
+
+## Linux track host (answered 2026-08-31)
+
+`aibox03` — tailnet `100.64.0.100`. Verified by probe: bare metal (`systemd-detect-virt: none`), x86_64 Intel VT-x (`kvm_intel` loaded), Ubuntu 24.04.4 LTS, kernel 6.8.0-134 (fanotify + eBPF capable), 32 CPUs, 62 GiB RAM, 60 GiB free on `/`. SSH works as `harper` (key auth). Setup needed at L0 start: add `harper` to the `kvm` group (has sudo), install firecracker. Kernel/image pipeline targets x86_64.
 
 ## Deviations log (SPEC §0: record deviations as architecture decisions)
 
