@@ -61,8 +61,9 @@ func New(st *store.Store, eng *situation.Engine, mgr *runtime.Manager) http.Hand
 		{"DELETE", "/vms/{id}", "vms", s.handleDeleteVM},
 		{"GET", "/operations/{id}", "operations", s.handleGetOperation},
 
+		{"POST", "/vm-batches", "vm_batches", s.handleCreateBatch},
+		{"GET", "/vm-batches/{id}", "vm_batches", s.handleGetBatch},
 		{"", "/events/stream", "events_stream", nil},
-		{"", "/vm-batches", "vm_batches", nil},
 		{"", "/vms/{id}/terminals", "terminals", nil},
 		{"", "/terminals/{id}", "terminals", nil},
 		{"", "/terminals/{id}/stream", "terminals", nil},
@@ -145,6 +146,7 @@ type limits struct {
 	AnnotationTextMaxBytes    int   `json:"annotation_text_max_bytes"`
 	AttentionQueueMaxItems    int   `json:"attention_queue_max_items"`
 	SituationMaxResponseBytes int64 `json:"situation_max_response_bytes"`
+	MaxBatchSize              int   `json:"max_batch_size"`
 }
 
 type meta struct {
@@ -169,6 +171,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 			AnnotationTextMaxBytes:    store.AnnotationTextMaxBytes,
 			AttentionQueueMaxItems:    s.engine.Config().QueueMaxItems,
 			SituationMaxResponseBytes: s.engine.Config().SituationMaxResponseBytes,
+			MaxBatchSize:              MaxBatchSize,
 		},
 		// The active set is enabled-intersect-implemented, straight from the
 		// engine: config alone must not claim a watch no code performs (P-03).

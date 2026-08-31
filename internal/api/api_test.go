@@ -142,7 +142,8 @@ func TestMetaIsHonest(t *testing.T) {
 		"meta": true, "events": true,
 		"situation": true, "attention": true, "annotations": true,
 		"host_status": true, "templates": true, "vms": true, "operations": true,
-		"runs": false, "terminals": false, "execs": false,
+		"vm_batches": true,
+		"runs":       false, "terminals": false, "execs": false,
 		"events_stream": false,
 	} {
 		got, present := meta.Features[feature]
@@ -158,7 +159,8 @@ func TestMetaIsHonest(t *testing.T) {
 	}
 	if meta.Limits["annotation_text_max_bytes"] != store.AnnotationTextMaxBytes ||
 		meta.Limits["attention_queue_max_items"] != 500 ||
-		meta.Limits["situation_max_response_bytes"] != 65536 {
+		meta.Limits["situation_max_response_bytes"] != 65536 ||
+		meta.Limits["max_batch_size"] != api.MaxBatchSize {
 		t.Errorf("working-set limits missing: %v", meta.Limits)
 	}
 	// The active set is enabled-intersect-implemented, never the raw config.
@@ -317,7 +319,7 @@ func TestUnbuiltEndpointsTeachCapability(t *testing.T) {
 	for _, probe := range []struct {
 		method, path, feature string
 	}{
-		{http.MethodGet, "/api/v1/vm-batches", "vm_batches"},
+		{http.MethodGet, "/api/v1/events/stream", "events_stream"},
 		{http.MethodGet, "/api/v1/runs", "runs"},
 		{http.MethodGet, "/api/v1/vms/" + testUUID(1) + "/coverage", "coverage"},
 	} {
