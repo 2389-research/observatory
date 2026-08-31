@@ -691,12 +691,12 @@ func (s *Store) SubmitRunProgress(ctx context.Context, in SubmitProgressInput) (
 	defer func() { _ = tx.Rollback() }()
 
 	// Re-read run inside tx to pin the current seq value (single-writer serializes this).
+	// progress_events immutability means the pre-tx gate is sufficient; no need to re-read it.
 	var currentSeq int64
 	var phase string
-	var progressEventsEnabled int
 	if err := tx.QueryRowContext(ctx,
-		`SELECT progress_seq, phase, progress_events FROM runs WHERE run_id = ?`, in.RunID,
-	).Scan(&currentSeq, &phase, &progressEventsEnabled); err != nil {
+		`SELECT progress_seq, phase FROM runs WHERE run_id = ?`, in.RunID,
+	).Scan(&currentSeq, &phase); err != nil {
 		return 0, fmt.Errorf("read run for progress: %w", err)
 	}
 	if phase != "pending" && phase != "running" {
@@ -719,9 +719,10 @@ func (s *Store) SubmitRunProgress(ctx context.Context, in SubmitProgressInput) (
 			Attribution:    events.AttributionNotApplicable,
 		},
 		Data: map[string]any{
-			"run_id": in.RunID,
-			"vm_id":  run.VMID,
-			"seq":    nextSeq,
+			"run_id":  in.RunID,
+			"vm_id":   run.VMID,
+			"seq":     nextSeq,
+			"payload": json.RawMessage(in.Payload),
 		},
 	}
 	eventID, err := s.appendSystemInTx(ctx, tx, progressEnv)

@@ -368,6 +368,21 @@ func TestSubmitRunProgressHappyPath(t *testing.T) {
 	if fmt.Sprintf("%v", ev.Data["seq"]) != "1" {
 		t.Errorf("event data seq = %v, want 1", ev.Data["seq"])
 	}
+
+	// payload must be present and round-trip as the submitted JSON object.
+	rawPayload, ok := ev.Data["payload"]
+	if !ok {
+		t.Fatal("event data missing payload field")
+	}
+	// The stored payload should be a JSON object (decoded as map[string]any by the
+	// event scanner), not a string or base64 blob.
+	payloadMap, ok := rawPayload.(map[string]any)
+	if !ok {
+		t.Fatalf("event data payload is %T, want map[string]any", rawPayload)
+	}
+	if pct, ok := payloadMap["pct"]; !ok || fmt.Sprintf("%v", pct) != "42" {
+		t.Errorf("event data payload[pct] = %v, want 42", pct)
+	}
 }
 
 func TestSubmitRunProgressSeqIncrements(t *testing.T) {
@@ -747,9 +762,12 @@ func TestPutRunReportImmutable(t *testing.T) {
 		t.Errorf("error does not mention existing digest: %v", err)
 	}
 
-	// Original report unchanged.
+	// Original report unchanged: both Digest and ReportJSON must be byte-identical to the first Put.
 	got, _ := st.GetRunReport(t.Context(), run.RunID)
 	if got.Digest != "sha256:first" {
 		t.Errorf("original digest overwritten: %q", got.Digest)
+	}
+	if got.ReportJSON != `{"v":1}` {
+		t.Errorf("original ReportJSON overwritten: %q", got.ReportJSON)
 	}
 }
