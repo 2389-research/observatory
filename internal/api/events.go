@@ -68,7 +68,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 	result, err := s.store.Query(r.Context(), q)
 	if err != nil {
-		writeQueryError(w, q, err)
+		writeQueryError(w, err)
 		return
 	}
 	resp := eventsResponse{
@@ -82,7 +82,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func writeQueryError(w http.ResponseWriter, q store.Query, err error) {
+func writeQueryError(w http.ResponseWriter, err error) {
 	var bound *store.BoundError
 	switch {
 	case errors.As(err, &bound):

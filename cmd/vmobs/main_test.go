@@ -14,6 +14,7 @@ import (
 
 	"github.com/2389-research/observatory-v2/internal/api"
 	"github.com/2389-research/observatory-v2/internal/events"
+	"github.com/2389-research/observatory-v2/internal/situation"
 	"github.com/2389-research/observatory-v2/internal/store"
 )
 
@@ -24,7 +25,13 @@ func newServer(t *testing.T) (*httptest.Server, *store.Store) {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { st.Close() })
-	srv := httptest.NewServer(api.New(st))
+	eng := situation.New(st, situation.Config{
+		Triggers:                  map[string]bool{"telemetry_degraded": true},
+		QueueMaxItems:             500,
+		CollapseDuplicates:        true,
+		SituationMaxResponseBytes: 65536,
+	})
+	srv := httptest.NewServer(api.New(st, eng))
 	t.Cleanup(srv.Close)
 	return srv, st
 }

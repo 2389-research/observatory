@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/2389-research/observatory-v2/internal/events"
+	"github.com/2389-research/observatory-v2/internal/situation"
 	"github.com/2389-research/observatory-v2/internal/store"
 )
 
@@ -17,9 +18,10 @@ const (
 	basePath   = "/api/v1"
 )
 
-// Server serves the /api/v1 surface over one store.
+// Server serves the /api/v1 surface over one store and one trigger engine.
 type Server struct {
 	store    *store.Store
+	engine   *situation.Engine
 	mux      *http.ServeMux
 	features map[string]bool
 }
@@ -34,19 +36,21 @@ type route struct {
 // New wires the API over st. Every endpoint in SPEC §14 is present in the
 // table: built ones serve, unbuilt ones answer 501 missing_capability so an
 // agent probing the spec surface is taught, not stonewalled.
-func New(st *store.Store) http.Handler {
-	s := &Server{store: st, mux: http.NewServeMux()}
+func New(st *store.Store, eng *situation.Engine) http.Handler {
+	s := &Server{store: st, engine: eng, mux: http.NewServeMux()}
 	table := []route{
 		{"GET", "/meta", "meta", s.handleMeta},
 		{"GET", "/meta/event-kinds", "meta", s.handleEventKinds},
 		{"GET", "/events", "events", s.handleEvents},
+		{"GET", "/situation", "situation", s.handleSituation},
+		{"GET", "/attention", "attention", s.handleAttention},
+		{"POST", "/attention/{id}/ack", "attention", s.handleAttentionAck},
+		{"POST", "/annotations", "annotations", s.handleAnnotationsCreate},
+		{"GET", "/annotations", "annotations", s.handleAnnotationsList},
 
 		{"", "/events/stream", "events_stream", nil},
 		{"", "/host/status", "host_status", nil},
 		{"", "/templates", "templates", nil},
-		{"", "/situation", "situation", nil},
-		{"", "/attention", "attention", nil},
-		{"", "/attention/{id}/ack", "attention", nil},
 		{"", "/vms", "vms", nil},
 		{"", "/vms/{id}", "vms", nil},
 		{"", "/vms/{id}/actions", "vms", nil},
@@ -65,7 +69,6 @@ func New(st *store.Store) http.Handler {
 		{"", "/runs/{id}", "runs", nil},
 		{"", "/runs/{id}/report", "runs", nil},
 		{"", "/runs/{id}/conclude", "runs", nil},
-		{"", "/annotations", "annotations", nil},
 		{"", "/vms/{id}/coverage", "coverage", nil},
 		{"", "/vms/{id}/filesystem/diff", "filesystem_diff", nil},
 		{"", "/vms/{id}/exports", "exports", nil},
@@ -130,8 +133,11 @@ func notFound(w http.ResponseWriter, r *http.Request) {
 }
 
 type limits struct {
-	EventsPageDefault int `json:"events_page_default"`
-	EventsPageMax     int `json:"events_page_max"`
+	EventsPageDefault         int   `json:"events_page_default"`
+	EventsPageMax             int   `json:"events_page_max"`
+	AnnotationTextMaxBytes    int   `json:"annotation_text_max_bytes"`
+	AttentionQueueMaxItems    int   `json:"attention_queue_max_items"`
+	SituationMaxResponseBytes int64 `json:"situation_max_response_bytes"`
 }
 
 type meta struct {
@@ -151,16 +157,23 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 		APIVersion: APIVersion,
 		Features:   s.features,
 		Limits: limits{
-			EventsPageDefault: store.DefaultPageLimit,
-			EventsPageMax:     store.MaxPageLimit,
+			EventsPageDefault:         store.DefaultPageLimit,
+			EventsPageMax:             store.MaxPageLimit,
+			AnnotationTextMaxBytes:    store.AnnotationTextMaxBytes,
+			AttentionQueueMaxItems:    s.engine.Config().QueueMaxItems,
+			SituationMaxResponseBytes: s.engine.Config().SituationMaxResponseBytes,
 		},
-		// Attention is not built; an empty list is the honest active set.
-		AttentionTriggerClasses: []string{},
+		// The active set is enabled-intersect-implemented, straight from the
+		// engine: config alone must not claim a watch no code performs (P-03).
+		AttentionTriggerClasses: s.engine.ActiveClasses(),
 		// Links name only what answers 200 today. The guide and OpenAPI join
 		// this map when they exist, not before.
 		Links: map[string]string{
 			"event_kinds": basePath + "/meta/event-kinds",
 			"events":      basePath + "/events",
+			"situation":   basePath + "/situation",
+			"attention":   basePath + "/attention",
+			"annotations": basePath + "/annotations",
 		},
 	})
 }

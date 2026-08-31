@@ -16,6 +16,7 @@ import (
 
 	"github.com/2389-research/observatory-v2/internal/api"
 	"github.com/2389-research/observatory-v2/internal/events"
+	"github.com/2389-research/observatory-v2/internal/situation"
 	"github.com/2389-research/observatory-v2/internal/store"
 )
 
@@ -26,7 +27,18 @@ func newServer(t *testing.T) (*httptest.Server, *store.Store) {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { st.Close() })
-	srv := httptest.NewServer(api.New(st))
+	eng := situation.New(st, situation.Config{
+		Triggers: map[string]bool{
+			"lifecycle_failed": true, "run_concluded": true, "telemetry_degraded": true,
+			"spool_threshold": true, "disk_reserve_threshold": true,
+			"policy_denial_anomaly": true, "capacity_exhausted": true,
+			"reconciliation_surprise": true,
+		},
+		QueueMaxItems:             500,
+		CollapseDuplicates:        true,
+		SituationMaxResponseBytes: 65536,
+	})
+	srv := httptest.NewServer(api.New(st, eng))
 	t.Cleanup(srv.Close)
 	return srv, st
 }
@@ -114,8 +126,9 @@ func TestMetaIsHonest(t *testing.T) {
 	}
 	for feature, want := range map[string]bool{
 		"meta": true, "events": true,
+		"situation": true, "attention": true, "annotations": true,
 		"vms": false, "runs": false, "terminals": false, "execs": false,
-		"situation": false, "attention": false, "events_stream": false,
+		"events_stream": false,
 	} {
 		got, present := meta.Features[feature]
 		if !present {
@@ -128,8 +141,14 @@ func TestMetaIsHonest(t *testing.T) {
 		meta.Limits["events_page_max"] != store.MaxPageLimit {
 		t.Errorf("limits = %v, want store bounds", meta.Limits)
 	}
-	if meta.AttentionTriggerClasses == nil || len(meta.AttentionTriggerClasses) != 0 {
-		t.Errorf("attention classes = %v, want empty list (attention is not built)", meta.AttentionTriggerClasses)
+	if meta.Limits["annotation_text_max_bytes"] != store.AnnotationTextMaxBytes ||
+		meta.Limits["attention_queue_max_items"] != 500 ||
+		meta.Limits["situation_max_response_bytes"] != 65536 {
+		t.Errorf("working-set limits missing: %v", meta.Limits)
+	}
+	// The active set is enabled-intersect-implemented, never the raw config.
+	if len(meta.AttentionTriggerClasses) != 1 || meta.AttentionTriggerClasses[0] != "telemetry_degraded" {
+		t.Errorf("attention classes = %v, want exactly the implemented+enabled set", meta.AttentionTriggerClasses)
 	}
 	if len(meta.Links) == 0 {
 		t.Fatal("meta has no links")
@@ -282,7 +301,6 @@ func TestUnbuiltEndpointsTeachCapability(t *testing.T) {
 		method, path, feature string
 	}{
 		{http.MethodPost, "/api/v1/vms", "vms"},
-		{http.MethodGet, "/api/v1/situation", "situation"},
 		{http.MethodGet, "/api/v1/runs", "runs"},
 		{http.MethodGet, "/api/v1/vms/" + testUUID(1) + "/coverage", "coverage"},
 	} {

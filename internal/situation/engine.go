@@ -18,10 +18,13 @@ const CursorName = "attention_triggers"
 
 // Config carries the agent_interface host configuration the engine obeys.
 // Triggers maps class -> enabled; only implemented classes ever raise.
+// SituationMaxResponseBytes is enforced by the API when rendering; it lives
+// here so agent_interface config has one home.
 type Config struct {
-	Triggers           map[string]bool
-	QueueMaxItems      int
-	CollapseDuplicates bool
+	Triggers                  map[string]bool
+	QueueMaxItems             int
+	CollapseDuplicates        bool
+	SituationMaxResponseBytes int64
 }
 
 // Engine evaluates registered trigger rules over the durable stream. It holds
@@ -35,6 +38,10 @@ type Engine struct {
 func New(st *store.Store, cfg Config) *Engine {
 	return &Engine{st: st, cfg: cfg}
 }
+
+// Config returns the engine's configuration so serving layers report the
+// limits actually in force rather than restating config themselves.
+func (e *Engine) Config() Config { return e.cfg }
 
 // rule maps one event kind to the attention it deserves. Summaries state what
 // happened; system actions state what the system already did — both from the

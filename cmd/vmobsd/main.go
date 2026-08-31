@@ -18,6 +18,7 @@ import (
 
 	"github.com/2389-research/observatory-v2/internal/api"
 	"github.com/2389-research/observatory-v2/internal/config"
+	"github.com/2389-research/observatory-v2/internal/situation"
 	"github.com/2389-research/observatory-v2/internal/store"
 )
 
@@ -78,8 +79,14 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready f
 		return fmt.Errorf("bound %s which is not loopback; refusing to serve without an authentication boundary", ln.Addr())
 	}
 
+	eng := situation.New(st, situation.Config{
+		Triggers:                  cfg.AgentInterface.AttentionTriggers,
+		QueueMaxItems:             cfg.AgentInterface.AttentionQueueMaxItems,
+		CollapseDuplicates:        cfg.AgentInterface.AttentionCollapseDuplicates,
+		SituationMaxResponseBytes: cfg.AgentInterface.SituationMaxResponseBytes,
+	})
 	srv := &http.Server{
-		Handler:           api.New(st),
+		Handler:           api.New(st, eng),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	serveErr := make(chan error, 1)
