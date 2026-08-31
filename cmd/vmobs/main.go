@@ -50,6 +50,18 @@ commands:
   attention [--all] [--after N] [--limit N]
                             the attention queue (--all includes acknowledged items)
   attention ack ATT-ID      acknowledge one item; durable and idempotent
+  vm list [--state S] [--after N] [--limit N]
+                            list VMs
+  vm get VM-ID              full VM detail
+  vm create --template ID [--vcpu N] [--memory MiB] [--idempotency-key K] NAME
+                            create a VM and start provisioning
+  vm action VM-ID ACTION --revision N
+                            lifecycle action (pause|resume|stop|force_stop)
+  vm delete VM-ID [--force] [--revision N]
+                            delete a VM (--force stops it first)
+  operation get OP-ID       operation detail
+  template list             list approved templates
+  host status               runtime availability and capacity
   api [-d BODY] METHOD PATH raw authenticated request, e.g. api GET /api/v1/meta
 
 flags:
@@ -98,6 +110,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return c.attentionAck(rest[2:])
 		}
 		return c.attention(rest[1:])
+	case "vm":
+		return c.dispatchVMCmd(rest[1:])
+	case "operation":
+		return c.dispatchOperationCmd(rest[1:])
+	case "template":
+		return c.dispatchTemplateCmd(rest[1:])
+	case "host":
+		return c.dispatchHostCmd(rest[1:])
 	case "api":
 		return c.raw(rest[1:])
 	default:
