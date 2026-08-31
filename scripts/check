@@ -1,0 +1,50 @@
+#!/bin/sh
+# ABOUTME: Canonical repository gate: format, vet, lint, tests, docs package check.
+# ABOUTME: Run from anywhere as scripts/check; exits nonzero on any failed gate.
+set -u
+cd "$(dirname "$0")/.."
+
+# Heal a stale inherited GOROOT pointing at a removed toolchain.
+if [ -n "${GOROOT:-}" ] && [ ! -d "${GOROOT:-}" ]; then
+  unset GOROOT
+fi
+
+fail=0
+note() { printf '%s\n' "$*"; }
+
+unformatted=$(gofmt -l cmd internal 2>/dev/null)
+if [ -n "$unformatted" ]; then
+  note "FAIL gofmt — run: gofmt -w $unformatted"
+  fail=1
+else
+  note "PASS gofmt"
+fi
+
+if go vet ./...; then note "PASS go vet"; else note "FAIL go vet"; fail=1; fi
+
+if command -v golangci-lint >/dev/null 2>&1; then
+  if golangci-lint run ./...; then note "PASS golangci-lint"; else note "FAIL golangci-lint"; fail=1; fi
+else
+  note "FAIL golangci-lint missing — install it (brew install golangci-lint)"
+  fail=1
+fi
+
+if go test ./...; then note "PASS go test"; else note "FAIL go test"; fail=1; fi
+
+if command -v uv >/dev/null 2>&1; then
+  if uv run docs/validation/check.py >/dev/null 2>&1; then
+    note "PASS docs package check"
+  else
+    note "FAIL docs package check — run: uv run docs/validation/check.py"
+    fail=1
+  fi
+else
+  note "FAIL uv missing — install uv to run the docs package check"
+  fail=1
+fi
+
+if [ "$fail" -ne 0 ]; then
+  note "check: FAILED"
+  exit 1
+fi
+note "check: all gates passed"
