@@ -138,8 +138,31 @@ Use a dedicated controlled network fixture for deterministic HTTP, HTTPS, DNS, p
 | AT-087 | R-09, R-10 | Exhaust optional capture quota and then approach the host reserve threshold. New launches stop; durable ACK semantics hold; health/control remain usable. |
 | AT-088 | R-01, R-11 | Trigger authenticated host emergency stop while guest control is unresponsive. Owned VM uplinks/processes are stopped without touching unrelated host workloads. |
 
+## I. Agent operations: situation, attention, runs and self-description
+
+These rows verify the agent-interface principles P-01 through P-08 defined in `SPEC.md` section 1.4.
+
+| Test | Requirement | Procedure and required result |
+|---|---|---|
+| AT-089 | R-15 | Populate mixed fleet states: running, failed, paused, degraded telemetry, active run. `/situation` lists each VM exactly once, matches the underlying records, and stays within the configured byte bound; `?since` returns only changed entries; an unchanged system returns a small quiet response with valid cursors (P-01, P-02). |
+| AT-090 | R-15 | Induce each enumerated attention trigger class once. Exactly one item per condition appears with evidence links, recorded system action and typed suggested actions; execute one suggested action verbatim and it succeeds; acknowledgment removes the item from the default view, retains history, and survives controller restart. |
+| AT-091 | R-15, R-12 | Kill a sensor or collector feeding triggers, then quiesce the fleet. The quiet situation response reports the reduced watch scope and degraded trigger classes; blind calm is never presented as monitored calm (P-03). |
+| AT-092 | R-16 | Submit a batch of launches with attached runs (`exec_exit_zero`, `stop_and_finalize`). Runs conclude, VMs stop and finalize per policy, and each report validates against `run-report.schema.json`; re-run every `reproduce_query` in one report and confirm each count matches (P-05). |
+| AT-093 | R-16, R-10 | Resubmit run creation with its original idempotency key across connection loss and controller restart: exactly one run exists. Crash the runner mid-run: the run resumes or concludes with an explicit interruption reason; accepted exec work is not executed twice. |
+| AT-094 | R-16, R-12 | Fail the success criteria; separately make them unevaluable by killing guestd before the verdict and by submitting a malformed result. Failed runs report `failed` with evidence; unevaluable runs report `inconclusive` with the reason; a report is produced in every terminal phase; no verdict is fabricated. |
+| AT-095 | R-16, R-12 | Workload emits progress and a result at the size cap and beyond it. In-bound submissions appear as ordered `run.progress` and result records labeled guest_reported; oversized or malformed submissions are rejected with a bounded recorded reason and cannot crash guestd, the runner, or the indexer. |
+| AT-096 | R-17 | Compare `/meta` against `runtime.lock.json` and the loaded configuration: versions, limits, enabled features and active trigger classes match the running truth. Change a configured limit and restart: the manifest reflects it. No manifest field contradicts behavior observed elsewhere in the suite. |
+| AT-097 | R-17, R-12 | Collect every distinct event kind emitted across the full acceptance run. Each exists in `/meta/event-kinds` with schema reference, provenance class, semantics and caveats; the registry is generated from the emitting code's own tables; an unregistered kind is rejected at ingress with a health record. |
+| AT-098 | R-17, R-06 | For each network and privilege profile, read `context.json` inside the guest and behaviorally verify each stated expectation: stated-allowed egress succeeds, stated-denied egress fails, the stated workspace layout and result convention work. The context never promises what enforcement denies. |
+| AT-099 | R-13, R-09 | Induce capacity exhaustion, revision conflict, expired cursor, missing capability and idempotency-conflict errors. Each returns a typed cause and retryability; where remediation is defined, the options are executable exactly as returned — execute the capacity remediation and the follow-up request succeeds (P-06). |
+| AT-100 | R-14, R-15 | Annotate a VM, a run and an event; conclude a run with an operator verdict. Annotations are immutable, author-attributed, queryable by target ref, survive restart, appear in exports, and outlive VM compute deletion under the retention policy (P-04). |
+| AT-101 | R-14 | Walk a defined checklist of every UI view: fleet, VM detail, timeline row and drawer, runs, coverage, diff, network. Every displayed fact is retrievable through the public API with the same value and provenance/quality labels; no UI-only data path exists (P-07). |
+| AT-102 | R-16, R-13 | Drive the reference four-VM loop end to end through the CLI in JSON mode only: batch launch with runs, situation delta polling, report harvest, attention acknowledgment. Record round-trips and default-form response bytes; publish the trace against the SPEC.md section 19 interaction budget. No per-VM busy-polling is required. |
+
 ## Traceability and release gate
 
-Every requirement R-01 through R-14 is represented above. The builder must add tests when implementation choices introduce new behavior, not replace this matrix with a handful of happy-path checks.
+Every requirement R-01 through R-17 is represented above. The builder must add tests when implementation choices introduce new behavior, not replace this matrix with a handful of happy-path checks. New tests take the next sequential ID; existing IDs are never renumbered or reused.
 
-V1 mandatory gate: all 88 rows are implemented and run in their relevant environment, with every failure or blockage explicitly reported. Any scoped exception requires a documented product limitation and must not contradict the core requirements. Memory snapshot/restore is not part of these 88 V1 rows.
+Acceptance evidence accretes under stable IDs in `tests/acceptance-evidence/AT-xxx/` as machine-readable records plus referenced logs and artifacts. Successive builder sessions append runs; they never overwrite recorded history.
+
+V1 mandatory gate: all 102 rows are implemented and run in their relevant environment, with every failure or blockage explicitly reported. Any scoped exception requires a documented product limitation and must not contradict the core requirements. Memory snapshot/restore is not part of these 102 V1 rows.

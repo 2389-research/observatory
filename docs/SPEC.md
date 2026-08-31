@@ -20,6 +20,8 @@ The implementation may change internal structure after inspecting dependencies, 
 
 The companion `ACCEPTANCE.md` supplies stable test IDs. `schemas/` and `examples/` define concrete interchange examples. All examples are proposed interfaces; no command in this document claims an existing released `vmobs` product.
 
+The operator this system serves is usually an autonomous agent. Sections 1.3 and 1.4 state the system model and agent-interface principles; they are binding contract for every interface, not garnish on a human dashboard. Serve self-description and operator documentation from the build itself, generated from the sources the implementation executes, never as a second hand-maintained copy.
+
 ## 1. Product outcome
 
 The operator opens a web application, selects a machine template, launches one or several VMs, interacts with each through a terminal, and inspects a timeline of processes, filesystem changes, network flows, DNS, and—when enabled—HTTP requests. Each VM has independent storage, lifecycle, network policy, sessions, logs, and resource limits.
@@ -44,14 +46,58 @@ After a run, the operator can inspect its exit reason, telemetry coverage, final
 | R-12 | Record gaps, truncation, redaction, uncertainty, and provenance rather than claiming perfect visibility. |
 | R-13 | Expose a stable execution API suitable for an autonomous coding-agent harness. |
 | R-14 | Export machine-readable history, final-state evidence, configuration, and coverage summaries. |
+| R-15 | Serve a bounded fleet situation summary with delta cursors and a durable, acknowledgeable attention queue driven by enumerated deterministic triggers. |
+| R-16 | Support declarative runs: goal and success criteria at submission, a completion policy, a linked machine-readable run report, and guest progress/result submission. |
+| R-17 | Serve machine-readable self-description: capability manifest, event-kind registry with semantic caveats, template capabilities, and structured doctor output, generated from the sources the implementation executes. |
 
 ### 1.2 V1 scope and exclusions
 
-V1 includes a working single-host deployment, a CLI, a web interface, cold boots, persistent per-VM disks, all requirements above, and the acceptance suite.
+V1 includes a working single-host deployment, a CLI, a web interface, cold boots, persistent per-VM disks, the agent operations layer (situation, attention, declarative runs, self-description), all requirements above, and the acceptance suite.
 
-Defer multi-host scheduling, public multi-tenant hosting, billing, live migration, arbitrary device passthrough, shared writable filesystems, Kubernetes integration, deterministic replay, and generalized whole-system virtual-machine introspection from the hypervisor.
+Defer multi-host scheduling, public multi-tenant hosting, billing, live migration, arbitrary device passthrough, shared writable filesystems, Kubernetes integration, deterministic replay, MCP or other protocol adapters layered over the public API, and generalized whole-system virtual-machine introspection from the hypervisor. Adapters stay deferrable precisely because the public API must already be complete and self-describing; nothing may exist only in the web interface.
 
 Memory snapshot/restore and cloning a running VM are deliberately deferred. V1 cloning means creating a new VM from an immutable template. Copying a stopped VM's disks may be added only with new identity, independent disks, and explicit provenance; never implement it by sharing writable image files.
+
+### 1.3 The operator is an agent
+
+Design every interface for an autonomous agent operator first and a human second. The human uses the web application; the agent uses the API and CLI. Both see the same facts through the same contracts.
+
+An agent operator differs from a human in ways this specification treats as engineering constraints, not personas:
+
+- It pays for every byte it reads. Responses compete with its working memory.
+- It runs in bounded sessions. Continuity across sessions exists only in what the system durably records.
+- It cannot watch. It polls, subscribes, or is invoked; it never glances at a dashboard.
+- It automates retries, so an ambiguous mutation outcome is more dangerous than a clean failure.
+- It can verify claims mechanically when, and only when, claims link to their evidence.
+
+The system therefore forms a tower of linked abstractions. Each level is bounded, cursorable, and linked one level down (drill) and one level up (context):
+
+| Level | View | Question it answers |
+|---|---|---|
+| L4 | Situation and attention | What matters right now? |
+| L3 | Runs and reports | What are we trying, and how did it go? |
+| L2 | VM lifecycle, coverage, sessions | What is each computer doing? |
+| L1 | Normalized events and rollups | What happened, with honest labels? |
+| L0 | Raw artifacts: disks, spools, outputs | The bytes. |
+
+Read at the highest level that answers the question; write at the highest level that expresses the intent; intervene at lower levels only on exception. Control mirrors evidence: a goal-carrying run (L3) compiles into lifecycle operations (L2) and primitives (L1), and its report rolls the evidence back up.
+
+### 1.4 Agent-interface principles
+
+These principles are contract, referenced by ID from the acceptance suite. They bind every API response, CLI output, error, and exported artifact.
+
+| ID | Principle |
+|---|---|
+| P-01 | Bounded by default. Every response has a size bound; summaries come first and full detail stays one link away. Never push a raw firehose at the operator. |
+| P-02 | Deltas everywhere. Every level of state is cursorable, not only the event stream. "Nothing changed" must be cheap and trustworthy. |
+| P-03 | Silence is evidence. A quiet summary states what it watched: active trigger classes, cursors, and any reduction in watch scope. Quiet-because-blind is reported as blindness, never as calm. |
+| P-04 | Intent lives in the system. Runs carry goals and success criteria; annotations and verdicts accrete on durable records. The system is the shared memory between bounded agent sessions. |
+| P-05 | Every claim links. Any rollup count, flag, or verdict resolves to the queryable records behind it. No dead-end numbers. |
+| P-06 | Errors teach. Structured cause, retryability, and, where the system knows the remediation space, typed executable remediation options; never prose alone. |
+| P-07 | Self-describing. Capability manifest, event-kind registry with caveats, and template capability metadata are served by the running system and generated from the same sources the implementation executes. Zero out-of-band knowledge is required to drive it. |
+| P-08 | Typed operations, mechanical summaries. No natural-language command surface; no model-generated summaries inside the system. Rollups and triggers are deterministic and auditable, so the operator can trust them without re-deriving them. |
+
+The system spends bounded host CPU to save operator tokens: streaming counters and materialized rollups, not repeated scans and not raw dumps.
 
 ## 2. What “introspection” means
 
@@ -129,6 +175,8 @@ Browser
        - templates, scheduler, lifecycle operations
        - SQLite metadata / event index
        - event queries, live subscriptions, exports
+       - situation rollups, attention queue, run reports
+       - capability manifest and event-kind registry
        - embedded React application
                  |
        narrow Unix-socket RPC
@@ -190,6 +238,8 @@ Before accepting a launch, report pass/fail and an actionable explanation for:
 8. Working guest vsock, sensor capability probes, and terminal handshake.
 9. Configured API bind/authentication mode and TLS or explicit loopback-only access.
 
+Doctor output is machine-readable: per-check ID, status, evidence, and typed remediation, with the human rendering derived from the same data. Serve the current doctor state through `GET /host/status` so a driving agent never has to re-run preflight to learn why a launch is refused.
+
 A nested Linux VM is acceptable only if these real KVM and guest tests pass. Do not infer nested virtualization from the presence of a device node or offer silent software emulation with different performance/security properties.
 
 ### 4.2 Runtime lock
@@ -209,12 +259,14 @@ Build images reproducibly from pinned inputs. Generate a software inventory and 
 | Template | Immutable ID/digest, kernel/root image, guest user profiles, tooling, supported sensors, protocol versions. |
 | VM | UUID, owner, template digest, desired state, observed state, resources, network profile, disks, labels, timestamps. |
 | Boot | Host-generated boot-generation UUID, VM ID, guest boot ID, runner instance, kernel/agent versions. |
-| Run | Optional coding-task execution within a VM, parent harness task ID, start/end markers, outcome. |
+| Run | Goal text, typed success criteria, VM/boot binding, phase, outcome with evidence links, completion policy, report artifact, parent harness correlation IDs. |
 | Operation | Idempotency key, request hash, target VM, phase, state, error, attempt history. |
 | Terminal session | UUID, VM/boot, shell PID identity, owner, writer lease, output cursor, retained window. |
 | Exec session | UUID, VM/boot, argv/cwd/user policy, process identity, stdout/stderr offsets, exit result. |
 | Event stream | Source instance UUID, VM/boot binding, sequence/ack cursors, loss and schema metadata. |
 | Artifact | UUID, VM/run, media type, digest, byte size, capture policy, provenance, retention, ACL. |
+| Attention item | Durable ID, severity, trigger kind, VM/run refs, summary, system action already taken, evidence links, typed suggested actions, ack state. |
+| Annotation | Immutable ID, author identity, target entity ref, bounded text, structured tags, created time. |
 
 An existing VM can cold-start again from its stopped disks with a **new boot identity**. Never reuse process, terminal, or telemetry identities across boots.
 
@@ -345,7 +397,9 @@ Use distinct logical ports/connections so terminal output cannot starve control 
 
 For host-initiated connections, connect to that VM's configured Unix socket and perform Firecracker's documented `CONNECT <port>\n` / `OK <port>\n` handshake before the application protocol. Do not treat the host Unix socket as a raw guest shell. [S3]
 
-Bootstrap a random per-boot capability in an independently generated read-only config device. Bind its scope to this VM/boot and protocol; never reuse it across clones. Treat it as accessible to guest root, not an attestation key. Do not store broad host/API credentials in this device. Leave Firecracker MMDS disabled in V1; the bootstrap disk is the explicit configuration path. Any future metadata service is an additional guest-to-host surface requiring its own policy and tests.
+Bootstrap a random per-boot capability in an independently generated read-only config device. Bind its scope to this VM/boot and protocol; never reuse it across clones. Treat it as accessible to guest root, not an attestation key. Do not store broad host/API credentials in this device.
+
+The same read-only device carries `context.json` for the workload: the VM's own IDs and name, resource budget, network profile with effective egress expectations, workspace layout, the run goal and success criteria when a run is attached, and the progress/result submission conventions. The context states what the cage actually enforces so the workload does not spend its budget probing it or retrying egress that policy will deny; AT-098 verifies each statement behaviorally. It is configuration, not a secret and not an attestation. Leave Firecracker MMDS disabled in V1; the bootstrap disk is the explicit configuration path. Any future metadata service is an additional guest-to-host surface requiring its own policy and tests.
 
 The runner supplies authoritative VM/boot identity from the owned socket/resource mapping. Guest payload fields cannot choose another VM ID, source trust class or owner. Authenticate and bound every channel before accepting data.
 
@@ -357,7 +411,7 @@ Handshakes include protocol version, capability list, boot identity, source inst
 
 Apply handshake, idle and write deadlines. Retry reconnects with bounded exponential backoff and jitter. Do not retry mutating commands blindly: creation commands carry idempotency keys, and recovery queries their actual status.
 
-## 8. Browser terminal and execution API
+## 8. Terminal, execution and declarative runs
 
 ### 8.1 Terminal architecture
 
@@ -419,6 +473,24 @@ The execution API is distinct from a terminal:
 Return an exec ID immediately, then separate stdout/stderr streams, process identity, exit code or signal, timeout/cancellation state, and output truncation metadata. PTYs merge terminal output and must not be used when exact stdout/stderr separation is required.
 
 Default to argv execution. Running shell syntax requires an explicit shell executable/argv selected by the caller. Cancellation kills the entire tracked guest job cgroup/process tree, not just its first shell. A malicious root-enabled workload can tamper with guest cgroups; in that case report unverified cleanup and use a policy-selected VM stop when full containment is required. Do not claim a guest process-tree kill is root-resistant. On reconnect, query the exec ID; do not run the command again. The harness attaches its task/run/parent IDs as correlation metadata, not as authority to cross VM boundaries.
+
+### 8.6 Declarative runs
+
+A run is the unit of delegated work: launch-and-babysit collapsed into one submission. Attach a run to a launch request (`run` block in `schemas/launch-request.schema.json`) or create one on a running VM.
+
+A run carries a bounded `goal` (why this work exists, readable by the next operator session), typed `success_criteria` (`exec_exit_zero` for the attached exec, `guest_result` for a workload-submitted verdict, or `operator_verdict`), and an `on_completion` policy (`keep_running`, `stop`, or `stop_and_finalize`). Run phases: pending, running, concluding, then exactly one of succeeded, failed, inconclusive, aborted.
+
+`inconclusive` is mandatory honesty, not a soft failure. When criteria cannot be evaluated — guestd dead, result malformed, required telemetry lost — report that; never fabricate a verdict. Run creation is idempotent by key like every mutation; after a controller or runner crash the run resumes or concludes with an explicit interruption reason and never re-executes accepted work.
+
+The workload can submit bounded structured progress (`run.progress` events through guestd) and a final result (a guestd call or `/workspace/.vmobs/result.json`, size-capped and schema-validated). Both carry `guest_reported` provenance with the same trust labeling as all guest telemetry, including its tamperability in `developer_root`.
+
+### 8.7 Run reports
+
+Concluding a run produces a report: one machine-readable artifact (`schemas/run-report.schema.json`) that answers "how did it go" without replaying the event stream. It contains the goal, criteria, outcome with evidence links, exec results with output digests and bounded tails, event rollups by family, coverage and gaps, network and filesystem summaries, artifacts, attention items raised, and deterministic rule-based anomalies.
+
+Every count in a report carries a `reproduce_query`: the API filter that regenerates it (P-05). Report generation is an operation; if it fails, the run outcome stands and the report is retryable. Lifecycle never blocks on rendering.
+
+The fleet loop an orchestrating agent actually runs is: submit N launches with runs, poll situation deltas, harvest N reports, acknowledge attention. Section 19 sets a measured interaction budget for that loop.
 
 ## 9. Guest telemetry
 
@@ -606,7 +678,7 @@ Host identity/time/provenance fields are assigned by trusted ingress. A guest ca
 
 ### 12.2 Event families
 
-Use versioned schemas for `vm.*`, `operation.*`, `process.*`, `exec.*`, `fs.*`, `net.flow.*`, `dns.*`, `http.*`, `terminal.*`, `telemetry.*`, `policy.*`, `artifact.*`, and `security.*`.
+Use versioned schemas for `vm.*`, `operation.*`, `process.*`, `exec.*`, `fs.*`, `net.flow.*`, `dns.*`, `http.*`, `terminal.*`, `telemetry.*`, `policy.*`, `artifact.*`, `run.*`, `attention.*`, `annotation.*`, and `security.*`. The `run.*`, `attention.*`, and `annotation.*` families are `host_observed`, except `run.progress`, which is `guest_reported`.
 
 At minimum define explicit health records for sequence gaps, source restart, kernel-buffer drop, spool overflow, collector timeout, unsupported capability, path-resolution failure, dropped terminal output and artifact truncation.
 
@@ -654,13 +726,73 @@ Use keyset pagination on ingestion cursor rather than large OFFSET scans. SSE li
 
 Browser reconnect supplies its last cursor. If retention has expired it, return `cursor_expired` with the earliest available cursor and show a visible history gap. UI auto-scroll pause does not stop ingestion; show unread counts and queue limits.
 
+### 12.7 Situation and attention
+
+The event stream is history; situation and attention are the operator's working set. Both are deterministic materializations of durable records (P-08): the attention queue is a view over `attention.*` events plus acknowledgment state, and the situation summary rolls up lifecycle, telemetry health, runs, capacity, and open attention.
+
+`GET /situation` returns a bounded snapshot: host capacity and watch state, per-VM one-line summaries with open-attention counts and active-run phase, the head of the attention queue, and an `as_of` cursor. With `?since=<cursor>` it returns only what changed. A quiet response is small and self-vouching: it enumerates active trigger classes and sensor watch scope, so silence distinguishes "nothing happened" from "nobody was watching" (P-03).
+
+```json
+{
+  "as_of_cursor": "184532",
+  "since_cursor": "180001",
+  "quiet": false,
+  "host": {
+    "vms_running": 3,
+    "vms_total": 4,
+    "capacity_free_mib": 4096,
+    "watch": {
+      "trigger_classes_active": ["lifecycle_failed", "run_concluded", "telemetry_degraded", "capacity_exhausted"],
+      "sensors_degraded": 1
+    }
+  },
+  "changed_vms": [
+    {
+      "vm_id": "1ed7fdbf-7007-43f3-b5b2-8071e96b2df5",
+      "name": "agent-python-02",
+      "lifecycle_state": "running",
+      "telemetry_health": "degraded",
+      "active_run": {"run_id": "3f1c2c53-42a2-46bb-9f21-6c0f6f8d6b2e", "phase": "running"},
+      "attention_open": 1,
+      "links": {"vm": "/api/v1/vms/1ed7fdbf-7007-43f3-b5b2-8071e96b2df5"}
+    }
+  ],
+  "attention_head": []
+}
+```
+
+Attention items are raised only by enumerated deterministic triggers: lifecycle failures, run conclusions, telemetry degradation, spool and disk thresholds, policy-denial anomalies, capacity exhaustion, and reconciliation surprises. The active set is configured and served through `GET /meta`, not hardcoded in prose. Each item states what happened, what the system already did under policy, evidence links, and typed suggested actions executable as returned (P-06). Acknowledgment is per-item and durable; unacknowledged items survive restart. The queue is bounded: duplicates collapse by VM and kind with counts, and overflow raises its own health record rather than dropping silently.
+
+```json
+{
+  "attention_id": "att-000341",
+  "cursor": "184530",
+  "severity": "needs_decision",
+  "kind": "telemetry_degraded",
+  "vm_id": "1ed7fdbf-7007-43f3-b5b2-8071e96b2df5",
+  "run_id": "3f1c2c53-42a2-46bb-9f21-6c0f6f8d6b2e",
+  "summary": "fanotify queue overflow; 1240 events lost (measured); capture continuing",
+  "system_action": "per configured degrade policy: loss interval recorded, egress unchanged",
+  "evidence_links": ["/api/v1/events?vm_id=1ed7fdbf-7007-43f3-b5b2-8071e96b2df5&kind=telemetry.loss&from_cursor=184100"],
+  "suggested_actions": [
+    {"action": "stop", "params": {"vm_id": "1ed7fdbf-7007-43f3-b5b2-8071e96b2df5"}, "rationale": "conclude now if complete evidence matters more than finishing"},
+    {"action": "ack", "params": {"attention_id": "att-000341"}, "rationale": "accept the recorded gap and continue"}
+  ],
+  "acked": false
+}
+```
+
+Severity has three levels only: `info` (harvest at leisure), `needs_decision` (system is stable but waiting on operator judgment), and `critical` (system took protective action; review it). Grade severity by whether and when the operator must act, not by adjective inflation.
+
 ## 13. Web interface
+
+The web interface is a client of the public API. Anything it displays is obtainable from the API with identical values and provenance labels (AT-101); the UI holds no private data path and no private truth.
 
 ### 13.1 Fleet view
 
-The landing page shows host capacity, reservations, health, recent operations and a table of VMs. Columns: name/ID, template, lifecycle, telemetry health, CPU/RAM allocation and usage, disk usage, network mode, age and owner/labels.
+The landing page shows host capacity, reservations, health, recent operations, the attention queue head (unacknowledged count, severity, one-line summaries, links — the same queue the API serves) and a table of VMs. Columns: name/ID, template, lifecycle, telemetry health, CPU/RAM allocation and usage, disk usage, network mode, age and owner/labels.
 
-Provide Launch VM and Launch Batch. The launch form includes template, count, resources, privilege profile, network profile/policy, workspace seed, optional initial exec command, retention/capture policy and labels. Preview total reservation and explain why a request cannot fit.
+Provide Launch VM and Launch Batch. The launch form includes template, count, resources, privilege profile, network profile/policy, workspace seed, optional initial exec command, an optional run block (goal, success criteria, completion policy), retention/capture policy and labels. Preview total reservation and explain why a request cannot fit.
 
 Batch operations show independent progress and errors. Selecting multiple VMs enables explicit stop/pause/resume/delete operations with per-VM results. Do not make a batch look successful because its first member started.
 
@@ -671,7 +803,7 @@ VM: agent-03    RUNNING    Telemetry: DEGRADED — filesystem queue gap
 Template: python-dev@digest   2 vCPU / 2 GiB   Egress: http_inspect
 [Pause] [Stop] [Force stop] [Export] [Clone template]
 
-[Terminal] [Timeline] [Filesystem] [Network] [Processes] [Metrics] [Settings]
+[Terminal] [Timeline] [Runs] [Filesystem] [Network] [Processes] [Metrics] [Settings]
 
 +--------------------------------+--------------------------------------+
 | Active guest terminal          | Live event feed                      |
@@ -720,8 +852,12 @@ Use `/api/v1`; generate OpenAPI and client types. Web and CLI share the same sem
 
 | Method and path | Contract |
 |---|---|
+| `GET /meta` | Capability manifest: versions, enabled features, limits in force, active attention trigger classes, links to registry, guide and OpenAPI. |
+| `GET /meta/event-kinds` | Event-kind registry: schema reference, provenance class, semantics and caveats per kind, generated from the emitting code's own tables. |
 | `GET /host/status` | Capacity, reservations, doctor/capability state, service health. |
-| `GET /templates` | Approved immutable templates and supported profiles. |
+| `GET /templates` | Approved immutable templates, supported profiles, sensor support and toolchain inventory. |
+| `GET /situation` | Bounded fleet snapshot or `?since` delta: capacity, per-VM summaries, attention head, cursors. |
+| `GET /attention` / `POST /attention/{id}/ack` | Durable attention queue with per-item acknowledgment. |
 | `POST /vms` | Create/start request; idempotency key; returns VM and operation IDs. |
 | `POST /vm-batches` | Explicit batch admission/failure policy; per-member IDs/results. |
 | `GET /vms` / `GET /vms/{id}` | List/details with separate lifecycle and telemetry state. |
@@ -736,6 +872,11 @@ Use `/api/v1`; generate OpenAPI and client types. Web and CLI share the same sem
 | `POST /vms/{id}/execs` | Idempotent structured argv execution. |
 | `GET /execs/{id}` / `POST /execs/{id}/cancel` | Query or cancel tracked guest execution. |
 | `GET /execs/{id}/output` | Independently cursorable stdout/stderr and truncation metadata. |
+| `POST /vms/{id}/runs` | Create a declarative run on a running VM; idempotency key. |
+| `GET /runs` / `GET /runs/{id}` | List/inspect runs: goal, criteria, phase, outcome, evidence links. |
+| `GET /runs/{id}/report` | Machine-readable run report; retryable generation status. |
+| `POST /runs/{id}/conclude` | Submit an operator verdict for `operator_verdict` criteria, or abort with a reason. |
+| `POST /annotations` / `GET /annotations` | Immutable operator notes on any entity ref; queryable by ref. |
 | `GET /events` | Keyset-paged historical events with bounded filters. |
 | `GET /events/stream` | SSE replay/live stream using durable cursors. |
 | `GET /vms/{id}/coverage` | Sensors, gaps, exclusions and trust/capture mode. |
@@ -745,7 +886,15 @@ Use `/api/v1`; generate OpenAPI and client types. Web and CLI share the same sem
 
 Require an expected revision on conflicting lifecycle changes. Return structured errors with `code`, `message`, `retryable`, `operation_id` and safe details. Distinguish malformed request, unauthorized/not found, conflict, missing capability, capacity rejection, timeout and upstream/runtime failure.
 
+Errors additionally carry a typed `cause` and, where the system knows the remediation space, a `remediation` array of executable action descriptors with rationale (P-06). For example, `insufficient_capacity` returns the shortfall, current reservations, and options such as `{"action": "queue"}` or candidate idle VMs to stop. Remediation options are suggestions, never auto-executed. OpenAPI descriptions of every mutation declare its effect scope and reversibility so a driving agent can weigh an operation without out-of-band knowledge.
+
 Use one idempotency key scope per owner/action; persist request hashes and results for a configured retention period. A repeated identical request returns the original outcome. Do not return guest/host paths or secret material in error details.
+
+### 14.1 CLI contract
+
+The CLI is a first-class operator interface, not a demo wrapper. Every command supports `--json` with the same shapes the API returns; human-readable output is a formatting of the same data, never a different truth. Exit codes are typed: success, structured failure, transport failure, usage error. Provide at minimum `vmobs doctor|situation|attention|launch|runs|report|events|vm|export` and a raw authenticated `vmobs api <method> <path>` escape hatch. `vmobs situation --since <cursor>` and `vmobs attention ack` make the poll loop scriptable without the browser.
+
+Serve a terse agent operating guide from the running daemon (`GET /meta` links it): how to launch, watch, harvest and diagnose, with one worked fleet-loop example. Its reference material is generated from the OpenAPI contract and event-kind registry, not maintained by hand (P-07).
 
 ## 15. Security, secrets and operator authentication
 
@@ -767,7 +916,7 @@ Out of scope for a guarantee: a compromised host kernel/admin, undetected hardwa
 
 Reference host-managed secret IDs in launch requests; do not embed literal keys in templates, launch-history JSON or URLs. Deliver only requested scoped secrets after authenticated guest readiness. Do not expose cloud metadata credentials or forward the host's entire environment.
 
-Redact authorization/cookie headers, configured secret literals, sensitive query parameters and supported structured body fields **before spool/database persistence**. Do not collect full process environments. Bound/redact argv because credentials can be passed as arguments. Apply the same policy to error messages, debug logs, exports and proxy records.
+Redact authorization/cookie headers, configured secret literals, sensitive query parameters and supported structured body fields **before spool/database persistence**. Do not collect full process environments. Bound/redact argv because credentials can be passed as arguments. Apply the same policy to error messages, debug logs, exports and proxy records. Run goals, guest-submitted results, annotations and attention summaries pass the same redaction policy before persistence as argv and headers.
 
 Redaction is defense in depth, not a proof that arbitrary binary/encoded content contains no secrets. Default body, pcap, full-file and persistent terminal recording to off. Content capture that can contain secrets is explicitly sensitive even after attempted redaction. Record policy version and redaction/truncation actions without storing the secret that triggered them.
 
@@ -789,7 +938,7 @@ Separate retention of event metadata, body/previews, terminal recordings, pcaps 
 
 Back up SQLite using a consistent database backup mechanism, not an arbitrary copy of a live DB file while ignoring WAL. Back up immutable artifacts and manifests consistently. Test restoration to a separate test installation. This is host-local durability unless an actual off-host backup is configured.
 
-Exports contain normalized events, manifest/diff, image/artifact digests, VM/template/runtime-lock metadata, network/capture policy, coverage gaps and truncation/redaction summaries. Include start/end capture boundaries and a schema version. Exporting a hash manifest provides integrity checking against retained data, not automatic nonrepudiation.
+Exports contain normalized events, manifest/diff, image/artifact digests, VM/template/runtime-lock metadata, network/capture policy, coverage gaps, run reports, annotations, attention history and truncation/redaction summaries. Include start/end capture boundaries and a schema version. Exporting a hash manifest provides integrity checking against retained data, not automatic nonrepudiation.
 
 Upgrade guest agent, kernel and host components through a compatibility matrix. Refuse incompatible protocols with an actionable error. Database migrations require a backup/rollback plan and must not run concurrently with a second writer. Do not kill running VMs as an undocumented side effect of a UI upgrade.
 
@@ -814,6 +963,10 @@ Upgrade guest agent, kernel and host components through a compatibility matrix. 
 | Dirty/corrupt captured filesystem | Isolated inspection/recovery only; incomplete/recovered diff labeling. |
 | Concurrent stop/delete/start | Serialize per-VM transitions with revisions and operation IDs; no double allocation. |
 | Host reboot/power loss | Cold reconcile persisted resources; retain acknowledged host data within stated storage guarantees; report interrupted runs. |
+| Attention queue overflow | Collapse duplicates by VM and kind with counts; never drop unacknowledged critical items silently; overflow raises its own health record. |
+| Run report generation fails | The run outcome stands; the report is marked incomplete and retryable as an operation; VM lifecycle never blocks on rendering. |
+| Guest submits malformed/oversized result | Bounded rejection with a recorded reason; criteria become unevaluable per policy (`inconclusive`), with no invented verdict and no crash. |
+| Emitter produces unregistered event kind | Reject at ingress normalization with a health record; the build/test gate should have prevented it, but runtime stays honest. |
 
 No test should pass by suppressing the error banner, dropping a sensor, or changing the profile silently.
 
@@ -825,11 +978,11 @@ Implement `doctor`, version locking, image build, guest capability probe, privat
 
 ### Milestone 1 — Vertical slice with a real terminal
 
-Build the API/CLI, narrow privilege helper, runner and lifecycle operations. Add the minimal fleet page and one xterm terminal backed by a guest PTY. Then demonstrate two simultaneously running VMs with independent terminals, storage and stop actions. Gate: no host shell proxy masquerading as a guest terminal; reconnect does not spawn a duplicate shell.
+Build the API/CLI, narrow privilege helper, runner and lifecycle operations. Add the minimal fleet page and one xterm terminal backed by a guest PTY. Then demonstrate two simultaneously running VMs with independent terminals, storage and stop actions. Include `GET /meta`, structured errors with typed cause, and `--json` on every CLI command from this first slice; retrofitting self-description later always loses. Gate: no host shell proxy masquerading as a guest terminal; reconnect does not spawn a duplicate shell.
 
 ### Milestone 2 — Durable events and guest sensors
 
-Implement event schemas, runner spool, SQLite index/replay, capability/health model, process sensor and filesystem notifications. Add the live timeline and process view. Gate: deterministic fixture observations, explicit mmap limitation, forced overflow visibility, controller-restart recovery and deduplication.
+Implement event schemas, runner spool, SQLite index/replay, capability/health model, process sensor and filesystem notifications. Add the live timeline and process view. Wire the event-kind registry to the emitters, streaming rollup counters, the annotation store, and situation v0 (lifecycle, telemetry health, delta cursors). Gate: deterministic fixture observations, explicit mmap limitation, forced overflow visibility, controller-restart recovery, deduplication, and rejection of unregistered event kinds.
 
 ### Milestone 3 — Host network observation and policy
 
@@ -837,11 +990,11 @@ Implement transport/offline profiles, managed DNS, namespace isolation, flow/den
 
 ### Milestone 4 — Final state, artifacts and full workspace UI
 
-Implement workspace seed/baseline, isolated stopped-disk inspection, manifests/diffs, bounded previews, exports, filters and batch UI. Gate: detect content/metadata/type changes correctly and refuse unsafe host mounts; malformed disk/output fixtures cannot escape their limits.
+Implement workspace seed/baseline, isolated stopped-disk inspection, manifests/diffs, bounded previews, exports, filters and batch UI. Implement declarative runs end to end: guest context device, progress/result submission, run reports, and the full attention trigger set. Gate: detect content/metadata/type changes correctly and refuse unsafe host mounts; malformed disk/output fixtures cannot escape their limits; report counts reproduce through their linked queries; the guest context never promises what enforcement denies.
 
 ### Milestone 5 — Recovery, load and security acceptance
 
-Complete race, capacity, crash, authentication, secret-leak, browser-security and noisy-neighbor tests. Measure actual overhead and update reservations/targets. Gate: every V1 mandatory acceptance row has evidence or an explicitly reported failure; no mocked integration evidence.
+Complete race, capacity, crash, authentication, secret-leak, browser-security and noisy-neighbor tests. Measure actual overhead and update reservations/targets. Measure the interaction economy of the reference fleet loop and publish the trace. Gate: every V1 mandatory acceptance row has evidence or an explicitly reported failure; no mocked integration evidence.
 
 ### Required repository shape
 
@@ -856,6 +1009,8 @@ internal/runtime/         Firecracker adapter, reconciliation
 internal/network/         topology, policy, managed workers
 internal/events/          schemas, normalization, redaction, spool
 internal/store/           SQLite, migrations, cursor queries
+internal/runs/            declarative runs, criteria evaluation, reports
+internal/situation/       fleet rollups and attention queue
 internal/terminal/        bounded transport and session rules
 internal/guest/           sensor/control implementations
 bpf/                      small BPF programs and generated bindings
@@ -888,6 +1043,8 @@ Performance numbers below are **acceptance targets to measure**, not existing be
 - Measure repeated create/start/stop/delete cycles and ensure owned resources return to the documented idle baseline. Report distributions and failures rather than a single best run.
 
 Cold boot and package-install time targets should be established after the actual images are built. Do not inherit a microbenchmark boot number from Firecracker marketing as the application SLO.
+
+Interaction-economy targets, to measure like all targets: driving the reference four-VM fixture loop — batch launch with runs, situation delta polling, report harvest, attention acknowledgment — through the CLI in JSON mode must fit a documented budget, proposed at most 16 API round-trips and 64 KiB of default-form response bytes excluding raw artifact downloads. AT-102 measures it; publish the measured trace. This budget is the concrete meaning of "least expenditure": an orchestrating agent's cost to drive the fleet is a first-class performance dimension beside latency and throughput.
 
 ## 20. Deferred snapshot/restore contract
 
@@ -955,3 +1112,5 @@ Checked August 30, 2026. Moving documentation must be rechecked and pinned to th
 An operator can launch several real Firecracker VMs from the browser, type into the correct guest terminals, see attributed observations and declared gaps, inspect external traffic at the enabled capture level, stop one without disrupting the others, recover through controller failure, and export retained evidence plus an accurate final-state diff.
 
 The system remains useful when telemetry is incomplete because it tells the truth about the boundary and the missing evidence. It does not obtain observability by handing the guest access to the host.
+
+And an agent operator with no prior context can, through the CLI and API alone, reconstruct the situation, dispatch goal-carrying runs across the fleet, be drawn to exactly the events that need judgment, and harvest linked evidence — within the documented interaction budget. What one operator session learns, the next one finds waiting in the system.

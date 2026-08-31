@@ -1,12 +1,20 @@
 # Firecracker Observatory — Builder Handoff
 
-Build a single-host platform for multiple inspectable Firecracker VMs, with a real browser terminal, filesystem/process/network activity, durable history and final disk diffs.
+Build a single-host platform where autonomous agents each get an inspectable computer: multiple Firecracker VMs with a real browser terminal, filesystem/process/network activity, durable history and final disk diffs — plus an operations layer built for an agent operator: situation summaries, an attention queue, goal-carrying runs with machine-readable reports, and a self-describing API.
 
-## Read order
+The operator is usually an agent. `SPEC.md` sections 1.3–1.4 define the system model (the L0–L4 tower of linked abstractions) and the agent-interface principles P-01 through P-08. They bind every interface.
 
-1. `SPEC.md` — architecture, threat model, lifecycle, guest instrumentation, web UI, APIs, durability, build sequence and verified source premises.
-2. `ACCEPTANCE.md` — 88 mandatory V1 tests, all initially SPECIFIED / NOT RUN.
-3. `schemas/` and `examples/` — machine-readable contracts and synthetic examples.
+## Read this when
+
+| Doing | Read |
+|---|---|
+| Anything, first | `SPEC.md` sections 0–1: outcome, scope, system model, principles |
+| Designing any component | Its SPEC section, then section 17 (failure matrix) |
+| Touching interchange shapes | `schemas/` and `examples/`, then SPEC section 12 |
+| Implementing the agent operations layer | SPEC sections 1.3–1.4, 8.5–8.7, 12.7, 14 |
+| Writing or running tests | `ACCEPTANCE.md` — 102 mandatory V1 rows, all initially SPECIFIED / NOT RUN |
+| Judging what this package itself verified | `VALIDATION.md` — package checks only, no runtime claims |
+| Changing any file in `docs/` | Re-run `uv run docs/validation/check.py`; record results in `VALIDATION.md` |
 
 ## Builder directive
 
@@ -16,17 +24,20 @@ Keep the host API unprivileged. Do not expose a generic root shell or Firecracke
 
 Use existing compatible libraries for PTYs, BPF loading and TLS interception. Keep the implementation single-host; do not introduce Kubernetes, a distributed message bus or multiple data stores.
 
-Maintain acceptance evidence with stable IDs. Run tests, inspect failures and iterate. Report changes, actual verification and remaining uncertainty. Performance targets in the spec are not benchmark results.
+Documentation the running system serves — capability manifest, event-kind registry, operator guide — is generated from the same sources the implementation executes. Never maintain a second copy by hand.
+
+Maintain acceptance evidence with stable IDs, accreted under `tests/acceptance-evidence/AT-xxx/`; append runs, never overwrite history. Run tests, inspect failures and iterate. Report changes, actual verification and remaining uncertainty. Performance targets in the spec are not benchmark results.
 
 ## Files
 
-- `SPEC.md`
-- `ACCEPTANCE.md`
-- `schemas/event-envelope.schema.json`
-- `schemas/launch-request.schema.json`
-- `examples/event.json`
-- `examples/launch.json`
-- `examples/host-config.yaml`
-- `VALIDATION.md` — checks performed on this specification package, not runtime tests.
+- `SPEC.md` — architecture, threat model, lifecycle, guest instrumentation, agent operations layer, web UI, APIs, durability, build sequence and verified source premises.
+- `ACCEPTANCE.md` — 102 mandatory V1 tests, all initially SPECIFIED / NOT RUN.
+- `schemas/event-envelope.schema.json` — normalized event contract.
+- `schemas/launch-request.schema.json` — launch contract, including the optional declarative `run` block.
+- `schemas/run-report.schema.json` — machine-readable run conclusion contract.
+- `examples/event.json`, `examples/launch.json`, `examples/launch-with-run.json`, `examples/run-report.json` — synthetic interface examples.
+- `examples/host-config.yaml` — proposed starting configuration, not an installer.
+- `validation/check.py` — canonical package check; validates schemas, examples, ID sequences, requirement/principle coverage and cross-references.
+- `VALIDATION.md` — results of package checks, not runtime tests.
 
-The supplied launch and event payloads are synthetic. The template digest, IDs and policy names illustrate the contract and are not existing resources. The host configuration is a proposed starting configuration, not an installer.
+The supplied payloads are synthetic. Template digests, IDs and policy names illustrate the contracts and are not existing resources.
