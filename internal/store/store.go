@@ -129,6 +129,31 @@ var migrations = []string{
 	// materialization of durable records, not a parallel truth).
 	`ALTER TABLE vms ADD COLUMN last_event_id INTEGER NOT NULL DEFAULT 0;
 	CREATE INDEX idx_vms_changed ON vms (last_event_id);`,
+	// v5: batch launch tables (SPEC §6.3, AT-014/AT-015). The batch and its
+	// members are created atomically in one writer tx — the serialization point
+	// for atomic_reservation and the cumulative reservation check for best_effort.
+	`CREATE TABLE vm_batches (
+		batch_id INTEGER PRIMARY KEY AUTOINCREMENT,
+		owner TEXT NOT NULL,
+		idempotency_key TEXT,
+		request_hash TEXT NOT NULL,
+		reservation_mode TEXT NOT NULL,
+		on_failure TEXT NOT NULL,
+		batch_op_id INTEGER,
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL
+	);
+	CREATE UNIQUE INDEX idx_vm_batches_idem ON vm_batches (owner, idempotency_key) WHERE idempotency_key IS NOT NULL;
+	CREATE TABLE vm_batch_members (
+		batch_id INTEGER NOT NULL REFERENCES vm_batches(batch_id),
+		position INTEGER NOT NULL,
+		name TEXT NOT NULL,
+		vm_id TEXT,
+		operation_id INTEGER,
+		refusal_cause TEXT,
+		refusal_message TEXT,
+		PRIMARY KEY (batch_id, position)
+	);`,
 }
 
 // Store owns one SQLite database. All writes go through the writer pool, which
