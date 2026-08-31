@@ -4,6 +4,66 @@ These checks validate the handoff documents and synthetic interface examples. **
 
 The canonical check is `validation/check.py`, run as `uv run docs/validation/check.py`. Re-run it after changing any file in `docs/` and append a dated revision below. Earlier revisions are the historical record; never rewrite them.
 
+## Revision 3 (2026-08-31) — relax boot_ids to allow empty array
+
+Run after relaxing `boot_ids` `minItems` from 1 to 0 in `run-report.schema.json`. Rationale (R5): a run whose VM fails before boot has zero boot identities in durable records; AT-094 requires a report in every terminal phase; inventing a boot ID would be fabricated evidence.
+
+### Results
+
+- 46 package checks passed (`uv run docs/validation/check.py`, exit 0).
+- All three JSON schemas passed Draft 2020-12 metaschema validation.
+- The run-report positive example (which already includes boot_ids) continues to validate; no negative boundary cases were removed.
+- All other revision-2 results hold; only `run-report.schema.json` changed.
+
+### Check log
+
+- PASS — event-envelope schema validates against Draft 2020-12
+- PASS — launch-request schema validates against Draft 2020-12
+- PASS — run-report schema validates against Draft 2020-12
+- PASS — Synthetic event satisfies envelope schema
+- PASS — Synthetic launch satisfies launch schema
+- PASS — Launch-with-run example satisfies launch schema
+- PASS — Run-report example satisfies run-report schema
+- PASS — Reject numeric 64-bit counter in envelope
+- PASS — Reject unknown provenance enum
+- PASS — Reject HTTP header capture in transport mode
+- PASS — Reject strict telemetry with degrade-only action
+- PASS — Reject exec_exit_zero criteria without initial_exec
+- PASS — Reject unknown run completion policy
+- PASS — Reject oversized run goal
+- PASS — Reject empty run goal
+- PASS — Launch with null run block remains valid
+- PASS — Reject rollup count without reproduce_query
+- PASS — Reject outcome without evidence links
+- PASS — Reject unknown attention severity
+- PASS — Reject unknown run outcome status
+- PASS — YAML host configuration parses as a mapping
+- PASS — YAML body-capture off remains a string
+- PASS — Spool limit matches 512 MiB prose target
+- PASS — Frame cap matches 256 KiB prose target
+- PASS — Terminal replay cap matches 4 MiB prose target
+- PASS — Config run goal cap matches launch schema bound
+- PASS — Config report tail cap matches report schema bound
+- PASS — Attention trigger classes enumerate as booleans
+- PASS — Acceptance test IDs are unique
+- PASS — Exactly 102 unique sequential acceptance IDs
+- PASS — SPEC defines exactly R-01 through R-17
+- PASS — Acceptance matrix covers all 17 requirements
+- PASS — SPEC defines exactly P-01 through P-08
+- PASS — Every referenced principle ID is defined
+- PASS — Exactly 22 unique sequential source-verification IDs
+- PASS — Every inline source reference is defined
+- PASS — Exactly 17 primary source definitions
+- PASS — Markdown fenced code blocks balance in SPEC.md
+- PASS — Markdown fenced code blocks balance in ACCEPTANCE.md
+- PASS — Markdown fenced code blocks balance in README.md
+- PASS — Markdown fenced code blocks balance in VALIDATION.md
+- PASS — All 4 embedded JSON examples in SPEC parse
+- PASS — Embedded event example satisfies envelope schema
+- PASS — Prose test counts state 102
+- PASS — No stale 88-test count remains
+- PASS — Every file listed in README exists
+
 ## Revision 2 (2026-08-31) — agent-interface revision
 
 Run after adding the agent-operations layer: principles P-01..P-08, requirements R-15..R-17, acceptance tests AT-089..AT-102, the run block in the launch schema, the run-report schema, two new examples and the `agent_interface` host-config block. The check script itself is new in this revision; it re-implements and extends the revision-1 checks.
