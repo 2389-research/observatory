@@ -439,6 +439,8 @@ func (s *Store) ListRuns(ctx context.Context, q RunQuery) ([]*Run, string, error
 		return nil, "", fmt.Errorf("iterate runs: %w", err)
 	}
 
+	// Empty page returns the caller's input cursor unchanged — same semantics as
+	// events pagination (QueryResult.NextAfter when the page is empty).
 	nextAfter := q.After
 	if len(out) > 0 {
 		nextAfter = fmt.Sprintf("%d", lastRowID)

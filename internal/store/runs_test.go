@@ -381,30 +381,70 @@ func TestTransitionRunTerminalSetsFields(t *testing.T) {
 }
 
 func TestTransitionRunIllegalEdges(t *testing.T) {
-	illegal := []struct{ from, to string }{
-		{"pending", "succeeded"},
-		{"running", "succeeded"},
-		{"succeeded", "running"},
-		{"concluding", "running"},
-		{"inconclusive", "pending"},
+	// from is the phase we drive the run to before attempting the rejected call.
+	// pinFrom is the From pin we pass to TransitionRun; for most rows it equals
+	// from, but "bogus" cannot be a real stored phase so we pin "bogus" on a run
+	// that is actually in "running" — this tests rejection via From-pin mismatch,
+	// which still returns InvalidRunTransitionError.
+	illegal := []struct {
+		from, to, pinFrom string
+	}{
+		{"pending", "succeeded", "pending"},
+		{"running", "succeeded", "running"},
+		{"succeeded", "running", "succeeded"},
+		{"concluding", "running", "concluding"},
+		{"inconclusive", "pending", "inconclusive"},
+		// Self-transition: legal from the phase machine's perspective only if it
+		// were listed — it isn't, so this must be rejected.
+		{"running", "running", "running"},
+		// Unknown from-phase: "bogus" is not a stored phase; the run is in "running"
+		// but we pin From:"bogus", causing the From-pin check to reject the call.
+		{"running", "running", "bogus"},
 	}
 
 	for _, tc := range illegal {
-		t.Run(tc.from+"->"+tc.to, func(t *testing.T) {
+		name := tc.pinFrom + "->" + tc.to
+		t.Run(name, func(t *testing.T) {
 			st := openStore(t)
 			vmID := mustCreateRunVM(t, st)
 			run := mustAdvanceRunToPhase(t, st, vmID, tc.from)
 
-			_, err := st.TransitionRun(t.Context(), store.RunTransitionInput{
+			// Count run.state_changed events BEFORE the rejected call.
+			beforeRes, err := st.Query(t.Context(), store.Query{Kind: "run.state_changed"})
+			if err != nil {
+				t.Fatalf("pre-count run.state_changed: %v", err)
+			}
+			beforeCount := len(beforeRes.Events)
+
+			_, err = st.TransitionRun(t.Context(), store.RunTransitionInput{
 				RunID:       run.RunID,
-				From:        tc.from,
+				From:        tc.pinFrom,
 				To:          tc.to,
 				EvaluatedBy: "operator",
 				Reason:      "test",
 			})
 			var ite *store.InvalidRunTransitionError
 			if !errors.As(err, &ite) {
-				t.Errorf("illegal %s→%s: err = %v, want InvalidRunTransitionError", tc.from, tc.to, err)
+				t.Errorf("illegal pin=%s→%s: err = %v, want InvalidRunTransitionError", tc.pinFrom, tc.to, err)
+			}
+
+			// Phase must be unchanged.
+			refetched, ferr := st.GetRun(t.Context(), run.RunID)
+			if ferr != nil {
+				t.Fatalf("GetRun after rejected transition: %v", ferr)
+			}
+			if refetched.Phase != run.Phase {
+				t.Errorf("phase changed after rejected transition: was %q, now %q", run.Phase, refetched.Phase)
+			}
+
+			// No new run.state_changed event must have been emitted.
+			afterRes, qerr := st.Query(t.Context(), store.Query{Kind: "run.state_changed"})
+			if qerr != nil {
+				t.Fatalf("post-count run.state_changed: %v", qerr)
+			}
+			if len(afterRes.Events) != beforeCount {
+				t.Errorf("rejected transition emitted %d new run.state_changed event(s); want 0",
+					len(afterRes.Events)-beforeCount)
 			}
 		})
 	}
@@ -418,13 +458,40 @@ func TestTransitionRunFromPinMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
-	// run.Phase = "running". Pin From="pending" (stale).
+	// run.Phase = "running". Pin From="pending" (stale caller).
+
+	// Count run.state_changed events before the rejected call.
+	beforeRes, err := st.Query(t.Context(), store.Query{Kind: "run.state_changed"})
+	if err != nil {
+		t.Fatalf("pre-count run.state_changed: %v", err)
+	}
+	beforeCount := len(beforeRes.Events)
+
 	_, err = st.TransitionRun(t.Context(), store.RunTransitionInput{
 		RunID: run.RunID, From: "pending", To: "concluding",
 	})
 	var ite *store.InvalidRunTransitionError
 	if !errors.As(err, &ite) {
 		t.Errorf("from pin mismatch: err = %v, want InvalidRunTransitionError", err)
+	}
+
+	// Phase must be unchanged (still "running").
+	refetched, ferr := st.GetRun(t.Context(), run.RunID)
+	if ferr != nil {
+		t.Fatalf("GetRun after rejected transition: %v", ferr)
+	}
+	if refetched.Phase != run.Phase {
+		t.Errorf("phase changed after rejected transition: was %q, now %q", run.Phase, refetched.Phase)
+	}
+
+	// No new run.state_changed event must have been emitted.
+	afterRes, qerr := st.Query(t.Context(), store.Query{Kind: "run.state_changed"})
+	if qerr != nil {
+		t.Fatalf("post-count run.state_changed: %v", qerr)
+	}
+	if len(afterRes.Events) != beforeCount {
+		t.Errorf("rejected transition emitted %d new run.state_changed event(s); want 0",
+			len(afterRes.Events)-beforeCount)
 	}
 }
 
