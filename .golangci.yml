@@ -1,0 +1,7 @@
+# ABOUTME: Lint gate configuration. Excludes only the standard unactionable
+# ABOUTME: error-check categories (deferred Close, Rollback, CLI Fprintf).
+version: "2"
+linters:
+  exclusions:
+    presets:
+      - std-error-handling

@@ -106,7 +106,8 @@ func (s *Store) appendTx(ctx context.Context, env *events.Envelope, payload, has
 	if err != nil {
 		return zero, fmt.Errorf("begin append: %w", err)
 	}
-	defer tx.Rollback()
+	// Rollback after a successful Commit returns ErrTxDone; nothing to act on.
+	defer func() { _ = tx.Rollback() }()
 
 	var boundVM sql.NullString
 	streamKnown := true

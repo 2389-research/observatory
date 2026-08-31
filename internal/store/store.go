@@ -114,12 +114,12 @@ func migrate(db *sql.DB) error {
 			return fmt.Errorf("begin migration %d: %w", i+1, err)
 		}
 		if _, err := tx.Exec(migrations[i]); err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 			return fmt.Errorf("apply migration %d: %w", i+1, err)
 		}
 		if _, err := tx.Exec(`INSERT INTO schema_migrations (version, applied_at)
 			VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`, i+1); err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 			return fmt.Errorf("record migration %d: %w", i+1, err)
 		}
 		if err := tx.Commit(); err != nil {
