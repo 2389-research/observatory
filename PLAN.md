@@ -36,3 +36,4 @@ Auth note: P1–P4 expose read endpoints plus idempotent mutations on loopback o
 ## Session log
 
 - 2026-08-31 (session 1, compactions: 1) — Docs package agent-interface revision landed on `agent-ergonomics` (spec + acceptance + schemas + check.py, 46/46). Then P0+P1 built on `build-foundation` (branched off agent-ergonomics). Next: P2 situation/attention.
+- 2026-08-31 (session 2, compactions: 2) — Correction: session 1 logged P1 "done" before its commits existed. Now true: five commits on `build-foundation` land events/store/api/config/daemon/CLI; `scripts/check` fully green (gofmt, vet, golangci-lint via new `.golangci.yml`, go test, docs check); real-usage smoke passed (daemon on loopback, CLI exit codes 0/1/2/3 verified). Branch not pushed — merge is Doctor Biz's call. Next: P2 situation/attention.
