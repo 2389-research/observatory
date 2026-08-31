@@ -74,6 +74,56 @@ var migrations = []string{
 		name TEXT PRIMARY KEY,
 		cursor INTEGER NOT NULL
 	);`,
+	// v3: VM registry, operations, and admission reservations (SPEC §5, §6).
+	`CREATE TABLE vms (
+		row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+		vm_id TEXT NOT NULL UNIQUE,
+		name TEXT NOT NULL,
+		owner TEXT NOT NULL,
+		template_id TEXT NOT NULL,
+		template_digest TEXT NOT NULL,
+		desired_state TEXT NOT NULL,
+		observed_state TEXT NOT NULL,
+		revision INTEGER NOT NULL DEFAULT 1,
+		vcpu INTEGER NOT NULL,
+		memory_mib INTEGER NOT NULL,
+		root_disk_mib INTEGER NOT NULL,
+		workspace_disk_mib INTEGER NOT NULL,
+		network_profile TEXT NOT NULL,
+		network_policy_id TEXT NOT NULL,
+		labels TEXT NOT NULL,
+		failure_stage TEXT,
+		failure_reason TEXT,
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL
+	);
+	CREATE INDEX idx_vms_state ON vms (observed_state, row_id);
+	CREATE TABLE operations (
+		operation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+		owner TEXT NOT NULL,
+		kind TEXT NOT NULL,
+		idempotency_key TEXT,
+		request_hash TEXT NOT NULL,
+		vm_id TEXT,
+		phase TEXT NOT NULL,
+		state TEXT NOT NULL,
+		error_cause TEXT,
+		error_message TEXT,
+		attempt INTEGER NOT NULL DEFAULT 1,
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL
+	);
+	CREATE UNIQUE INDEX idx_operations_idem ON operations (owner, kind, idempotency_key) WHERE idempotency_key IS NOT NULL;
+	CREATE TABLE reservations (
+		vm_id TEXT PRIMARY KEY,
+		memory_total_mib INTEGER NOT NULL,
+		vcpu INTEGER NOT NULL,
+		disk_mib INTEGER NOT NULL,
+		compute_released INTEGER NOT NULL DEFAULT 0,
+		released INTEGER NOT NULL DEFAULT 0,
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL
+	);`,
 }
 
 // Store owns one SQLite database. All writes go through the writer pool, which
