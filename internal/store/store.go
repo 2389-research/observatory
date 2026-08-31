@@ -154,6 +154,42 @@ var migrations = []string{
 		refusal_message TEXT,
 		PRIMARY KEY (batch_id, position)
 	);`,
+	// v6: declarative runs and run reports (SPEC §12, P4).
+	// Task 4 is sanctioned to add progress_seq to runs in place (unreleased).
+	// run_reports is pre-created here so Task 5 (report generation) needs no DDL.
+	`CREATE TABLE runs (
+		row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+		run_id TEXT NOT NULL UNIQUE,
+		vm_id TEXT NOT NULL,
+		owner TEXT NOT NULL,
+		goal TEXT NOT NULL,
+		criteria_type TEXT NOT NULL,
+		on_completion TEXT NOT NULL,
+		progress_events INTEGER NOT NULL DEFAULT 0,
+		phase TEXT NOT NULL,
+		evaluated_by TEXT NOT NULL DEFAULT '',
+		reason TEXT NOT NULL DEFAULT '',
+		result_json TEXT NOT NULL DEFAULT '',
+		result_status TEXT NOT NULL DEFAULT '',
+		idempotency_key TEXT,
+		request_hash TEXT NOT NULL,
+		created_event_id INTEGER NOT NULL,
+		concluded_event_id INTEGER NOT NULL DEFAULT 0,
+		created_at TEXT NOT NULL,
+		started_at TEXT NOT NULL DEFAULT '',
+		concluded_at TEXT NOT NULL DEFAULT '',
+		updated_at TEXT NOT NULL
+	);
+	CREATE UNIQUE INDEX idx_runs_idem ON runs (owner, idempotency_key) WHERE idempotency_key IS NOT NULL;
+	CREATE UNIQUE INDEX idx_runs_active ON runs (vm_id) WHERE phase IN ('pending','running','concluding');
+	CREATE INDEX idx_runs_vm ON runs (vm_id, row_id);
+	CREATE TABLE run_reports (
+		run_id TEXT PRIMARY KEY,
+		report_json TEXT NOT NULL,
+		digest TEXT NOT NULL,
+		operation_id INTEGER NOT NULL,
+		generated_at TEXT NOT NULL
+	);`,
 }
 
 // Store owns one SQLite database. All writes go through the writer pool, which
