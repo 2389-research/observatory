@@ -202,8 +202,9 @@ type TransitionInput struct {
 	DesiredState     *string // set when the desired state also changes
 	FailureStage     *string // set when transitioning to "failed"
 	FailureReason    *string
-	ReleaseCompute   bool // true on stopped: frees RAM+CPU but keeps disk
-	ReleaseAll       bool // true on deleted: frees everything
+	ReleaseCompute   bool    // true on stopped: frees RAM+CPU but keeps disk
+	ReleaseAll       bool    // true on deleted: frees everything
+	BootID           *string // non-nil when a new boot identity is established
 }
 
 // OperationUpdate advances an operation's phase/state.
@@ -521,15 +522,29 @@ func (s *Store) TransitionVM(ctx context.Context, in TransitionInput) (*VM, erro
 		}
 	}
 
-	if _, err := s.appendSystemInTx(ctx, tx, s.systemEnvelope("vm.state_changed", "registry", notApplicableQuality(), map[string]any{
+	stateData := map[string]any{
 		"vm_id":        in.VMID,
 		"from":         current.ObservedState,
 		"to":           in.To,
 		"reason":       in.Reason,
 		"operation_id": strconv.FormatInt(in.OperationID, 10),
 		"revision":     strconv.FormatInt(newRevision, 10),
-	})); err != nil {
+	}
+	if in.BootID != nil {
+		stateData["boot_id"] = *in.BootID
+	}
+	if _, err := s.appendSystemInTx(ctx, tx, s.systemEnvelope("vm.state_changed", "registry", notApplicableQuality(), stateData)); err != nil {
 		return nil, err
+	}
+	// vm.deleted marks the terminal resource-release; history and artifacts are
+	// not purged (SPEC §5.4) — the row stays in "deleted" state.
+	if in.To == "deleted" {
+		if _, err := s.appendSystemInTx(ctx, tx, s.systemEnvelope("vm.deleted", "registry", notApplicableQuality(), map[string]any{
+			"vm_id":        in.VMID,
+			"operation_id": strconv.FormatInt(in.OperationID, 10),
+		})); err != nil {
+			return nil, err
+		}
 	}
 
 	vm, err := scanVMInTx(ctx, tx, in.VMID)
@@ -592,6 +607,70 @@ func (s *Store) UpdateOperation(ctx context.Context, upd OperationUpdate) (*Oper
 		return nil, fmt.Errorf("commit update-op: %w", err)
 	}
 	return op, nil
+}
+
+// ActionOperationInput creates an operation row for a VM lifecycle action
+// (pause, resume, stop, etc.) without creating a VM or reservation row.
+type ActionOperationInput struct {
+	Owner       string
+	VMID        string
+	Phase       string
+	RequestHash string
+}
+
+// InsertActionOperation inserts an operation row for a lifecycle action and
+// emits an operation.state_changed event. Returns the operation ID.
+func (s *Store) InsertActionOperation(ctx context.Context, in ActionOperationInput) (int64, error) {
+	tx, err := s.writer.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin action op: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx,
+		`INSERT INTO operations (owner, kind, request_hash, vm_id, phase, state, created_at, updated_at)
+		 VALUES (?, 'vm.action', ?, ?, ?, 'running', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+		in.Owner, in.RequestHash, in.VMID, in.Phase)
+	if err != nil {
+		return 0, fmt.Errorf("insert action op: %w", err)
+	}
+	opID, _ := res.LastInsertId()
+
+	if _, err := s.appendSystemInTx(ctx, tx, s.systemEnvelope("operation.state_changed", "registry", notApplicableQuality(), map[string]any{
+		"operation_id": strconv.FormatInt(opID, 10),
+		"kind":         "vm.action",
+		"vm_id":        in.VMID,
+		"phase":        in.Phase,
+		"state":        "running",
+		"attempt":      1,
+	})); err != nil {
+		return 0, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit action op: %w", err)
+	}
+	return opID, nil
+}
+
+// ListOperationsByState returns all operations in a given state, used by
+// Reconcile to find in-flight operations after a controller restart.
+func (s *Store) ListOperationsByState(ctx context.Context, state string) ([]*Operation, error) {
+	rows, err := s.readers.QueryContext(ctx,
+		operationColumns+` FROM operations WHERE state = ? ORDER BY operation_id ASC`, state)
+	if err != nil {
+		return nil, fmt.Errorf("list operations by state: %w", err)
+	}
+	defer rows.Close()
+	var out []*Operation
+	for rows.Next() {
+		op, err := scanOperation(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, op)
+	}
+	return out, rows.Err()
 }
 
 // --- Read methods ---

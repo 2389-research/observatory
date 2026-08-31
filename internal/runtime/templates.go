@@ -29,10 +29,6 @@ type Template struct {
 	Digest string `json:"-"`
 }
 
-// ErrTemplateUnknown is returned when a requested template ID is not in the
-// approved registry. The caller should include the known IDs in the remediation.
-var ErrTemplateUnknown = errors.New("template not found in approved registry")
-
 // LoadTemplates reads every *.json manifest in dir with strict unknown-field
 // checking (malformed = hard error, not skip). A missing dir is an empty
 // registry — a host with no approved templates is a truthful state.

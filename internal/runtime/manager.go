@@ -1,0 +1,739 @@
+// ABOUTME: Lifecycle manager: the single authority for VM state changes (SPEC §5.3–5.5).
+// ABOUTME: All transitions go through store.TransitionVM; no raw SQL state updates.
+package runtime
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/2389-research/observatory-v2/internal/config"
+	"github.com/2389-research/observatory-v2/internal/store"
+)
+
+// CapacitySnapshot is the three-dimension capacity view served by /host/status
+// and used by /situation to populate capacity_free_mib.
+type CapacitySnapshot struct {
+	// Usable is the max allowed per Policy.
+	UsableMemoryMiB int64
+	UsableVCPU      float64
+	UsableDiskMiB   int64
+	// Reserved is what the reservation table currently holds.
+	ReservedMemoryMiB int64
+	ReservedVCPU      int64
+	ReservedDiskMiB   int64
+	ActiveVMs         int
+	// Free = Usable − Reserved (negative means overcommit or reservation error).
+	FreeMemoryMiB int64
+	FreeVCPU      float64
+	FreeDiskMiB   int64
+}
+
+// ErrTemplateUnknown is returned by CreateVM when the requested template ID is
+// not in the approved registry. KnownIDs populates the remediation response.
+type ErrTemplateUnknown struct {
+	Requested string
+	KnownIDs  []string
+}
+
+func (e *ErrTemplateUnknown) Error() string {
+	return fmt.Sprintf("template %q not found in approved registry (known: %s)",
+		e.Requested, strings.Join(e.KnownIDs, ", "))
+}
+
+// ErrInvalidRequest is returned for validation failures that are clearly the
+// caller's fault — missing name, name too long, etc.
+type ErrInvalidRequest struct{ Reason string }
+
+func (e *ErrInvalidRequest) Error() string { return "invalid request: " + e.Reason }
+
+// ErrUnknownAction is returned when Action receives an unrecognised action name.
+type ErrUnknownAction struct{ Known []string }
+
+func (e *ErrUnknownAction) Error() string {
+	return fmt.Sprintf("unknown action (valid: %s)", strings.Join(e.Known, ", "))
+}
+
+var validActions = []string{"start", "pause", "resume", "stop", "force_stop"}
+
+// ManagerConfig carries the host-level configuration the manager acts on.
+type ManagerConfig struct {
+	Admission  config.Admission
+	VMDefaults config.VMDefaults
+	Owner      string // "local_operator" until P5 auth lands
+	Templates  map[string]Template
+	Host       HostResources
+}
+
+// Manager is the single lifecycle authority. It owns a bounded worker pool for
+// launch jobs so concurrent create requests do not exceed MaxParallelProvisions.
+// Close blocks until all in-flight launch jobs finish.
+type Manager struct {
+	st     *store.Store
+	rt     Runtime
+	cfg    ManagerConfig
+	policy Policy
+
+	// sem limits parallel provisioning to cfg.Admission.MaxParallelProvisions.
+	sem chan struct{}
+	wg  sync.WaitGroup
+
+	// ctx is the manager's root context; cancelled by Close to interrupt launches.
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+// NewManager creates a Manager and immediately runs Reconcile to clean up any
+// state left over from a previous controller run.
+func NewManager(st *store.Store, rt Runtime, cfg ManagerConfig) (*Manager, error) {
+	n := cfg.Admission.MaxParallelProvisions
+	if n <= 0 {
+		n = 2
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	m := &Manager{
+		st:     st,
+		rt:     rt,
+		cfg:    cfg,
+		policy: Policy{Admission: cfg.Admission, Host: cfg.Host},
+		sem:    make(chan struct{}, n),
+		ctx:    ctx,
+		cancel: cancel,
+	}
+	if err := m.Reconcile(ctx); err != nil {
+		cancel()
+		return nil, fmt.Errorf("reconcile on startup: %w", err)
+	}
+	return m, nil
+}
+
+// Close waits for all in-flight launch jobs and then releases the manager's
+// context. In-flight jobs run to completion first; cancel only stops newly
+// queued work from starting.
+func (m *Manager) Close() {
+	m.wg.Wait()
+	m.cancel()
+}
+
+// Capacity returns the current usable/reserved/free view of host resources.
+func (m *Manager) Capacity(ctx context.Context) (CapacitySnapshot, error) {
+	totals, err := m.st.ReservationTotals(ctx)
+	if err != nil {
+		return CapacitySnapshot{}, fmt.Errorf("read reservations: %w", err)
+	}
+	usableMem := m.policy.UsableMemoryMiB()
+	usableVCPU := m.policy.UsableVCPU()
+	usableDisk := m.policy.UsableDiskMiB()
+	return CapacitySnapshot{
+		UsableMemoryMiB:   usableMem,
+		UsableVCPU:        usableVCPU,
+		UsableDiskMiB:     usableDisk,
+		ReservedMemoryMiB: totals.MemoryMiB,
+		ReservedVCPU:      totals.VCPU,
+		ReservedDiskMiB:   totals.DiskMiB,
+		ActiveVMs:         totals.ActiveVMs,
+		FreeMemoryMiB:     usableMem - totals.MemoryMiB,
+		FreeVCPU:          usableVCPU - float64(totals.VCPU),
+		FreeDiskMiB:       usableDisk - totals.DiskMiB,
+	}, nil
+}
+
+// CreateRequest is the external input for a create-VM request.
+type CreateRequest struct {
+	Name             string
+	TemplateID       string
+	IdempotencyKey   *string
+	VCPUCount        int
+	MemoryMiB        int64
+	RootDiskMiB      int64
+	WorkspaceDiskMiB int64
+	Labels           map[string]string
+}
+
+// CreateVM validates and creates a VM, then asynchronously provisions it.
+// On idempotent replay, returns the stored result without re-provisioning.
+func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*store.VM, *store.Operation, error) {
+	// AT-001: check runtime availability first; nothing persisted on failure.
+	if err := m.rt.Availability(ctx); err != nil {
+		return nil, nil, fmt.Errorf("runtime not available: %w", err)
+	}
+
+	// Template lookup.
+	if req.TemplateID == "" {
+		return nil, nil, &ErrInvalidRequest{Reason: "template_id is required"}
+	}
+	tpl, ok := m.cfg.Templates[req.TemplateID]
+	if !ok {
+		known := make([]string, 0, len(m.cfg.Templates))
+		for id := range m.cfg.Templates {
+			known = append(known, id)
+		}
+		return nil, nil, &ErrTemplateUnknown{Requested: req.TemplateID, KnownIDs: known}
+	}
+
+	// Name validation.
+	if req.Name == "" {
+		return nil, nil, &ErrInvalidRequest{Reason: "name is required"}
+	}
+	if len(req.Name) > 128 {
+		return nil, nil, &ErrInvalidRequest{Reason: "name exceeds 128 bytes"}
+	}
+	for _, r := range req.Name {
+		if r < ' ' || r > '~' {
+			return nil, nil, &ErrInvalidRequest{Reason: "name contains non-printable characters"}
+		}
+	}
+
+	// Apply defaults for zero-valued resource fields.
+	vcpu := req.VCPUCount
+	if vcpu <= 0 {
+		vcpu = m.cfg.VMDefaults.VCPUCount
+	}
+	memMiB := req.MemoryMiB
+	if memMiB <= 0 {
+		memMiB = m.cfg.VMDefaults.MemoryMiB
+	}
+	rootDisk := req.RootDiskMiB
+	if rootDisk <= 0 {
+		rootDisk = m.cfg.VMDefaults.RootDiskMiB
+	}
+	wsDisk := req.WorkspaceDiskMiB
+	if wsDisk <= 0 {
+		wsDisk = m.cfg.VMDefaults.WorkspaceDiskMiB
+	}
+	if vcpu <= 0 || memMiB <= 0 || rootDisk <= 0 || wsDisk <= 0 {
+		return nil, nil, &ErrInvalidRequest{Reason: "resource values must be positive"}
+	}
+
+	memTotal := memMiB + m.cfg.Admission.ReservePerVMHostOverheadMiB
+	diskTotal := rootDisk + wsDisk
+
+	// Request hash over the effective (post-default) request; json.Marshal of a
+	// struct with sorted fields is deterministic.
+	type effectiveReq struct {
+		TemplateID string `json:"template_id"`
+		Name       string `json:"name"`
+		VCPU       int    `json:"vcpu"`
+		MemoryMiB  int64  `json:"memory_mib"`
+		RootDisk   int64  `json:"root_disk_mib"`
+		WSDisk     int64  `json:"workspace_disk_mib"`
+	}
+	hashBytes, _ := json.Marshal(effectiveReq{
+		TemplateID: req.TemplateID,
+		Name:       req.Name,
+		VCPU:       vcpu,
+		MemoryMiB:  memMiB,
+		RootDisk:   rootDisk,
+		WSDisk:     wsDisk,
+	})
+	sum := sha256.Sum256(hashBytes)
+	requestHash := hex.EncodeToString(sum[:])
+
+	vmID := uuid.NewString()
+	admit := func(totals store.ReservationTotals) error {
+		return m.policy.Admit(totals, memTotal, vcpu, diskTotal)
+	}
+
+	vm, op, err := m.st.CreateVMWithOperation(ctx, store.CreateVMInput{
+		VMID:             vmID,
+		Name:             req.Name,
+		Owner:            m.cfg.Owner,
+		TemplateID:       tpl.TemplateID,
+		TemplateDigest:   tpl.Digest,
+		VCPUCount:        vcpu,
+		MemoryMiB:        memMiB,
+		RootDiskMiB:      rootDisk,
+		WorkspaceDiskMiB: wsDisk,
+		MemoryTotalMiB:   memTotal,
+		NetworkProfile:   m.cfg.VMDefaults.NetworkProfile,
+		NetworkPolicyID:  m.cfg.VMDefaults.NetworkPolicyID,
+		Labels:           req.Labels,
+		Kind:             "vm.create",
+		IdempotencyKey:   req.IdempotencyKey,
+		RequestHash:      requestHash,
+		Admit:            admit,
+	})
+	if err != nil {
+		return vm, op, err
+	}
+	if vm == nil {
+		// Idempotent replay of a refused create; op carries the refusal.
+		return nil, op, err
+	}
+
+	// Admission succeeded — enqueue the async launch job.
+	m.enqueueLaunch(vm, op.OperationID, tpl, vcpu, memMiB, rootDisk, wsDisk)
+	return vm, op, nil
+}
+
+// enqueueLaunch acquires a semaphore slot and runs the launch job in a goroutine.
+func (m *Manager) enqueueLaunch(vm *store.VM, opID int64, tpl Template, vcpu int, memMiB, rootDisk, wsDisk int64) {
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		// Acquire a provisioning slot.
+		select {
+		case m.sem <- struct{}{}:
+		case <-m.ctx.Done():
+			// Manager is closing before the slot was acquired; abandon.
+			m.failLaunch(m.ctx, vm.VMID, opID, "enqueue", "manager closed before slot acquired")
+			return
+		}
+		defer func() { <-m.sem }()
+		m.runLaunch(vm, opID, tpl, vcpu, memMiB, rootDisk, wsDisk)
+	}()
+}
+
+// runLaunch executes the provisioning sequence: provisioning→starting→running
+// (§5.3). On any failure, transitions to failed and releases compute.
+func (m *Manager) runLaunch(vm *store.VM, opID int64, tpl Template, vcpu int, memMiB, rootDisk, wsDisk int64) {
+	ctx := m.ctx
+	vmID := vm.VMID
+	bootID := uuid.NewString()
+
+	spec := VMSpec{
+		VMID:             vmID,
+		BootID:           bootID,
+		VCPUCount:        vcpu,
+		MemoryMiB:        memMiB,
+		RootDiskMiB:      rootDisk,
+		WorkspaceDiskMiB: wsDisk,
+		NetworkProfile:   vm.NetworkProfile,
+		NetworkPolicyID:  vm.NetworkPolicyID,
+		TemplateID:       tpl.TemplateID,
+		TemplateDigest:   tpl.Digest,
+	}
+
+	// provisioning → starting
+	if _, err := m.st.TransitionVM(ctx, store.TransitionInput{
+		VMID:        vmID,
+		To:          "starting",
+		Reason:      "launch",
+		OperationID: opID,
+		BootID:      &bootID,
+	}); err != nil {
+		if errors.Is(err, new(store.InvalidTransitionError)) {
+			// A concurrent stop raced us; abandon without overwriting stop's state.
+			return
+		}
+		m.failLaunch(ctx, vmID, opID, "starting", err.Error())
+		return
+	}
+
+	// Launch the VMM.
+	if err := m.rt.Launch(ctx, spec); err != nil {
+		m.failLaunch(ctx, vmID, opID, "launch", err.Error())
+		_ = m.rt.ForceStop(ctx, vmID) // best-effort cleanup
+		return
+	}
+
+	// starting → running
+	if _, err := m.st.TransitionVM(ctx, store.TransitionInput{
+		VMID:        vmID,
+		To:          "running",
+		Reason:      "launch_complete",
+		OperationID: opID,
+	}); err != nil {
+		if errors.Is(err, new(store.InvalidTransitionError)) {
+			return // stop raced us after launch; leave cleanup to the stop path
+		}
+		m.failLaunch(ctx, vmID, opID, "running", err.Error())
+		_ = m.rt.ForceStop(ctx, vmID)
+		return
+	}
+
+	// Mark operation succeeded.
+	errCause := (*string)(nil)
+	errMsg := (*string)(nil)
+	if _, err := m.st.UpdateOperation(ctx, store.OperationUpdate{
+		OperationID:  opID,
+		Phase:        "running",
+		State:        "succeeded",
+		ErrorCause:   errCause,
+		ErrorMessage: errMsg,
+	}); err != nil {
+		// Operation update failure is logged implicitly; VM is running correctly.
+		_ = err
+	}
+}
+
+// failLaunch transitions a VM to failed state and marks its operation failed.
+func (m *Manager) failLaunch(ctx context.Context, vmID string, opID int64, stage, reason string) {
+	_, _ = m.st.TransitionVM(ctx, store.TransitionInput{
+		VMID:           vmID,
+		To:             "failed",
+		Reason:         reason,
+		OperationID:    opID,
+		FailureStage:   &stage,
+		FailureReason:  &reason,
+		ReleaseCompute: true,
+	})
+	cause := "launch_failed"
+	_, _ = m.st.UpdateOperation(ctx, store.OperationUpdate{
+		OperationID:  opID,
+		Phase:        stage,
+		State:        "failed",
+		ErrorCause:   &cause,
+		ErrorMessage: &reason,
+	})
+}
+
+// Action performs a typed lifecycle action on a VM synchronously.
+// Each invocation creates its own operation row (kind="vm.action").
+func (m *Manager) Action(ctx context.Context, vmID, action string, expectedRevision *int64) (*store.VM, *store.Operation, error) {
+	switch action {
+	case "start", "pause", "resume", "stop", "force_stop":
+	default:
+		return nil, nil, &ErrUnknownAction{Known: validActions}
+	}
+
+	vm, err := m.st.GetVM(ctx, vmID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	opID, err := m.st.InsertActionOperation(ctx, store.ActionOperationInput{
+		Owner:       m.cfg.Owner,
+		VMID:        vmID,
+		Phase:       action,
+		RequestHash: fmt.Sprintf("%s:%s:%d", action, vmID, vm.Revision),
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("insert action operation: %w", err)
+	}
+
+	return m.doAction(ctx, vm, action, opID, expectedRevision)
+}
+
+func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opID int64, expectedRevision *int64) (*store.VM, *store.Operation, error) {
+	vmID := vm.VMID
+	grace := time.Duration(m.cfg.VMDefaults.StopGraceSeconds) * time.Second
+
+	var (
+		newState string
+		reason   string
+		releaseC bool
+	)
+
+	switch action {
+	case "start":
+		if vm.ObservedState != "stopped" {
+			return m.failAction(ctx, vmID, opID, action, fmt.Errorf("start requires stopped state, got %s", vm.ObservedState))
+		}
+		bootID := uuid.NewString()
+		updVM, err := m.st.TransitionVM(ctx, store.TransitionInput{
+			VMID:             vmID,
+			ExpectedRevision: expectedRevision,
+			To:               "starting",
+			Reason:           "start",
+			OperationID:      opID,
+			BootID:           &bootID,
+		})
+		if err != nil {
+			return m.failAction(ctx, vmID, opID, action, err)
+		}
+		if err := m.rt.Launch(ctx, VMSpec{
+			VMID:             vmID,
+			BootID:           bootID,
+			VCPUCount:        vm.VCPUCount,
+			MemoryMiB:        vm.MemoryMiB,
+			RootDiskMiB:      vm.RootDiskMiB,
+			WorkspaceDiskMiB: vm.WorkspaceDiskMiB,
+			NetworkProfile:   vm.NetworkProfile,
+			NetworkPolicyID:  vm.NetworkPolicyID,
+			TemplateID:       vm.TemplateID,
+			TemplateDigest:   vm.TemplateDigest,
+		}); err != nil {
+			m.failLaunch(ctx, vmID, opID, "launch", err.Error())
+			_ = m.rt.ForceStop(ctx, vmID)
+			op, _ := m.st.GetOperation(ctx, opID)
+			return updVM, op, fmt.Errorf("launch: %w", err)
+		}
+		updVM, err = m.st.TransitionVM(ctx, store.TransitionInput{
+			VMID:        vmID,
+			To:          "running",
+			Reason:      "start_complete",
+			OperationID: opID,
+		})
+		if err != nil {
+			return m.failAction(ctx, vmID, opID, action, err)
+		}
+		return m.succeedAction(ctx, vmID, opID, "running", updVM)
+
+	case "pause":
+		if vm.ObservedState != "running" {
+			return m.failAction(ctx, vmID, opID, action, fmt.Errorf("pause requires running state, got %s", vm.ObservedState))
+		}
+		if err := m.rt.Pause(ctx, vmID); err != nil {
+			return m.failAction(ctx, vmID, opID, action, err)
+		}
+		newState, reason = "paused", "pause"
+
+	case "resume":
+		if vm.ObservedState != "paused" {
+			return m.failAction(ctx, vmID, opID, action, fmt.Errorf("resume requires paused state, got %s", vm.ObservedState))
+		}
+		if err := m.rt.Resume(ctx, vmID); err != nil {
+			return m.failAction(ctx, vmID, opID, action, err)
+		}
+		newState, reason = "running", "resume"
+
+	case "stop":
+		switch vm.ObservedState {
+		case "running", "paused", "stopping":
+		default:
+			return m.failAction(ctx, vmID, opID, action, fmt.Errorf("stop requires running/paused/stopping state, got %s", vm.ObservedState))
+		}
+		// Transition to stopping first (required by §5.2 matrix for running and paused).
+		if vm.ObservedState != "stopping" {
+			if _, err := m.st.TransitionVM(ctx, store.TransitionInput{
+				VMID:             vmID,
+				ExpectedRevision: expectedRevision,
+				To:               "stopping",
+				Reason:           "stop_requested",
+				OperationID:      opID,
+			}); err != nil {
+				return m.failAction(ctx, vmID, opID, action, err)
+			}
+		}
+		forced, err := m.rt.Stop(ctx, vmID, grace)
+		if err != nil {
+			return m.failAction(ctx, vmID, opID, action, err)
+		}
+		if forced {
+			reason = "forced_stop"
+		} else {
+			reason = "graceful_stop"
+		}
+		newState, releaseC = "stopped", true
+
+	case "force_stop":
+		switch vm.ObservedState {
+		case "running", "paused", "stopping":
+		default:
+			return m.failAction(ctx, vmID, opID, action, fmt.Errorf("force_stop requires running/paused/stopping state, got %s", vm.ObservedState))
+		}
+		// Transition through stopping first (§5.2 matrix: running/paused→stopping→stopped).
+		if vm.ObservedState != "stopping" {
+			if _, err := m.st.TransitionVM(ctx, store.TransitionInput{
+				VMID:             vmID,
+				ExpectedRevision: expectedRevision,
+				To:               "stopping",
+				Reason:           "force_stop_requested",
+				OperationID:      opID,
+			}); err != nil {
+				return m.failAction(ctx, vmID, opID, action, err)
+			}
+		}
+		if err := m.rt.ForceStop(ctx, vmID); err != nil {
+			return m.failAction(ctx, vmID, opID, action, err)
+		}
+		newState, reason, releaseC = "stopped", "forced_stop", true
+	}
+
+	updVM, err := m.st.TransitionVM(ctx, store.TransitionInput{
+		VMID:             vmID,
+		ExpectedRevision: expectedRevision,
+		To:               newState,
+		Reason:           reason,
+		OperationID:      opID,
+		ReleaseCompute:   releaseC,
+	})
+	if err != nil {
+		return m.failAction(ctx, vmID, opID, action, err)
+	}
+	return m.succeedAction(ctx, vmID, opID, action, updVM)
+}
+
+func (m *Manager) failAction(ctx context.Context, vmID string, opID int64, action string, cause error) (*store.VM, *store.Operation, error) {
+	causeStr := "action_failed"
+	msg := cause.Error()
+	op, _ := m.st.UpdateOperation(ctx, store.OperationUpdate{
+		OperationID:  opID,
+		Phase:        action,
+		State:        "failed",
+		ErrorCause:   &causeStr,
+		ErrorMessage: &msg,
+	})
+	vm, _ := m.st.GetVM(ctx, vmID)
+	return vm, op, cause
+}
+
+func (m *Manager) succeedAction(ctx context.Context, vmID string, opID int64, phase string, vm *store.VM) (*store.VM, *store.Operation, error) {
+	op, err := m.st.UpdateOperation(ctx, store.OperationUpdate{
+		OperationID: opID,
+		Phase:       phase,
+		State:       "succeeded",
+	})
+	if err != nil {
+		return vm, nil, fmt.Errorf("update action op: %w", err)
+	}
+	return vm, op, nil
+}
+
+// Delete removes VM compute resources. Already-deleted or deleting VMs are
+// idempotent returns. Live VMs require force=true.
+func (m *Manager) Delete(ctx context.Context, vmID string, force bool, expectedRevision *int64) (*store.VM, error) {
+	vm, err := m.st.GetVM(ctx, vmID)
+	if err != nil {
+		return nil, err
+	}
+	switch vm.ObservedState {
+	case "deleted":
+		return vm, nil // already done
+	case "deleting":
+		return vm, nil // in progress
+	}
+
+	// Live states require force.
+	liveStates := map[string]bool{
+		"provisioning": true, "starting": true,
+		"running": true, "paused": true, "stopping": true,
+	}
+	if liveStates[vm.ObservedState] {
+		if !force {
+			return vm, store.ErrVMLive
+		}
+		// Force-stop, then fall through to deletion.
+		if err := m.rt.ForceStop(ctx, vmID); err != nil {
+			var ue *UnavailableError
+			if !errors.As(err, &ue) { // unavailable runtime is fine — VM not running
+				return vm, fmt.Errorf("force-stop before delete: %w", err)
+			}
+		}
+		// §5.2: running/paused→stopping→stopped (no direct live→stopped transition).
+		if vm.ObservedState != "stopping" {
+			if _, err := m.st.TransitionVM(ctx, store.TransitionInput{
+				VMID:        vmID,
+				To:          "stopping",
+				Reason:      "forced_stop_for_delete",
+				OperationID: 0,
+			}); err != nil && !errors.Is(err, new(store.InvalidTransitionError)) {
+				return vm, fmt.Errorf("stopping before delete: %w", err)
+			}
+		}
+		vm, err = m.st.TransitionVM(ctx, store.TransitionInput{
+			VMID:           vmID,
+			To:             "stopped",
+			Reason:         "forced_stop_for_delete",
+			OperationID:    0,
+			ReleaseCompute: true,
+		})
+		if err != nil && !errors.Is(err, new(store.InvalidTransitionError)) {
+			return vm, fmt.Errorf("stop before delete: %w", err)
+		}
+		if vm, err = m.st.GetVM(ctx, vmID); err != nil {
+			return nil, err
+		}
+	}
+
+	// failed → deleting is valid in the matrix.
+	if vm.ObservedState == "failed" || vm.ObservedState == "stopped" {
+		vm, err = m.st.TransitionVM(ctx, store.TransitionInput{
+			VMID:             vmID,
+			ExpectedRevision: expectedRevision,
+			To:               "deleting",
+			Reason:           "delete_requested",
+			OperationID:      0,
+		})
+		if err != nil {
+			return vm, err
+		}
+	}
+
+	vm, err = m.st.TransitionVM(ctx, store.TransitionInput{
+		VMID:        vmID,
+		To:          "deleted",
+		Reason:      "deleted",
+		OperationID: 0,
+		ReleaseAll:  true,
+	})
+	return vm, err
+}
+
+// Reconcile cleans up state left over from a previous controller run (§5.5).
+// Portable core: no real runtime exists here, so nothing can be adopted.
+// Operations in flight → failed; VMs in transitional states → failed/stopped/deleted.
+func (m *Manager) Reconcile(ctx context.Context) error {
+	// Fail in-flight operations (pending/running).
+	for _, state := range []string{"pending", "running"} {
+		ops, err := m.st.ListOperationsByState(ctx, state)
+		if err != nil {
+			return fmt.Errorf("list %s operations: %w", state, err)
+		}
+		cause := "controller_restart"
+		msg := "the controller restarted while this operation was in progress"
+		for _, op := range ops {
+			if _, err := m.st.UpdateOperation(ctx, store.OperationUpdate{
+				OperationID:  op.OperationID,
+				Phase:        op.Phase,
+				State:        "failed",
+				ErrorCause:   &cause,
+				ErrorMessage: &msg,
+			}); err != nil {
+				return fmt.Errorf("fail operation %d: %w", op.OperationID, err)
+			}
+		}
+	}
+
+	// Reconcile VMs in transitional states.
+	allVMs, err := m.st.ListVMs(ctx, store.VMQuery{Limit: store.MaxPageLimit})
+	if err != nil {
+		return fmt.Errorf("list vms for reconcile: %w", err)
+	}
+	for _, vm := range allVMs {
+		switch vm.ObservedState {
+		case "provisioning", "starting":
+			// VMM never started or never reached running; mark failed.
+			stage := vm.ObservedState
+			reason := "controller_restart"
+			_, _ = m.st.TransitionVM(ctx, store.TransitionInput{
+				VMID:           vm.VMID,
+				To:             "failed",
+				Reason:         reason,
+				OperationID:    0,
+				FailureStage:   &stage,
+				FailureReason:  &reason,
+				ReleaseCompute: true,
+			})
+		case "running", "paused":
+			// VMM disappeared — §5.5: mark with explicit reason; adoption is L0.
+			reason := "vmm_disappeared_on_restart"
+			_, _ = m.st.TransitionVM(ctx, store.TransitionInput{
+				VMID:           vm.VMID,
+				To:             "failed",
+				Reason:         reason,
+				OperationID:    0,
+				ReleaseCompute: true,
+			})
+		case "stopping":
+			// Safe to mark stopped — we're not running, so the VMM is gone.
+			_, _ = m.st.TransitionVM(ctx, store.TransitionInput{
+				VMID:           vm.VMID,
+				To:             "stopped",
+				Reason:         "controller_restart",
+				OperationID:    0,
+				ReleaseCompute: true,
+			})
+		case "deleting":
+			// Complete the idempotent delete.
+			_, _ = m.st.TransitionVM(ctx, store.TransitionInput{
+				VMID:        vm.VMID,
+				To:          "deleted",
+				Reason:      "controller_restart",
+				OperationID: 0,
+				ReleaseAll:  true,
+			})
+		}
+		// stopped, failed, deleted, deleted: no action needed.
+	}
+	return nil
+}

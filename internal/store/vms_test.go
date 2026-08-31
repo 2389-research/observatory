@@ -648,3 +648,59 @@ func TestUpdateOperation(t *testing.T) {
 		t.Error("no operation.state_changed event with state=succeeded")
 	}
 }
+
+func TestTransitionVMBootIDInEvent(t *testing.T) {
+	// BootID should appear in the vm.state_changed event data when set.
+	st := openStore(t)
+	vm, op := mustCreateVM(t, st, testUUID(1), "alpha", nil)
+	bootID := testUUID(99)
+	_, err := st.TransitionVM(t.Context(), store.TransitionInput{
+		VMID:        vm.VMID,
+		To:          "starting",
+		Reason:      "launch",
+		OperationID: op.OperationID,
+		BootID:      &bootID,
+	})
+	if err != nil {
+		t.Fatalf("TransitionVM: %v", err)
+	}
+	events := queryAll(t, st, store.Query{Kind: "vm.state_changed", Limit: 10})
+	found := false
+	for _, e := range events.Events {
+		if bid, ok := e.Data["boot_id"].(string); ok && bid == bootID {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("boot_id not found in vm.state_changed event data")
+	}
+}
+
+func TestTransitionVMDeletedEmitsVMDeleted(t *testing.T) {
+	// Transitioning to "deleted" should emit a vm.deleted event (SPEC §5.4).
+	st := openStore(t)
+	vm, op := mustCreateVM(t, st, testUUID(1), "alpha", nil)
+	// Walk the state machine to deleted.
+	for _, step := range []string{"starting", "running", "stopping", "stopped", "deleting", "deleted"} {
+		release := step == "stopped"
+		releaseAll := step == "deleted"
+		_, err := st.TransitionVM(t.Context(), store.TransitionInput{
+			VMID:           vm.VMID,
+			To:             step,
+			Reason:         "test",
+			OperationID:    op.OperationID,
+			ReleaseCompute: release,
+			ReleaseAll:     releaseAll,
+		})
+		if err != nil {
+			t.Fatalf("transition to %s: %v", step, err)
+		}
+	}
+	events := queryAll(t, st, store.Query{Kind: "vm.deleted", Limit: 10})
+	if len(events.Events) != 1 {
+		t.Errorf("expected 1 vm.deleted event, got %d", len(events.Events))
+	}
+	if vmID, _ := events.Events[0].Data["vm_id"].(string); vmID != vm.VMID {
+		t.Errorf("vm.deleted event vm_id = %q, want %q", vmID, vm.VMID)
+	}
+}
