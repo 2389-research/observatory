@@ -314,6 +314,106 @@ func TestEventsBoundsTeach(t *testing.T) {
 	requireTeaching(t, badCursor, "malformed_request")
 }
 
+func seedKindEvent(t *testing.T, st *store.Store, kind string, source, seq string) {
+	t.Helper()
+	// Build a minimal host_observed envelope for the given kind with no VM scope.
+	env := &events.Envelope{
+		SchemaVersion:    1,
+		SourceInstanceID: source,
+		SourceSeq:        seq,
+		Kind:             kind,
+		Provenance:       events.HostObserved,
+		Sensor:           "test",
+		HostReceivedAt:   events.Timestamp{Time: time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)},
+		Quality: events.Quality{
+			PathResolution: events.PathNotApplicable,
+			Attribution:    events.AttributionNotApplicable,
+		},
+		Data: map[string]any{"test": true},
+	}
+	if _, err := st.Append(t.Context(), env); err != nil {
+		t.Fatalf("seedKindEvent %q: %v", kind, err)
+	}
+}
+
+func TestEventsFamilyFilter(t *testing.T) {
+	srv, st := newServer(t)
+	vm := testUUID(1)
+	// Seed: 2 fs.modify events, 1 telemetry.loss event.
+	seedEvent(t, st, testUUID(9), "1", vm)
+	seedEvent(t, st, testUUID(9), "2", vm)
+	seedKindEvent(t, st, "telemetry.loss", testUUID(10), "1")
+
+	var byFamily eventsResponse
+	getJSON(t, srv.URL+"/api/v1/events?family=fs", http.StatusOK, &byFamily)
+	if len(byFamily.Events) != 2 {
+		t.Errorf("family=fs: got %d events, want 2", len(byFamily.Events))
+	}
+
+	var byTelemetry eventsResponse
+	getJSON(t, srv.URL+"/api/v1/events?family=telemetry", http.StatusOK, &byTelemetry)
+	if len(byTelemetry.Events) != 1 {
+		t.Errorf("family=telemetry: got %d events, want 1", len(byTelemetry.Events))
+	}
+}
+
+func TestEventsFamilyUnknownRejects(t *testing.T) {
+	srv, _ := newServer(t)
+	var e api.Error
+	getJSON(t, srv.URL+"/api/v1/events?family=nope", http.StatusBadRequest, &e)
+	requireTeaching(t, e, "malformed_request")
+	if e.Cause != "family_unknown" {
+		t.Errorf("cause = %q, want family_unknown", e.Cause)
+	}
+	foundRegistryPointer := false
+	for _, r := range e.Remediation {
+		if strings.Contains(fmt.Sprint(r.Params), "event-kinds") {
+			foundRegistryPointer = true
+		}
+	}
+	if !foundRegistryPointer {
+		t.Errorf("unknown-family error should point at the registry: %+v", e.Remediation)
+	}
+}
+
+func TestEventsUntilInvalidRejects(t *testing.T) {
+	srv, _ := newServer(t)
+	var e api.Error
+	getJSON(t, srv.URL+"/api/v1/events?until=abc", http.StatusBadRequest, &e)
+	requireTeaching(t, e, "malformed_request")
+	if e.Cause != "query_parameter_invalid" {
+		t.Errorf("cause = %q, want query_parameter_invalid", e.Cause)
+	}
+}
+
+func TestEventsKindAndFamilyConflictRejects(t *testing.T) {
+	srv, _ := newServer(t)
+	var e api.Error
+	getJSON(t, srv.URL+"/api/v1/events?kind=fs.modify&family=fs", http.StatusBadRequest, &e)
+	requireTeaching(t, e, "malformed_request")
+	if e.Cause != "conflicting_filters" {
+		t.Errorf("cause = %q, want conflicting_filters", e.Cause)
+	}
+}
+
+func TestEventsUntilBound(t *testing.T) {
+	srv, st := newServer(t)
+	vm := testUUID(1)
+	// Seed 5 events; cursors will be 1..5.
+	for i := 1; i <= 5; i++ {
+		seedEvent(t, st, testUUID(9), strconv.Itoa(i), vm)
+	}
+	// after=1, until=3 → events 2,3.
+	var page eventsResponse
+	getJSON(t, srv.URL+"/api/v1/events?after=1&until=3", http.StatusOK, &page)
+	if len(page.Events) != 2 {
+		t.Errorf("after=1 until=3: got %d events, want 2", len(page.Events))
+	}
+	if page.NextAfter != "3" {
+		t.Errorf("next_after = %q, want 3", page.NextAfter)
+	}
+}
+
 func TestUnbuiltEndpointsTeachCapability(t *testing.T) {
 	srv, _ := newServer(t)
 	for _, probe := range []struct {

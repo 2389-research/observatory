@@ -192,3 +192,16 @@ func LookupKind(kind string) (KindInfo, bool) {
 	info, ok := registryByKind[kind]
 	return info, ok
 }
+
+// KindsByFamily returns the kind strings for all registered kinds whose Family
+// matches family. Returns nil (not an empty slice) when the family has no
+// registered kinds — the caller should treat nil as an unknown family.
+func KindsByFamily(family string) []string {
+	var out []string
+	for _, k := range registry {
+		if k.Family == family {
+			out = append(out, k.Kind)
+		}
+	}
+	return out
+}

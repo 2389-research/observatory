@@ -347,6 +347,104 @@ func TestReopenContinuesCursorAndStreamBindings(t *testing.T) {
 	}
 }
 
+// telemetryLoss builds a valid host_observed telemetry.loss envelope with no
+// VM scope (store-synthesized style) for seeding multi-family query tests.
+func telemetryLoss(source, seq string) *events.Envelope {
+	return &events.Envelope{
+		SchemaVersion:    1,
+		SourceInstanceID: source,
+		SourceSeq:        seq,
+		Kind:             "telemetry.loss",
+		Provenance:       events.HostObserved,
+		Sensor:           "ingress",
+		HostReceivedAt:   events.Timestamp{Time: time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)},
+		Quality: events.Quality{
+			PathResolution: events.PathNotApplicable,
+			Attribution:    events.AttributionNotApplicable,
+		},
+		Data: map[string]any{"loss_count": "1"},
+	}
+}
+
+func TestQueryFamilyFilter(t *testing.T) {
+	s := openStore(t)
+	vm, boot := testUUID(1), testUUID(2)
+
+	// Seed: 2 fs.modify (family "fs"), 1 telemetry.loss (family "telemetry").
+	mustAppend(t, s, fsModify(testUUID(9), "1", &vm, &boot))
+	mustAppend(t, s, telemetryLoss(testUUID(10), "1"))
+	mustAppend(t, s, fsModify(testUUID(9), "2", &vm, &boot))
+
+	// family=fs should return only the two fs.modify events.
+	res := queryAll(t, s, store.Query{Family: "fs"})
+	if len(res.Events) != 2 {
+		t.Fatalf("family=fs: got %d events, want 2", len(res.Events))
+	}
+	for _, e := range res.Events {
+		if e.Kind != "fs.modify" {
+			t.Errorf("family=fs leaked kind %q", e.Kind)
+		}
+	}
+
+	// family=telemetry should return only the telemetry.loss event.
+	tRes := queryAll(t, s, store.Query{Family: "telemetry"})
+	if len(tRes.Events) != 1 {
+		t.Fatalf("family=telemetry: got %d events, want 1", len(tRes.Events))
+	}
+	if tRes.Events[0].Kind != "telemetry.loss" {
+		t.Errorf("family=telemetry: got kind %q, want telemetry.loss", tRes.Events[0].Kind)
+	}
+}
+
+func TestQueryFamilyUnknownErrors(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+	_, err := s.Query(ctx, store.Query{Family: "nope"})
+	if !errors.Is(err, store.ErrUnknownFamily) {
+		t.Errorf("unknown family: err = %v, want ErrUnknownFamily", err)
+	}
+}
+
+func TestQueryFamilyAndKindConflict(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+	_, err := s.Query(ctx, store.Query{Kind: "fs.modify", Family: "fs"})
+	if !errors.Is(err, store.ErrConflictingFilters) {
+		t.Errorf("kind+family: err = %v, want ErrConflictingFilters", err)
+	}
+}
+
+func TestQueryUntilBound(t *testing.T) {
+	s := openStore(t)
+	vm, boot := testUUID(1), testUUID(2)
+	// Seed 5 events; their event_ids will be 1..5.
+	var ids [5]string
+	for i := 0; i < 5; i++ {
+		res := mustAppend(t, s, fsModify(testUUID(9), strconv.Itoa(i+1), &vm, &boot))
+		ids[i] = res.EventID
+	}
+	// after=id1, until=id3 → events 2,3 (id1 exclusive lower, id3 inclusive upper).
+	res := queryAll(t, s, store.Query{After: ids[0], Until: ids[2]})
+	if len(res.Events) != 2 {
+		t.Fatalf("after=1 until=3: got %d events, want 2", len(res.Events))
+	}
+	if *res.Events[0].EventID != ids[1] {
+		t.Errorf("first event id = %q, want %q", *res.Events[0].EventID, ids[1])
+	}
+	if *res.Events[1].EventID != ids[2] {
+		t.Errorf("second event id = %q, want %q", *res.Events[1].EventID, ids[2])
+	}
+}
+
+func TestQueryUntilInvalidCursor(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+	_, err := s.Query(ctx, store.Query{Until: "not-a-cursor"})
+	if !errors.Is(err, store.ErrInvalidCursor) {
+		t.Errorf("bad until cursor: err = %v, want ErrInvalidCursor", err)
+	}
+}
+
 func TestParallelAppendsSerialize(t *testing.T) {
 	s := openStore(t)
 	vm, boot := testUUID(1), testUUID(2)

@@ -51,6 +51,54 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		q.Kind = kind
 	}
+	if family := params.Get("family"); family != "" {
+		if q.Kind != "" {
+			writeError(w, http.StatusBadRequest, Error{
+				Code:      "malformed_request",
+				Message:   "kind and family are mutually exclusive; set one axis at a time",
+				Retryable: false,
+				Cause:     "conflicting_filters",
+				Remediation: []Remediation{{
+					Action:    "get",
+					Params:    map[string]any{"path": basePath + "/meta/event-kinds"},
+					Rationale: "each kind entry lists its family; filter by kind for a single kind or by family for all kinds in a group",
+				}},
+			})
+			return
+		}
+		if events.KindsByFamily(family) == nil {
+			writeError(w, http.StatusBadRequest, Error{
+				Code:      "malformed_request",
+				Message:   fmt.Sprintf("family %q has no registered kinds, so no event can match it", family),
+				Retryable: false,
+				Cause:     "family_unknown",
+				Remediation: []Remediation{{
+					Action:    "get",
+					Params:    map[string]any{"path": basePath + "/meta/event-kinds"},
+					Rationale: "the registry lists every kind and its family; only registered families match events",
+				}},
+			})
+			return
+		}
+		q.Family = family
+	}
+	if raw := params.Get("until"); raw != "" {
+		if !events.DecimalString(raw) {
+			writeError(w, http.StatusBadRequest, Error{
+				Code:      "malformed_request",
+				Message:   fmt.Sprintf("until %q is not a decimal event_id", raw),
+				Retryable: false,
+				Cause:     "query_parameter_invalid",
+				Remediation: []Remediation{{
+					Action:    "retry_with_cursor",
+					Params:    map[string]any{"until": "latest_event_id from a previous page"},
+					Rationale: "cursors are opaque decimal event ids issued by the store, not client-invented values",
+				}},
+			})
+			return
+		}
+		q.Until = raw
+	}
 	if raw := params.Get("limit"); raw != "" {
 		limit, err := strconv.Atoi(raw)
 		if err != nil {
@@ -109,6 +157,25 @@ func writeQueryError(w http.ResponseWriter, err error) {
 				Params:    map[string]any{"after": "next_after from a previous page"},
 				Rationale: "cursors are opaque decimal event ids issued by the store, not client-invented values",
 			}},
+		})
+	case errors.Is(err, store.ErrUnknownFamily):
+		writeError(w, http.StatusBadRequest, Error{
+			Code:      "malformed_request",
+			Message:   err.Error(),
+			Retryable: false,
+			Cause:     "family_unknown",
+			Remediation: []Remediation{{
+				Action:    "get",
+				Params:    map[string]any{"path": basePath + "/meta/event-kinds"},
+				Rationale: "the registry lists every kind and its family; only registered families match events",
+			}},
+		})
+	case errors.Is(err, store.ErrConflictingFilters):
+		writeError(w, http.StatusBadRequest, Error{
+			Code:      "malformed_request",
+			Message:   err.Error(),
+			Retryable: false,
+			Cause:     "conflicting_filters",
 		})
 	default:
 		writeError(w, http.StatusInternalServerError, Error{

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/2389-research/observatory-v2/internal/events"
 )
@@ -20,8 +21,14 @@ const (
 	MaxPageLimit = 1000
 )
 
-// ErrInvalidCursor: the After cursor is not a decimal event id.
+// ErrInvalidCursor: the After or Until cursor is not a decimal event id.
 var ErrInvalidCursor = errors.New("cursor must be a decimal event_id as returned in next_after")
+
+// ErrUnknownFamily: the Family has no registered kinds.
+var ErrUnknownFamily = errors.New("family has no registered event kinds; check /meta/event-kinds")
+
+// ErrConflictingFilters: Kind and Family were both set; only one axis at a time.
+var ErrConflictingFilters = errors.New("kind and family are mutually exclusive; set one axis at a time for unambiguous reproduce queries")
 
 // BoundError reports a limit outside 1..MaxPageLimit.
 type BoundError struct {
@@ -35,10 +42,12 @@ func (e *BoundError) Error() string {
 
 // Query selects events in ingestion order, strictly after the After cursor.
 type Query struct {
-	VMID  *string // nil: no vm filter
-	Kind  string  // "": no kind filter
-	After string  // "": from the start
-	Limit int     // 0: DefaultPageLimit
+	VMID   *string // nil: no vm filter
+	Kind   string  // "": no kind filter
+	Family string  // "": no family filter; mutually exclusive with Kind
+	After  string  // "": from the start
+	Until  string  // "": no upper bound (inclusive); decimal event_id
+	Limit  int     // 0: DefaultPageLimit
 }
 
 // QueryResult always states how far the store goes (LatestEventID) so an empty
@@ -51,6 +60,12 @@ type QueryResult struct {
 
 func (s *Store) Query(ctx context.Context, q Query) (QueryResult, error) {
 	var zero QueryResult
+
+	// Conflict guard: Kind and Family are mutually exclusive.
+	if q.Kind != "" && q.Family != "" {
+		return zero, ErrConflictingFilters
+	}
+
 	limit := q.Limit
 	if limit == 0 {
 		limit = DefaultPageLimit
@@ -68,9 +83,32 @@ func (s *Store) Query(ctx context.Context, q Query) (QueryResult, error) {
 			return zero, fmt.Errorf("after %q: %w", q.After, ErrInvalidCursor)
 		}
 	}
+	until := int64(-1) // -1 means no upper bound
+	if q.Until != "" {
+		if !events.DecimalString(q.Until) {
+			return zero, fmt.Errorf("until %q: %w", q.Until, ErrInvalidCursor)
+		}
+		var err error
+		if until, err = strconv.ParseInt(q.Until, 10, 64); err != nil {
+			return zero, fmt.Errorf("until %q: %w", q.Until, ErrInvalidCursor)
+		}
+	}
+
+	// Resolve family to a set of kind strings.
+	var familyKinds []string
+	if q.Family != "" {
+		familyKinds = events.KindsByFamily(q.Family)
+		if familyKinds == nil {
+			return zero, fmt.Errorf("family %q: %w", q.Family, ErrUnknownFamily)
+		}
+	}
 
 	where := "event_id > ?"
 	args := []any{after}
+	if until >= 0 {
+		where += " AND event_id <= ?"
+		args = append(args, until)
+	}
 	if q.VMID != nil {
 		where += " AND vm_id = ?"
 		args = append(args, *q.VMID)
@@ -78,6 +116,14 @@ func (s *Store) Query(ctx context.Context, q Query) (QueryResult, error) {
 	if q.Kind != "" {
 		where += " AND kind = ?"
 		args = append(args, q.Kind)
+	}
+	if len(familyKinds) > 0 {
+		placeholders := strings.Repeat("?,", len(familyKinds))
+		placeholders = placeholders[:len(placeholders)-1] // trim trailing comma
+		where += " AND kind IN (" + placeholders + ")"
+		for _, k := range familyKinds {
+			args = append(args, k)
+		}
 	}
 	args = append(args, limit)
 
