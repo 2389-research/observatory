@@ -1,0 +1,8 @@
+[Unit]
+Description=vmobs guest agent
+After=local-fs.target
+[Service]
+ExecStart=/usr/local/bin/vmobs-guestd
+Restart=on-failure
+[Install]
+WantedBy=multi-user.target

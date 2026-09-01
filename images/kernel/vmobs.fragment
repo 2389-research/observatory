@@ -1,0 +1,65 @@
+# ABOUTME: Kernel config fragment for vmobs guest kernel — enables BPF, fanotify,
+# ABOUTME: cgroups, virtio/vsock, and filesystem facilities required by the spec (§7.1).
+#
+# EXCLUDED SYMBOLS (not present / not user-configurable in mainline 6.1):
+#   CONFIG_DEVPTS_FS — merged into CONFIG_UNIX98_PTYS in mainline kernels; no
+#     separate Kconfig symbol exists (fs/Kconfig has no DEVPTS_FS entry). PTY
+#     support comes from CONFIG_UNIX98_PTYS=y below.
+#   CONFIG_TRACEPOINTS — a prompt-less bool (init/Kconfig: "bool" with no help
+#     text); it is selected automatically by tracing infrastructure. Setting it
+#     in a fragment is a silent no-op and would fail the hard-verify step.
+#
+# DEPENDENCY NOTES (symbols added to satisfy deps of required symbols):
+#   CONFIG_MODULES — the Firecracker microvm base config disables modules to keep
+#     the kernel minimal. CONFIG_BPF_JIT depends on MODULES, and CONFIG_KPROBES
+#     also depends on MODULES. We re-enable it to get the required BPF/kprobe
+#     capabilities.
+#   CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT — the base config sets DEBUG_INFO_NONE
+#     (no debug info, for size). CONFIG_DEBUG_INFO_BTF requires a DWARF debug info
+#     variant. We enable the toolchain default to satisfy this dep. This increases
+#     vmlinux size.
+#
+# Every symbol here must survive `grep -q '^CONFIG_X=y' .config` after
+# olddefconfig. The build script enforces this; see images/kernel/build.sh.
+
+# Dependencies required by BPF_JIT and KPROBES
+CONFIG_MODULES=y
+# Enable DWARF debug info (required by DEBUG_INFO_BTF; base sets DEBUG_INFO_NONE)
+CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT=y
+
+# BPF
+CONFIG_BPF=y
+CONFIG_BPF_SYSCALL=y
+CONFIG_BPF_JIT=y
+CONFIG_DEBUG_INFO_BTF=y
+CONFIG_KPROBES=y
+CONFIG_PERF_EVENTS=y
+
+# fanotify
+CONFIG_FANOTIFY=y
+CONFIG_FANOTIFY_ACCESS_PERMISSIONS=y
+
+# cgroups
+CONFIG_CGROUPS=y
+CONFIG_CGROUP_BPF=y
+CONFIG_MEMCG=y
+CONFIG_CGROUP_PIDS=y
+CONFIG_CPUSETS=y
+CONFIG_CGROUP_SCHED=y
+
+# PTY (DEVPTS is built in with UNIX98_PTYS in mainline 6.1)
+CONFIG_UNIX98_PTYS=y
+
+# virtio / vsock
+CONFIG_VIRTIO=y
+CONFIG_VIRTIO_MMIO=y
+CONFIG_VIRTIO_NET=y
+CONFIG_VIRTIO_BLK=y
+CONFIG_VSOCKETS=y
+CONFIG_VIRTIO_VSOCKETS=y
+
+# filesystems
+CONFIG_EXT4_FS=y
+CONFIG_TMPFS=y
+CONFIG_PROC_FS=y
+CONFIG_SYSFS=y

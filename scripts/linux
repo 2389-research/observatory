@@ -8,5 +8,5 @@ DEST="${VMOBS_LINUX_DIR:-vmobs-build}"
 [ $# -ge 1 ] || { echo "usage: scripts/linux '<command>'" >&2; exit 3; }
 cd "$(dirname "$0")/.."
 rsync -az --delete --exclude .git --exclude .superpowers \
-  --filter=':- .gitignore' ./ "$HOST:$DEST/"
+  --filter=':- .gitignore' --filter='P images/dist/' ./ "$HOST:$DEST/"
 exec ssh "$HOST" "cd '$DEST' && $*"

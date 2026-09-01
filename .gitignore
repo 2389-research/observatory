@@ -4,3 +4,4 @@
 *.sqlite-shm
 coverage.out
 .DS_Store
+images/dist/
