@@ -97,7 +97,7 @@ fi
 echo "[kernel/build.sh] base config sha256 verified OK"
 
 # ---------------------------------------------------------------------------
-# Extract source (idempotent — skip if already extracted)
+# Extract source (always fresh — prior trees removed to avoid partial reuse)
 # ---------------------------------------------------------------------------
 KDIR="$SRCDIR/linux-${KERNEL_VERSION}"
 echo "[kernel/build.sh] removing any prior extraction (prevents silent reuse of partial tree)..."
