@@ -45,6 +45,10 @@ install -d -o harper -g vmobs-fixture -m 0775 /srv/vmobs /srv/vmobs/fixture
 install -d -o root -g root -m 0755 /srv/vmobs/jail
 
 # 6. vmobs-privd daemon.
+# Stop before building to avoid ETXTBSY on the running binary (upgrade path).
+if systemctl is-active --quiet vmobs-privd; then
+  systemctl stop vmobs-privd
+fi
 go_bin="$(command -v go || true)"
 if [ -z "$go_bin" ] && [ -n "${SUDO_USER:-}" ]; then
   go_bin="$(ls -d "/home/$SUDO_USER/.local/share/mise/installs/go/"[0-9]*.[0-9]*.[0-9]*/bin/go 2>/dev/null | sort -V | tail -1 || true)"
@@ -66,7 +70,8 @@ sed \
 install -d -o "$SUDO_UID" -g "$SUDO_GID" -m 0755 /srv/vmobs/stage
 
 systemctl daemon-reload
-systemctl enable --now vmobs-privd
+systemctl enable vmobs-privd
+systemctl restart vmobs-privd
 
 # Verify the unit came up and the socket exists.
 systemctl is-active vmobs-privd || { echo "vmobs-privd failed to start; check: journalctl -u vmobs-privd" >&2; exit 1; }

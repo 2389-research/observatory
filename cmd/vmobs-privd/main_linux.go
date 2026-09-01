@@ -65,15 +65,15 @@ func main() {
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
 
 	fmt.Printf("vmobs-privd: serving %s (allowed uid %d gid %d)\n",
 		flags.socket, flags.allowedUID, flags.allowedGID)
 
-	if err := srv.Serve(ctx, ln); err != nil {
-		log.Fatalf("vmobs-privd: serve: %v", err)
-	}
-
-	// Clean up the socket on clean shutdown.
+	serveErr := srv.Serve(ctx, ln)
+	stop()
 	_ = os.Remove(flags.socket)
+	if serveErr != nil {
+		log.Printf("vmobs-privd: serve: %v", serveErr)
+		os.Exit(1)
+	}
 }

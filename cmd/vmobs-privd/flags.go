@@ -33,11 +33,9 @@ func parseFlags(argv []string) (privdFlags, error) {
 	allowedUID := fs.Int("allowed-uid", 0, "required: UID whose connections are served (from $SUDO_UID)")
 	allowedGID := fs.Int("allowed-gid", 0, "required: GID that owns the socket (from $SUDO_GID)")
 
-	// Sentinel: -1 signals "not provided" since 0 is not a valid user UID in our range.
-	// We use a pair of booleans instead to avoid coupling to uid semantics.
+	// We use a pair of booleans instead of sentinel values to avoid coupling to uid semantics.
 	uidSet := false
 	gidSet := false
-	fs.Visit(func(f *flag.Flag) {}) // dummy to trigger parse-time visit below
 
 	if err := fs.Parse(argv); err != nil {
 		return privdFlags{}, err

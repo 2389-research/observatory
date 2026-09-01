@@ -2,7 +2,7 @@
 # ABOUTME: setup.sh substitutes __ALLOWED_UID__ and __ALLOWED_GID__ before installing.
 [Unit]
 Description=vmobs privilege daemon (privd)
-Documentation=file://%h/vmobs-build/docs/runbooks/aibox03.md
+Documentation=file:///home/harper/vmobs-build/docs/runbooks/aibox03.md
 After=network.target
 
 [Service]
