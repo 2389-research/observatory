@@ -3,6 +3,8 @@
 package main
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -72,11 +74,18 @@ commands:
   operation get OP-ID       operation detail
   template list             list approved templates
   host status               runtime availability and capacity
+  auth whoami               current identity (owner and method)
+  auth token create --name NAME [--ttl-minutes N]
+                            create a bearer token (secret shown once)
+  auth tokens               list bearer tokens
+  auth token revoke ID      revoke a bearer token by ID
   api [-d BODY] METHOD PATH raw authenticated request, e.g. api GET /api/v1/meta
 
 flags:
-  --api URL   daemon base URL (default $VMOBS_API or http://127.0.0.1:8787)
-  --json      print the API's JSON verbatim instead of human rendering
+  --api URL    daemon base URL (default $VMOBS_API or http://127.0.0.1:8787)
+  --json       print the API's JSON verbatim instead of human rendering
+  --token STR  bearer token secret ($VMOBS_TOKEN; flag wins over env)
+  --ca PATH    PEM CA bundle for TLS verification ($VMOBS_CA; flag wins over env)
 
 exit codes: 0 success, 1 structured API failure, 2 transport failure, 3 usage error
 `)
@@ -88,6 +97,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.Usage = func() { usage(stderr) }
 	apiBase := fs.String("api", defaultBase(), "daemon base URL")
 	jsonOut := fs.Bool("json", false, "print API JSON verbatim")
+	tokenFlag := fs.String("token", "", "bearer token secret (overrides VMOBS_TOKEN)")
+	caFlag := fs.String("ca", "", "PEM CA bundle path (overrides VMOBS_CA)")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
@@ -96,6 +107,39 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "vmobs: --api %q is not a URL\n", *apiBase)
 		return exitUsage
 	}
+
+	// Resolve token: flag wins over env.
+	token := *tokenFlag
+	if token == "" {
+		token = os.Getenv("VMOBS_TOKEN")
+	}
+
+	// Resolve CA path: flag wins over env.
+	caPath := *caFlag
+	if caPath == "" {
+		caPath = os.Getenv("VMOBS_CA")
+	}
+
+	// Build the HTTP client. Only create a custom one when a CA bundle is given.
+	httpClient := http.DefaultClient
+	if caPath != "" {
+		pemData, err := os.ReadFile(caPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "vmobs: cannot read CA bundle %q: %v\n", caPath, err)
+			return exitUsage
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pemData) {
+			fmt.Fprintf(stderr, "vmobs: no valid PEM certificates found in %q\n", caPath)
+			return exitUsage
+		}
+		httpClient = &http.Client{
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{RootCAs: pool},
+			},
+		}
+	}
+
 	rest := fs.Args()
 	if len(rest) == 0 {
 		usage(stderr)
@@ -103,10 +147,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	c := &client{
-		base:   strings.TrimRight(*apiBase, "/"),
-		json:   *jsonOut,
-		stdout: stdout,
-		stderr: stderr,
+		base:       strings.TrimRight(*apiBase, "/"),
+		json:       *jsonOut,
+		stdout:     stdout,
+		stderr:     stderr,
+		token:      token,
+		httpClient: httpClient,
 	}
 	switch rest[0] {
 	case "meta":
@@ -130,6 +176,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return c.dispatchTemplateCmd(rest[1:])
 	case "host":
 		return c.dispatchHostCmd(rest[1:])
+	case "auth":
+		return c.dispatchAuthCmd(rest[1:])
 	case "api":
 		return c.raw(rest[1:])
 	default:
@@ -140,10 +188,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 }
 
 type client struct {
-	base   string
-	json   bool
-	stdout io.Writer
-	stderr io.Writer
+	base       string
+	json       bool
+	stdout     io.Writer
+	stderr     io.Writer
+	token      string
+	httpClient *http.Client
 }
 
 func (c *client) do(method, path string, body io.Reader) (int, []byte, error) {
@@ -154,7 +204,14 @@ func (c *client) do(method, path string, body io.Reader) (int, []byte, error) {
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := http.DefaultClient.Do(req)
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	hc := c.httpClient
+	if hc == nil {
+		hc = http.DefaultClient
+	}
+	resp, err := hc.Do(req)
 	if err != nil {
 		return 0, nil, err
 	}
