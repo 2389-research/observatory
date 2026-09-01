@@ -5,6 +5,7 @@ package guest_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -288,6 +289,59 @@ func TestOversizedFrameClosesConn(t *testing.T) {
 			// Expected: server closed the conn.
 			break
 		}
+	}
+}
+
+// TestCancelClosesEstablishedConns verifies that cancelling the serve ctx closes
+// live connections promptly — well under the 60s idle deadline. The client read
+// must return with a non-timeout error (i.e. server-initiated close, not the
+// client's own deadline).
+func TestCancelClosesEstablishedConns(t *testing.T) {
+	const token = "tok-cancel"
+	agent, _ := makeTestAgent(token)
+
+	ln := newUnixListener(t)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- agent.ServeControl(ctx, ln) }()
+
+	conn := dialUnix(t, ln.Addr().String())
+	defer conn.Close()
+
+	// Complete the handshake so the connection is in the idle-serve phase.
+	sendHello(t, conn, token, proto.ProtocolVersion)
+	ack := readAck(t, conn)
+	if !ack.Accepted {
+		t.Fatalf("handshake rejected: %q", ack.Reason)
+	}
+
+	// Cancel the serve context; the server must close the established conn.
+	cancel()
+
+	// Set a 2s safety deadline on the client so the test doesn't hang if
+	// the fix regresses. The error must NOT be a timeout — it must be a
+	// connection-closed error (EOF or reset) signalling server-initiated close.
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	buf := make([]byte, 4096)
+	_, err := conn.Read(buf)
+	if err == nil {
+		t.Fatal("want error on established conn after ctx cancel, got nil")
+	}
+	// A timeout error means the server did NOT close the conn — the fix didn't work.
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		t.Fatalf("got timeout error — server did not close the conn promptly; got: %v", err)
+	}
+
+	// ServeControl should also return (via ln.Close() on ctx done).
+	select {
+	case <-serveErr:
+		// ok
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServeControl did not return within 2s after ctx cancel")
 	}
 }
 

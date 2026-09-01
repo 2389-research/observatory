@@ -14,7 +14,10 @@ import (
 // boot config from the mountpoint, then unmounts. The mount is best-effort
 // on unmount failure (logged, not fatal) — the config has already been read.
 func LoadBootConfig(device, mountpoint string) (*BootConfig, error) {
-	if err := unix.Mount(device, mountpoint, "ext4", unix.MS_RDONLY, ""); err != nil {
+	// Config device is host-minted but mounted defensively: no setuid bits,
+	// no device files, no executable pages.
+	const mountFlags = unix.MS_RDONLY | unix.MS_NOSUID | unix.MS_NODEV | unix.MS_NOEXEC
+	if err := unix.Mount(device, mountpoint, "ext4", mountFlags, ""); err != nil {
 		return nil, fmt.Errorf("mount %s at %s: %w", device, mountpoint, err)
 	}
 	cfg, loadErr := LoadBootConfigDir(mountpoint)

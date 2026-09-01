@@ -60,13 +60,25 @@ func (a *Agent) ServeControl(ctx context.Context, ln net.Listener) error {
 			}
 			return fmt.Errorf("accept: %w", err)
 		}
-		go a.handleConn(conn)
+		go a.handleConn(ctx, conn)
 	}
 }
 
 // handleConn runs the per-connection protocol: handshake, then serve until idle or error.
-func (a *Agent) handleConn(conn net.Conn) {
+func (a *Agent) handleConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
+
+	// Close the conn when ctx is cancelled so it doesn't coast until the
+	// 60s idle deadline. Double-close is harmless.
+	connDone := make(chan struct{})
+	defer close(connDone)
+	go func() {
+		select {
+		case <-ctx.Done():
+			conn.Close() // unblocks any pending read/write; double-close later is harmless
+		case <-connDone:
+		}
+	}()
 
 	// --- Phase 1: handshake (10s total deadline) ---
 	handshakeDeadline := time.Now().Add(handshakeTimeout)

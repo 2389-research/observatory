@@ -11,8 +11,12 @@ import (
 	"github.com/2389-research/observatory-v2/internal/guest/proto"
 )
 
+// GuestContextSchema is the canonical schema field value for context.json.
+// The host mints the file; the guest validates this exact string on load.
+const GuestContextSchema = "vmobs.guest_context.v1"
+
 // BootConfig holds the per-boot context injected via the config device.
-// The JSON schema value is "vmobs.guest_context.v1"; all fields are required non-empty.
+// The JSON schema value is GuestContextSchema; all fields are required non-empty.
 // Task 6 will import this type and marshal it to produce context.json.
 type BootConfig struct {
 	Schema          string `json:"schema"`
@@ -43,8 +47,8 @@ func LoadBootConfigDir(dir string) (*BootConfig, error) {
 
 // validateBootConfig returns an error naming any missing or invalid field.
 func validateBootConfig(cfg *BootConfig) error {
-	if cfg.Schema == "" {
-		return fmt.Errorf("boot config: field 'schema' is required but empty")
+	if cfg.Schema != GuestContextSchema {
+		return fmt.Errorf("boot config: schema mismatch: got %q, want %q", cfg.Schema, GuestContextSchema)
 	}
 	if cfg.VMID == "" {
 		return fmt.Errorf("boot config: field 'vm_id' is required but empty")

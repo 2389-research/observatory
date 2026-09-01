@@ -152,3 +152,26 @@ func TestLoadBootConfigDirMissingFile(t *testing.T) {
 		t.Fatal("want error for missing context.json")
 	}
 }
+
+// TestLoadBootConfigDirWrongSchema verifies that a schema value other than the
+// canonical const is rejected, and the error names both the got and want values.
+func TestLoadBootConfigDirWrongSchema(t *testing.T) {
+	dir := t.TempDir()
+	writeContextJSON(t, dir, map[string]any{
+		"schema":           "vmobs.guest_context.v2",
+		"vm_id":            "vm-abc",
+		"boot_id":          "boot-xyz",
+		"capability_token": "tok-123",
+		"protocol_version": proto.ProtocolVersion,
+	})
+	_, err := guest.LoadBootConfigDir(dir)
+	if err == nil {
+		t.Fatal("want error for wrong schema value")
+	}
+	if !strings.Contains(err.Error(), "vmobs.guest_context.v2") {
+		t.Errorf("want error to mention got value 'vmobs.guest_context.v2', got: %v", err)
+	}
+	if !strings.Contains(err.Error(), guest.GuestContextSchema) {
+		t.Errorf("want error to mention want value %q, got: %v", guest.GuestContextSchema, err)
+	}
+}
