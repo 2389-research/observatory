@@ -21,7 +21,8 @@ var ErrTokenNotFound = errors.New("token not found")
 const tokensFile = "tokens.json"
 
 // TokenRecord is the exported view of a token: all fields except the hash.
-// ExpiresAt and RevokedAt are RFC3339 UTC strings; "" means none.
+// CreatedAt, ExpiresAt, and RevokedAt are RFC3339 UTC strings; sub-second
+// precision is used where needed (e.g. short-TTL tokens). "" means none.
 type TokenRecord struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
@@ -32,13 +33,15 @@ type TokenRecord struct {
 }
 
 // tokenEntry is the internal storage shape: one row in tokens.json.
-// sha256Hex is the hex-encoded SHA-256 of the raw secret bytes and never
-// leaves this package.
+// SHA256Hex is the hex-encoded SHA-256 of the full secret string (including
+// the "vmobs_" prefix). Hashing the full string keeps VerifyToken free of
+// prefix-stripping and base64 decoding; mint and verify hash the same value.
+// This field never leaves this package.
 type tokenEntry struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
 	Owner     string `json:"owner"`
-	SHA256Hex string `json:"sha256"`
+	SHA256Hex string `json:"sha256"` // SHA-256 hex of the full secret string
 	CreatedAt string `json:"created_at"`
 	ExpiresAt string `json:"expires_at"` // "" = no expiry
 	RevokedAt string `json:"revoked_at"` // "" = not revoked
@@ -107,14 +110,19 @@ func (s *Store) CreateToken(name, owner string, ttl time.Duration) (secret strin
 	}
 	id := "tok-" + hex.EncodeToString(idBytes)
 
-	// Hash the raw secret bytes (not the string) for storage.
+	// Hash the full secret string (including the "vmobs_" prefix) for storage.
+	// VerifyToken hashes the candidate the same way, so no prefix-stripping is
+	// needed at verify time.
 	sum := sha256.Sum256([]byte(secret))
 	sha256Hex := hex.EncodeToString(sum[:])
 
-	now := nowUTC()
+	// Read the clock once and derive both CreatedAt and ExpiresAt from it so
+	// the two timestamps are guaranteed to be consistent.
+	now := time.Now().UTC()
+	createdAt := now.Format(time.RFC3339)
 	expiresAt := ""
 	if ttl > 0 {
-		expiresAt = time.Now().UTC().Add(ttl).Format(time.RFC3339Nano)
+		expiresAt = now.Add(ttl).Format(time.RFC3339Nano)
 	}
 
 	entry := tokenEntry{
@@ -122,7 +130,7 @@ func (s *Store) CreateToken(name, owner string, ttl time.Duration) (secret strin
 		Name:      name,
 		Owner:     owner,
 		SHA256Hex: sha256Hex,
-		CreatedAt: now,
+		CreatedAt: createdAt,
 		ExpiresAt: expiresAt,
 		RevokedAt: "",
 	}
