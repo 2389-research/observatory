@@ -125,6 +125,18 @@ func (imp *Importer) importVM(ctx context.Context, vmDir string) (ImportStats, e
 	for _, gapEnv := range report.Gaps {
 		ar, err := imp.st.Append(ctx, gapEnv)
 		if err != nil {
+			// ErrIntegrityFailure here means the store already holds a gap
+			// envelope for this (source_instance_id, source_seq), but the
+			// payload hash drifted — most likely the corrupt segment's mtime
+			// changed (backup tool, rsync). The original gap is already
+			// faithfully recorded; treating this as Deduped and continuing
+			// prevents a permanent wedge that would block all real-event import
+			// (Step 4) over a segment that is already accounted for.
+			// Every other Append error still aborts the VM cycle.
+			if errors.Is(err, store.ErrIntegrityFailure) {
+				stats.Deduped++
+				continue
+			}
 			return stats, fmt.Errorf("importer: append gap envelope: %w", err)
 		}
 		if ar.Deduped {

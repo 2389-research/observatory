@@ -735,6 +735,101 @@ func TestCorruptSegmentWithEndMarkerNotPruned(t *testing.T) {
 	}
 }
 
+// TestDriftedGapMtimeDoesNotWedge — a gap envelope already in the store whose
+// payload hash drifts (because the corrupt segment's mtime changed) must not
+// block Step 4 real-event import. The second ImportOnce must succeed, count
+// the gap as Deduped, and still import any healthy later segments.
+//
+// Scenario:
+//  1. Write a corrupt segment (seg0) + a clean closed segment (seg1, one record).
+//  2. ImportOnce — gap recorded, seg1's record lands (Appended ≥ 1).
+//  3. Touch seg0's mtime — simulates backup/rsync metadata drift.
+//  4. ImportOnce again — must return nil, gap counted Deduped, Appended == 0
+//     (seg1 was pruned after step 2; its record is already in the store, so
+//     nothing new arrives, but the import must not error).
+func TestDriftedGapMtimeDoesNotWedge(t *testing.T) {
+	st := openTestStore(t)
+	root := t.TempDir()
+
+	vmID := "aaaaaaaa-bbbb-4444-cccc-dddddddddddd"
+	spoolDir := filepath.Join(root, vmID)
+	if err := os.MkdirAll(spoolDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	instanceID := "11111111-2222-4444-3333-444444444444"
+
+	// Write seg0: one record, then corrupt its interior so Recover emits a gap.
+	w0, err := spool.OpenWriter(spoolDir, spool.WriterCfg{
+		VMID: vmID, InstanceID: instanceID,
+		MaxSegmentBytes: 4 * 1024 * 1024, MaxSpoolBytes: 64 * 1024 * 1024,
+	})
+	if err != nil {
+		t.Fatalf("OpenWriter seg0: %v", err)
+	}
+	if err := w0.Append(makeSpoolEnvelope(vmID, instanceID, "0")); err != nil {
+		t.Fatalf("Append seg0: %v", err)
+	}
+	if err := w0.Close(); err != nil {
+		t.Fatalf("Close seg0: %v", err)
+	}
+	segs0, _ := filepath.Glob(filepath.Join(spoolDir, "seg-*.vmsp"))
+	if len(segs0) != 1 {
+		t.Fatalf("expected 1 segment, got %d", len(segs0))
+	}
+	seg0Path := segs0[0]
+	corruptSegment(t, seg0Path)
+
+	// Write seg1: one clean record, closed — so it is prunable after import.
+	instanceID2 := "55555555-6666-4444-7777-888888888888"
+	w1, err := spool.OpenWriter(spoolDir, spool.WriterCfg{
+		VMID: vmID, InstanceID: instanceID2,
+		MaxSegmentBytes: 4 * 1024 * 1024, MaxSpoolBytes: 64 * 1024 * 1024,
+	})
+	if err != nil {
+		t.Fatalf("OpenWriter seg1: %v", err)
+	}
+	if err := w1.Append(makeSpoolEnvelope(vmID, instanceID2, "0")); err != nil {
+		t.Fatalf("Append seg1: %v", err)
+	}
+	if err := w1.Close(); err != nil {
+		t.Fatalf("Close seg1: %v", err)
+	}
+
+	imp := spool.NewImporter(st, root, time.Second)
+
+	// First import: gap recorded, seg1's record lands.
+	stats1, err := imp.ImportOnce(context.Background())
+	if err != nil {
+		t.Fatalf("ImportOnce (first): %v", err)
+	}
+	// seg1 has a clean record that must have landed.
+	if stats1.Appended == 0 {
+		t.Fatalf("first import: Appended want >0, got 0 (seg1 record must land)")
+	}
+
+	// Drift the corrupt segment's mtime — simulates backup/rsync touching metadata.
+	driftTime := time.Now().Add(-72 * time.Hour)
+	if err := os.Chtimes(seg0Path, driftTime, driftTime); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+
+	// Second import: must not error. The gap's stored payload now has a different
+	// mtime-derived hash, but ErrIntegrityFailure must be treated as Deduped, not fatal.
+	stats2, err := imp.ImportOnce(context.Background())
+	if err != nil {
+		t.Fatalf("ImportOnce (second, after mtime drift): %v", err)
+	}
+	// The gap collision must register as Deduped, not ignored silently.
+	if stats2.Deduped == 0 {
+		t.Errorf("second import: Deduped want >0 (drifted gap must count), got 0")
+	}
+	// No new appended records — everything is already in the store.
+	if stats2.Appended != 0 {
+		t.Errorf("second import: Appended want 0, got %d", stats2.Appended)
+	}
+}
+
 // TestCursorIsWrittenAtomically — cursor.json must be a valid JSON file
 // after ImportOnce returns (tempfile+rename guarantees this).
 func TestCursorIsWrittenAtomically(t *testing.T) {
