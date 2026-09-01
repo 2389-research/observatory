@@ -192,8 +192,18 @@ func (s *Server) handleReleaseNetwork(raw json.RawMessage) Response {
 	if err := s.cfg.Ops.ReleaseNetwork(entry); err != nil {
 		return errResp("exec_failed", err.Error())
 	}
-	if err := s.ledger.delete(r.VMID); err != nil {
-		return errResp("internal", "ledger delete failed")
+	// Clear the network half. Whichever release empties the last half deletes the file.
+	entry.NetCIDR = ""
+	if entry.PID == 0 {
+		// VM half is also gone — delete the entry file.
+		if err := s.ledger.delete(r.VMID); err != nil {
+			return errResp("internal", "ledger delete failed")
+		}
+	} else {
+		// VM half still active — write the partial entry back.
+		if err := s.ledger.put(entry); err != nil {
+			return errResp("internal", "ledger write failed")
+		}
 	}
 	return okResp(nil)
 }
@@ -323,12 +333,23 @@ func (s *Server) handleReleaseVM(raw json.RawMessage) Response {
 	if err := s.cfg.Ops.ReleaseVM(entry); err != nil {
 		return errResp("exec_failed", err.Error())
 	}
-	// Release the network allocation too.
-	if err := s.cfg.Ops.ReleaseNetwork(entry); err != nil {
-		s.log.Printf("release_vm: ReleaseNetwork for %s: %v", r.VMID, err)
-	}
-	if err := s.ledger.delete(r.VMID); err != nil {
-		return errResp("internal", "ledger delete failed")
+	// Clear the VM half only. The network half (NetCIDR) is released separately via
+	// release_network, so the manager can restart the VM without losing the netns.
+	entry.UID = 0
+	entry.GID = 0
+	entry.CID = 0
+	entry.PID = 0
+	entry.StartTime = ""
+	if entry.NetCIDR != "" {
+		// Network half still allocated — write the partial entry back.
+		if err := s.ledger.put(entry); err != nil {
+			return errResp("internal", "ledger write failed")
+		}
+	} else {
+		// Both halves now empty — remove the entry file.
+		if err := s.ledger.delete(r.VMID); err != nil {
+			return errResp("internal", "ledger delete failed")
+		}
 	}
 	return okResp(nil)
 }

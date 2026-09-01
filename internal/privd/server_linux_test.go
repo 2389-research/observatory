@@ -165,8 +165,11 @@ func spawnShortProcess(t *testing.T) (pid int, starttime string) {
 	return cmd.Process.Pid, starttime
 }
 
-// TestHappyPath exercises the full sequence: allocate → start → signal → release
+// TestHappyPath exercises the full sequence: allocate → start → signal → release_vm → release_network
 // over a real unix socket with the caller's own UID as the allowed UID.
+//
+// R4 semantics: release_vm clears the VM half only (UID/GID/CID/PID/StartTime); the ledger
+// entry survives with NetCIDR intact. release_network then clears NetCIDR and deletes the file.
 func TestHappyPath(t *testing.T) {
 	dir := t.TempDir()
 	sockPath := filepath.Join(dir, "privd.sock")
@@ -256,12 +259,54 @@ func TestHappyPath(t *testing.T) {
 	}
 	conn4.Close()
 
-	// Ledger file must be gone.
-	if _, err := os.Stat(ledgerFile); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("ledger file still exists after release_vm")
+	// R4: after release_vm the ledger file MUST STILL EXIST — NetCIDR is still set,
+	// but the VM half (UID/GID/CID/PID/StartTime) must be zeroed.
+	rawEntry, err := os.ReadFile(ledgerFile)
+	if err != nil {
+		t.Fatalf("ledger file missing after release_vm (want: still exists): %v", err)
+	}
+	var afterReleaseVM privd.VMEntry
+	if err := json.Unmarshal(rawEntry, &afterReleaseVM); err != nil {
+		t.Fatalf("unmarshal ledger after release_vm: %v", err)
+	}
+	if afterReleaseVM.NetCIDR != cidr {
+		t.Errorf("after release_vm: NetCIDR = %q, want %q", afterReleaseVM.NetCIDR, cidr)
+	}
+	if afterReleaseVM.PID != 0 {
+		t.Errorf("after release_vm: PID = %d, want 0", afterReleaseVM.PID)
+	}
+	if afterReleaseVM.StartTime != "" {
+		t.Errorf("after release_vm: StartTime = %q, want empty", afterReleaseVM.StartTime)
+	}
+	if afterReleaseVM.UID != 0 {
+		t.Errorf("after release_vm: UID = %d, want 0", afterReleaseVM.UID)
+	}
+	if afterReleaseVM.GID != 0 {
+		t.Errorf("after release_vm: GID = %d, want 0", afterReleaseVM.GID)
+	}
+	if afterReleaseVM.CID != 0 {
+		t.Errorf("after release_vm: CID = %d, want 0", afterReleaseVM.CID)
 	}
 
-	// Backend call log.
+	// release_vm must NOT have called ReleaseNetwork.
+	if len(backend.releaseCalls) != 0 {
+		t.Errorf("ReleaseNetwork called by release_vm (want: 0 calls so far), got %d", len(backend.releaseCalls))
+	}
+
+	// Step 5: release_network — clears NetCIDR and deletes the entry file.
+	conn5 := dialPrivd(t, sockPath)
+	resp5 := sendRecv(t, conn5, makeReq(t, "release_network", privd.ReleaseNetworkReq{VMID: vmID}))
+	if !resp5.OK {
+		t.Fatalf("release_network: %+v", resp5)
+	}
+	conn5.Close()
+
+	// Ledger file must be gone now (both halves released).
+	if _, err := os.Stat(ledgerFile); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("ledger file still exists after release_network")
+	}
+
+	// Backend call log: exactly one of each, in order, no extra ReleaseNetwork.
 	if len(backend.allocateCalls) != 1 {
 		t.Errorf("allocateCalls = %d, want 1", len(backend.allocateCalls))
 	}
@@ -274,8 +319,9 @@ func TestHappyPath(t *testing.T) {
 	if len(backend.releaseVMCalls) != 1 {
 		t.Errorf("releaseVMCalls = %d, want 1", len(backend.releaseVMCalls))
 	}
+	// Exactly one ReleaseNetwork, triggered by release_network (not release_vm).
 	if len(backend.releaseCalls) != 1 {
-		t.Errorf("releaseNetworkCalls = %d, want 1", len(backend.releaseCalls))
+		t.Errorf("releaseNetworkCalls = %d, want 1 (from release_network step only)", len(backend.releaseCalls))
 	}
 
 	// Verify ledger entry carried the right CIDR to the start call.
