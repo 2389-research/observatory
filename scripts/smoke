@@ -123,6 +123,65 @@ run_expect 0 "$VMOBS" --api "$API" situation
 run_expect 1 "$VMOBS" --api "$API" operation get op-000999
 run_expect 3 "$VMOBS" --api "$API" bogus-command
 
+# --- run routes (P4) ---
+
+# /meta must declare features.runs true — the route table drives both routing
+# and the meta manifest (P-07), so a missing handler would also set the flag
+# false. This checks both wiring and self-description at once.
+run_expect 0 "$VMOBS" --api "$API" --json meta &&
+  out_check "meta reports runs built" '.features.runs == true'
+
+# run submit against a non-running VM → the API refuses with a typed conflict
+# (vm_not_running, 409); CLI surfaces that as exit 1.
+run_expect 1 "$VMOBS" --api "$API" run submit \
+  --vm nonexistent-vm --goal "smoke test" \
+  --criteria operator_verdict --on-completion keep_running
+
+# run list empty → exit 0 with an empty runs array.
+run_expect 0 "$VMOBS" --api "$API" --json run list &&
+  out_check "run list empty" '.runs | length == 0'
+
+# run get unknown id → not_found (404) → exit 1.
+run_expect 1 "$VMOBS" --api "$API" run get run-000999
+
+# Five run routes reachable — none return 501 on normal-path requests.
+# Note: POST /runs/{id}/conclude and GET /runs/{id}/report return 404
+# (run_unknown) for an unknown id; that is correct behaviour — 501 would mean
+# the route is unbuilt. POST /vms/{id}/runs returns 409 (vm_not_running) for
+# a valid body against an absent VM, which is also not 501.
+check_not_501() {
+  desc=$1; shift
+  "$@" >"$TMP/out" 2>"$TMP/err"
+  got=$?
+  status_code=$(jq -r '.code // empty' <"$TMP/out" 2>/dev/null)
+  if [ "$status_code" = "missing_capability" ]; then
+    note "FAIL $desc — got missing_capability (501); route is not built"
+    sed 's/^/  /' "$TMP/out"
+    fail=1
+  else
+    note "PASS $desc (exit $got, code=${status_code:-ok})"
+  fi
+}
+
+check_not_501 "POST /vms/{id}/runs reachable" \
+  curl -sf -X POST -H "Content-Type: application/json" \
+  -d '{"goal":"smoke","success_criteria":{"type":"operator_verdict"},"on_completion":"keep_running"}' \
+  "$API/api/v1/vms/nonexistent-vm/runs"
+
+check_not_501 "GET /runs reachable" \
+  curl -sf "$API/api/v1/runs"
+
+check_not_501 "GET /runs/{id} reachable" \
+  curl -sf "$API/api/v1/runs/run-000999"
+
+check_not_501 "GET /runs/{id}/report reachable" \
+  curl -sf "$API/api/v1/runs/run-000999/report"
+
+check_not_501 "POST /runs/{id}/conclude reachable" \
+  curl -sf -X POST -H "Content-Type: application/json" \
+  -d '{"verdict":"succeeded"}' \
+  "$API/api/v1/runs/run-000999/conclude"
+
 # --- shutdown: clean exit, then transport failure is exit 2 ---
 
 kill "$DAEMON_PID"
