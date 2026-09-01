@@ -67,7 +67,7 @@ func newTemplateServer(t *testing.T) (*httptest.Server, *store.Store, *runtimete
 		t.Fatalf("create manager: %v", err)
 	}
 	t.Cleanup(func() { mgr.Close() })
-	srv := httptest.NewServer(api.New(st, eng, mgr))
+	srv := httptest.NewServer(api.New(st, eng, mgr, api.AuthConfig{Enabled: false}))
 	t.Cleanup(srv.Close)
 	return srv, st, fake
 }
@@ -383,7 +383,7 @@ func TestCreateVMAdmissionRefusal(t *testing.T) {
 		t.Fatalf("create manager: %v", err)
 	}
 	t.Cleanup(func() { mgr.Close() })
-	srv := httptest.NewServer(api.New(st, eng, mgr))
+	srv := httptest.NewServer(api.New(st, eng, mgr, api.AuthConfig{Enabled: false}))
 	t.Cleanup(srv.Close)
 
 	body := map[string]any{"name": "fill-vm", "template_id": testTemplateDef.TemplateID}

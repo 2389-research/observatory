@@ -14,7 +14,8 @@ server:
 
 auth:
   mode: local_operator
-  require_authentication: true
+  # P5 Task 13 enables auth here — credential store must exist before flipping to true.
+  require_authentication: false
   credential_store: "/var/lib/vmobs/auth"
   csrf_protection: true
   session_cookie_http_only: true

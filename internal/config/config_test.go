@@ -78,11 +78,42 @@ func TestAuthAndModeValidation(t *testing.T) {
 	}{
 		{"example is valid", func(c *config.Config) {}, ""},
 		{"trust_forwarded_identity refused", func(c *config.Config) { c.Server.TrustForwardedIdentity = true }, "trust_forwarded_identity"},
-		{"auth mode must be local_operator", func(c *config.Config) { c.Auth.Mode = "reverse_proxy" }, "auth.mode"},
-		{"auth on requires credential store", func(c *config.Config) { c.Auth.CredentialStore = "" }, "credential_store"},
-		{"auth on requires csrf", func(c *config.Config) { c.Auth.CSRFProtection = false }, "csrf_protection"},
-		{"auth on requires httponly", func(c *config.Config) { c.Auth.SessionCookieHTTPOnly = false }, "session_cookie_http_only"},
-		{"samesite none refused", func(c *config.Config) { c.Auth.SessionCookieSameSite = "none" }, "session_cookie_same_site"},
+		{"auth mode must be local_operator", func(c *config.Config) {
+			c.Auth.RequireAuthentication = true
+			c.Auth.CredentialStore = "/tmp/auth"
+			c.Auth.CSRFProtection = true
+			c.Auth.SessionCookieHTTPOnly = true
+			c.Auth.SessionCookieSameSite = "strict"
+			c.Auth.Mode = "reverse_proxy"
+		}, "auth.mode"},
+		{"auth on requires credential store", func(c *config.Config) {
+			c.Auth.RequireAuthentication = true
+			c.Auth.CSRFProtection = true
+			c.Auth.SessionCookieHTTPOnly = true
+			c.Auth.SessionCookieSameSite = "strict"
+			c.Auth.CredentialStore = ""
+		}, "credential_store"},
+		{"auth on requires csrf", func(c *config.Config) {
+			c.Auth.RequireAuthentication = true
+			c.Auth.CredentialStore = "/tmp/auth"
+			c.Auth.SessionCookieHTTPOnly = true
+			c.Auth.SessionCookieSameSite = "strict"
+			c.Auth.CSRFProtection = false
+		}, "csrf_protection"},
+		{"auth on requires httponly", func(c *config.Config) {
+			c.Auth.RequireAuthentication = true
+			c.Auth.CredentialStore = "/tmp/auth"
+			c.Auth.CSRFProtection = true
+			c.Auth.SessionCookieSameSite = "strict"
+			c.Auth.SessionCookieHTTPOnly = false
+		}, "session_cookie_http_only"},
+		{"samesite none refused", func(c *config.Config) {
+			c.Auth.RequireAuthentication = true
+			c.Auth.CredentialStore = "/tmp/auth"
+			c.Auth.CSRFProtection = true
+			c.Auth.SessionCookieHTTPOnly = true
+			c.Auth.SessionCookieSameSite = "none"
+		}, "session_cookie_same_site"},
 		{"negative ttl refused", func(c *config.Config) { c.Auth.SessionTTLMinutes = -1 }, "session_ttl_minutes"},
 		{"https mode needs cert", func(c *config.Config) { c.Server.Mode = "https"; c.Server.TLSKeyFile = "k.pem" }, "tls_cert_file"},
 		{"https mode needs key", func(c *config.Config) { c.Server.Mode = "https"; c.Server.TLSCertFile = "c.pem" }, "tls_key_file"},
@@ -109,6 +140,11 @@ func TestAuthAndModeValidation(t *testing.T) {
 			c.Server.Mode = "https"
 			c.Server.TLSCertFile, c.Server.TLSKeyFile = "c.pem", "k.pem"
 			c.Server.PublicOrigin = "https://vmobs.example:8787"
+			c.Auth.RequireAuthentication = true
+			c.Auth.CredentialStore = "/tmp/auth"
+			c.Auth.CSRFProtection = true
+			c.Auth.SessionCookieHTTPOnly = true
+			c.Auth.SessionCookieSameSite = "strict"
 			c.Auth.SessionCookieSecure = true
 			c.Server.Listen = "0.0.0.0:8787"
 		}, ""},

@@ -65,7 +65,7 @@ func newRunCLIServer(t *testing.T) (*httptest.Server, *runtimetest.Fake, *store.
 		t.Fatalf("create manager: %v", err)
 	}
 	t.Cleanup(func() { mgr.Close() })
-	srv := httptest.NewServer(api.New(st, eng, mgr))
+	srv := httptest.NewServer(api.New(st, eng, mgr, api.AuthConfig{Enabled: false}))
 	t.Cleanup(srv.Close)
 	return srv, fake, st
 }

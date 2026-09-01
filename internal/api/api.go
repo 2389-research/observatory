@@ -28,6 +28,7 @@ type Server struct {
 	manager  *runtime.Manager
 	mux      *http.ServeMux
 	features map[string]bool
+	auth     authState
 }
 
 type route struct {
@@ -37,12 +38,12 @@ type route struct {
 	handler http.HandlerFunc // nil marks a specced-but-unbuilt route
 }
 
-// New wires the API over st, eng, and mgr. Every endpoint in SPEC §14 is
-// present in the table: built ones serve, unbuilt ones answer 501
-// missing_capability so an agent probing the spec surface is taught, not
-// stonewalled.
-func New(st *store.Store, eng *situation.Engine, mgr *runtime.Manager) http.Handler {
-	s := &Server{store: st, engine: eng, manager: mgr, mux: http.NewServeMux()}
+// New wires the API over st, eng, mgr, and the authentication config ac. Every
+// endpoint in SPEC §14 is present in the table: built ones serve, unbuilt ones
+// answer 501 missing_capability so an agent probing the spec surface is taught,
+// not stonewalled.
+func New(st *store.Store, eng *situation.Engine, mgr *runtime.Manager, ac AuthConfig) http.Handler {
+	s := &Server{store: st, engine: eng, manager: mgr, mux: http.NewServeMux(), auth: initAuthState(ac)}
 	table := []route{
 		{"GET", "/meta", "meta", s.handleMeta},
 		{"GET", "/meta/event-kinds", "meta", s.handleEventKinds},
@@ -81,6 +82,10 @@ func New(st *store.Store, eng *situation.Engine, mgr *runtime.Manager) http.Hand
 		{"", "/vms/{id}/filesystem/diff", "filesystem_diff", nil},
 		{"", "/vms/{id}/exports", "exports", nil},
 		{"", "/artifacts/{id}", "artifacts", nil},
+		// auth routes: login is exempt from the middleware; session is always readable.
+		{"POST", "/auth/login", "auth", s.handleAuthLogin},
+		{"POST", "/auth/logout", "auth", s.handleAuthLogout},
+		{"GET", "/auth/session", "auth", s.handleAuthSession},
 	}
 
 	s.features = map[string]bool{}
@@ -99,7 +104,7 @@ func New(st *store.Store, eng *situation.Engine, mgr *runtime.Manager) http.Hand
 		s.mux.Handle(basePath+pattern, methodNotAllowed(methods))
 	}
 	s.mux.Handle("/", http.HandlerFunc(notFound))
-	return s.mux
+	return s.withAuth(s.mux)
 }
 
 func stub(feature string) http.HandlerFunc {
@@ -149,6 +154,11 @@ type limits struct {
 	MaxBatchSize              int   `json:"max_batch_size"`
 }
 
+type metaAuth struct {
+	Required bool   `json:"required"`
+	Mode     string `json:"mode"`
+}
+
 type meta struct {
 	Service                 string            `json:"service"`
 	Version                 string            `json:"version"`
@@ -157,6 +167,7 @@ type meta struct {
 	Limits                  limits            `json:"limits"`
 	AttentionTriggerClasses []string          `json:"attention_trigger_classes"`
 	Links                   map[string]string `json:"links"`
+	Auth                    metaAuth          `json:"auth"`
 }
 
 func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
@@ -179,15 +190,20 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 		// Links name only what answers 200 today. The guide and OpenAPI join
 		// this map when they exist, not before.
 		Links: map[string]string{
-			"event_kinds": basePath + "/meta/event-kinds",
-			"events":      basePath + "/events",
-			"situation":   basePath + "/situation",
-			"attention":   basePath + "/attention",
-			"annotations": basePath + "/annotations",
-			"host_status": basePath + "/host/status",
-			"templates":   basePath + "/templates",
-			"vms":         basePath + "/vms",
-			"runs":        basePath + "/runs",
+			"event_kinds":  basePath + "/meta/event-kinds",
+			"events":       basePath + "/events",
+			"situation":    basePath + "/situation",
+			"attention":    basePath + "/attention",
+			"annotations":  basePath + "/annotations",
+			"host_status":  basePath + "/host/status",
+			"templates":    basePath + "/templates",
+			"vms":          basePath + "/vms",
+			"runs":         basePath + "/runs",
+			"auth_session": basePath + "/auth/session",
+		},
+		Auth: metaAuth{
+			Required: s.auth.ac.Enabled,
+			Mode:     "local_operator",
 		},
 	})
 }

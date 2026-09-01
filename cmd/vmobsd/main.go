@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/2389-research/observatory-v2/internal/api"
+	"github.com/2389-research/observatory-v2/internal/auth"
 	"github.com/2389-research/observatory-v2/internal/config"
 	"github.com/2389-research/observatory-v2/internal/runtime"
 	"github.com/2389-research/observatory-v2/internal/situation"
@@ -107,7 +108,7 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready f
 	mgr, err := runtime.NewManager(st, rt, runtime.ManagerConfig{
 		Admission:  cfg.Admission,
 		VMDefaults: cfg.VMDefaults,
-		Owner:      "local_operator", // P5 auth replaces this
+		Owner:      "local_operator",
 		Templates:  tpls,
 		Host:       host,
 	})
@@ -116,8 +117,33 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready f
 	}
 	defer mgr.Close()
 
+	// Build auth config. When auth is off (dev mode), the API injects a
+	// local_operator/none identity on every request.
+	// P5 Task 13 enables auth in the smoke config; see the marker comment in
+	// docs/examples/host-config.yaml.
+	ac := api.AuthConfig{Enabled: false}
+	if cfg.AuthEnabled() {
+		credStore, err := auth.OpenStore(cfg.Auth.CredentialStore)
+		if err != nil {
+			return fmt.Errorf("auth.require_authentication is true but the credential store at %s is not initialized (run: vmobsd init-auth -config ...): %w", cfg.Auth.CredentialStore, err)
+		}
+		sameSite := http.SameSiteStrictMode
+		if cfg.Auth.SessionCookieSameSite == "lax" {
+			sameSite = http.SameSiteLaxMode
+		}
+		ac = api.AuthConfig{
+			Enabled:        true,
+			Creds:          credStore,
+			Sessions:       auth.NewSessions(time.Duration(cfg.Auth.SessionTTLMinutes) * time.Minute),
+			PublicOrigin:   cfg.Server.PublicOrigin,
+			CookieSameSite: sameSite,
+			CookieSecure:   cfg.Auth.SessionCookieSecure,
+			LoginDelay:     500 * time.Millisecond,
+		}
+	}
+
 	srv := &http.Server{
-		Handler:           api.New(st, eng, mgr),
+		Handler:           api.New(st, eng, mgr, ac),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	serveErr := make(chan error, 1)
