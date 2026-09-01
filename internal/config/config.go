@@ -294,7 +294,7 @@ func requireLoopback(listen string) error {
 		return fmt.Errorf("%q is not an IP address; use an explicit loopback IP such as 127.0.0.1", host)
 	}
 	if !ip.IsLoopback() {
-		return fmt.Errorf("%s is not a loopback address; the API binds loopback-only until the authentication boundary is built", ip)
+		return fmt.Errorf("%s is not a loopback address; loopback_only mode always binds loopback — use server.mode https to serve beyond this host", ip)
 	}
 	return nil
 }
