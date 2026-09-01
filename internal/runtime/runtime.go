@@ -61,10 +61,19 @@ func (e *UnavailableError) Error() string {
 
 // unavailableRuntime implements Runtime by refusing all operations. Every
 // method returns *UnavailableError so callers can errors.As-check the reason.
-type unavailableRuntime struct{ reason string }
+type unavailableRuntime struct {
+	reason           string
+	preflightSummary func() string
+}
 
 func (u *unavailableRuntime) Availability(_ context.Context) error {
-	return &UnavailableError{Reason: u.reason}
+	reason := u.reason
+	if u.preflightSummary != nil {
+		if s := u.preflightSummary(); s != "" {
+			reason = reason + "; preflight: " + s
+		}
+	}
+	return &UnavailableError{Reason: reason}
 }
 func (u *unavailableRuntime) Launch(_ context.Context, _ VMSpec) error {
 	return &UnavailableError{Reason: u.reason}
@@ -86,11 +95,20 @@ func (u *unavailableRuntime) ForceStop(_ context.Context, _ string) error {
 // Linux, the Firecracker adapter is not built until the Linux track (L0).
 // ForHost never returns anything that fakes a launch: Unavailable is the only
 // honest answer on a host without a working adapter.
-func ForHost() Runtime {
+//
+// When preflightSummary is non-nil and returns a non-empty string, that string
+// is appended to the unavailability reason (L0-R12: preflight summary in errors).
+func ForHost(preflightSummary ...func() string) Runtime {
+	var pfSummary func() string
+	if len(preflightSummary) > 0 {
+		pfSummary = preflightSummary[0]
+	}
+
+	reason := "firecracker adapter not built until the Linux track (L0)"
 	switch runtime.GOOS {
 	case "darwin":
-		return &unavailableRuntime{reason: "no KVM on this platform"}
-	default:
-		return &unavailableRuntime{reason: "firecracker adapter not built until the Linux track (L0)"}
+		reason = "no KVM on this platform"
 	}
+
+	return &unavailableRuntime{reason: reason, preflightSummary: pfSummary}
 }

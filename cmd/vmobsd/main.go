@@ -24,6 +24,7 @@ import (
 	"github.com/2389-research/observatory-v2/internal/auth"
 	"github.com/2389-research/observatory-v2/internal/config"
 	"github.com/2389-research/observatory-v2/internal/lock"
+	"github.com/2389-research/observatory-v2/internal/preflight"
 	"github.com/2389-research/observatory-v2/internal/runtime"
 	"github.com/2389-research/observatory-v2/internal/situation"
 	"github.com/2389-research/observatory-v2/internal/store"
@@ -233,7 +234,42 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready f
 	}
 	logger.Info("host probed", "memory_mib", host.TotalMemoryMiB, "cpus", host.CPUCores, "disk_free_mib", host.StateDiskFreeMiB)
 
-	rt := runtime.ForHost()
+	// Construct preflight runner. Load the lock again (verifyRuntimeLock already
+	// ran above, so if we reach here a mismatch is already fatal; this re-load
+	// is for the preflight config, not for binary verification).
+	var pfLock *lock.Lock
+	var pfLockErr error
+	if cfg.Runtime.LockFile != "" {
+		pfLock, pfLockErr = lock.Load(cfg.Runtime.LockFile)
+		if pfLockErr != nil {
+			logger.Warn("preflight: lock load error", "error", pfLockErr)
+			// pfLock stays nil; pfLockErr is passed to the runner.
+		}
+	}
+	pfRunner := preflight.New(preflight.Config{
+		Lock:        pfLock,
+		LockErr:     pfLockErr,
+		DataDir:     filepath.Dir(cfg.Storage.Database),
+		APIMode:     cfg.Server.Mode,
+		RequireAuth: cfg.Auth.RequireAuthentication,
+	})
+
+	// Run preflight once at startup; log a summary. This does not block serving.
+	{
+		startupReport := pfRunner.Run(ctx)
+		logger.Info("preflight complete", "overall", startupReport.Overall, "summary", startupReport.Summary())
+	}
+
+	// The preflight hook re-runs on demand (?refresh=1) or returns the last result.
+	// For M0 we always re-run (cheap <1s checks); caching is future work.
+	pfFunc := api.PreflightFunc(func(pCtx context.Context, _ bool) preflight.Report {
+		return pfRunner.Run(pCtx)
+	})
+
+	rt := runtime.ForHost(func() string {
+		report := pfRunner.Run(ctx)
+		return report.Summary()
+	})
 	mgr, err := runtime.NewManager(st, rt, runtime.ManagerConfig{
 		Admission:  cfg.Admission,
 		VMDefaults: cfg.VMDefaults,
@@ -271,7 +307,7 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready f
 	}
 
 	srv := &http.Server{
-		Handler:           api.New(st, eng, mgr, ac),
+		Handler:           api.New(st, eng, mgr, ac, pfFunc),
 		ReadHeaderTimeout: 5 * time.Second,
 		TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS12},
 	}

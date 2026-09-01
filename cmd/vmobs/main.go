@@ -74,6 +74,7 @@ commands:
   operation get OP-ID       operation detail
   template list             list approved templates
   host status               runtime availability and capacity
+  doctor [--json]           preflight host-readiness checks (exit 1 when fail)
   auth whoami               current identity (owner and method)
   auth token create --name NAME [--ttl-minutes N]
                             create a bearer token (secret shown once)
@@ -176,6 +177,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return c.dispatchTemplateCmd(rest[1:])
 	case "host":
 		return c.dispatchHostCmd(rest[1:])
+	case "doctor":
+		return c.dispatchDoctorCmd(rest[1:])
 	case "auth":
 		return c.dispatchAuthCmd(rest[1:])
 	case "api":

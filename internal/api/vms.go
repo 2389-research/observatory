@@ -503,7 +503,7 @@ func (s *Server) handleHostStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"capacity": map[string]any{
 			"usable_memory_mib":   cap.UsableMemoryMiB,
 			"reserved_memory_mib": cap.ReservedMemoryMiB,
@@ -522,7 +522,16 @@ func (s *Server) handleHostStatus(w http.ResponseWriter, r *http.Request) {
 		},
 		"storage": diag,
 		"vms":     counts,
-	})
+	}
+
+	// Preflight block: present only when the hook is wired. Never an empty fake block.
+	if s.preflight != nil {
+		refresh := r.URL.Query().Get("refresh") == "1"
+		report := s.preflight(ctx, refresh)
+		resp["preflight"] = report
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleTemplates(w http.ResponseWriter, r *http.Request) {

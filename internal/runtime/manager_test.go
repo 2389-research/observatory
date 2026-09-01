@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -239,6 +240,41 @@ func TestManagerRuntimeUnavailable(t *testing.T) {
 	vms, _ := st.ListVMs(t.Context(), store.VMQuery{})
 	if len(vms) != 0 {
 		t.Errorf("expected 0 vm rows, got %d after unavailable runtime", len(vms))
+	}
+}
+
+// TestForHostPreflightSummaryAppended (L0-R12): when a PreflightSummary hook
+// is wired to ForHost and the summary is non-empty, the UnavailableError reason
+// includes the preflight summary. Existing AT-001 test is unaffected (no hook).
+func TestForHostPreflightSummaryAppended(t *testing.T) {
+	rt := runtime.ForHost(func() string { return "fail (arch_kvm)" })
+	err := rt.Availability(t.Context())
+	if err == nil {
+		t.Fatal("ForHost(preflight hook) Availability returned nil on non-Linux")
+	}
+	var ue *runtime.UnavailableError
+	if !errors.As(err, &ue) {
+		t.Fatalf("expected *UnavailableError, got %T: %v", err, err)
+	}
+	if !strings.Contains(ue.Reason, "preflight: fail (arch_kvm)") {
+		t.Errorf("reason = %q; want preflight suffix", ue.Reason)
+	}
+}
+
+// TestForHostPreflightEmptySummaryOmitted: an empty summary from the hook
+// must NOT append a "; preflight: " suffix (no noise in the reason string).
+func TestForHostPreflightEmptySummaryOmitted(t *testing.T) {
+	rt := runtime.ForHost(func() string { return "" })
+	err := rt.Availability(t.Context())
+	if err == nil {
+		t.Fatal("ForHost Availability returned nil on non-Linux")
+	}
+	var ue *runtime.UnavailableError
+	if !errors.As(err, &ue) {
+		t.Fatalf("expected *UnavailableError, got %T", err)
+	}
+	if strings.Contains(ue.Reason, "preflight:") {
+		t.Errorf("reason contains 'preflight:' even though summary was empty: %q", ue.Reason)
 	}
 }
 

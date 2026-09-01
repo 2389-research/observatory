@@ -16,6 +16,7 @@ import (
 
 	"github.com/2389-research/observatory-v2/internal/api"
 	"github.com/2389-research/observatory-v2/internal/config"
+	"github.com/2389-research/observatory-v2/internal/preflight"
 	"github.com/2389-research/observatory-v2/internal/runtime"
 	"github.com/2389-research/observatory-v2/internal/runtime/runtimetest"
 	"github.com/2389-research/observatory-v2/internal/situation"
@@ -66,7 +67,7 @@ func newTemplateServer(t *testing.T) (*httptest.Server, *store.Store, *runtimete
 		t.Fatalf("create manager: %v", err)
 	}
 	t.Cleanup(func() { mgr.Close() })
-	srv := httptest.NewServer(api.New(st, eng, mgr, api.AuthConfig{Enabled: false}))
+	srv := httptest.NewServer(api.New(st, eng, mgr, api.AuthConfig{Enabled: false}, nil))
 	t.Cleanup(srv.Close)
 	return srv, st, fake
 }
@@ -183,6 +184,133 @@ func TestHostStatusRuntimeUnavailable(t *testing.T) {
 	reason, _ := rt["reason"].(string)
 	if !strings.Contains(reason, "kvm") {
 		t.Errorf("runtime.reason = %q, want kvm mention", reason)
+	}
+}
+
+// --- host/status preflight block ---
+
+// newPreflightServer builds a server with the preflight hook wired.
+func newPreflightServer(t *testing.T, pfRunner *preflight.Runner) (*httptest.Server, *store.Store, *runtimetest.Fake) {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "events.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	eng := situation.New(st, situation.Config{
+		Triggers:                  map[string]bool{},
+		QueueMaxItems:             500,
+		CollapseDuplicates:        true,
+		SituationMaxResponseBytes: 65536,
+	})
+	fake := runtimetest.NewFake()
+	mgr, err := runtime.NewManager(st, fake, runtime.ManagerConfig{
+		Admission:  config.Admission{CPUOvercommitRatio: 4.0, MaxParallelProvisions: 2},
+		VMDefaults: config.VMDefaults{MemoryMiB: 512, VCPUCount: 1, RootDiskMiB: 4096, WorkspaceDiskMiB: 8192},
+		Templates:  map[string]runtime.Template{},
+		Host:       runtime.HostResources{TotalMemoryMiB: 8192, CPUCores: 8, StateDiskFreeMiB: 100 * 1024},
+	})
+	if err != nil {
+		t.Fatalf("create manager: %v", err)
+	}
+	t.Cleanup(func() { mgr.Close() })
+
+	pf := api.PreflightFunc(func(_ context.Context, _ bool) preflight.Report {
+		return pfRunner.Run(t.Context())
+	})
+	srv := httptest.NewServer(api.New(st, eng, mgr, api.AuthConfig{Enabled: false}, pf))
+	t.Cleanup(srv.Close)
+	return srv, st, fake
+}
+
+// TestHostStatusPreflightAbsent: when preflight hook is nil, /host/status omits
+// the "preflight" key — never an empty fake block.
+func TestHostStatusPreflightAbsent(t *testing.T) {
+	srv, _, _ := newTemplateServer(t) // newTemplateServer passes nil for preflight
+	var got map[string]any
+	getJSON(t, srv.URL+"/api/v1/host/status", http.StatusOK, &got)
+
+	if _, ok := got["preflight"]; ok {
+		t.Error("preflight key present in /host/status when hook is nil — must be absent")
+	}
+}
+
+// TestHostStatusPreflightBlock: when preflight hook is wired, /host/status
+// includes a "preflight" block with the required fields.
+func TestHostStatusPreflightBlock(t *testing.T) {
+	pfRunner := preflight.New(preflight.Config{
+		DataDir:     t.TempDir(),
+		APIMode:     "loopback_only",
+		RequireAuth: false,
+	})
+	srv, _, _ := newPreflightServer(t, pfRunner)
+
+	var got map[string]any
+	getJSON(t, srv.URL+"/api/v1/host/status", http.StatusOK, &got)
+
+	pf, ok := got["preflight"].(map[string]any)
+	if !ok {
+		t.Fatal("host/status preflight block absent or not an object")
+	}
+	for _, field := range []string{"ran_at", "overall", "arch", "kernel_release", "checks"} {
+		if _, ok := pf[field]; !ok {
+			t.Errorf("preflight block missing field %q", field)
+		}
+	}
+
+	checks, _ := pf["checks"].([]any)
+	if len(checks) == 0 {
+		t.Error("preflight block checks array is empty")
+	}
+}
+
+// TestHostStatusPreflightRefresh: ?refresh=1 re-runs the checks (smoke test —
+// verifies the param is forwarded; not a timing test).
+func TestHostStatusPreflightRefresh(t *testing.T) {
+	pfRunner := preflight.New(preflight.Config{
+		DataDir:     t.TempDir(),
+		APIMode:     "loopback_only",
+		RequireAuth: false,
+	})
+	srv, _, _ := newPreflightServer(t, pfRunner)
+
+	var got map[string]any
+	getJSON(t, srv.URL+"/api/v1/host/status?refresh=1", http.StatusOK, &got)
+
+	if _, ok := got["preflight"]; !ok {
+		t.Error("host/status?refresh=1 missing preflight block")
+	}
+}
+
+// TestHostStatusPreflightGuestChannelNotImplemented: guest_channel is always
+// not_implemented in M0 — never absent, never fail.
+func TestHostStatusPreflightGuestChannelNotImplemented(t *testing.T) {
+	pfRunner := preflight.New(preflight.Config{
+		DataDir:     t.TempDir(),
+		APIMode:     "loopback_only",
+		RequireAuth: false,
+	})
+	srv, _, _ := newPreflightServer(t, pfRunner)
+
+	var got map[string]any
+	getJSON(t, srv.URL+"/api/v1/host/status", http.StatusOK, &got)
+
+	pf, _ := got["preflight"].(map[string]any)
+	checks, _ := pf["checks"].([]any)
+
+	var guestChannel map[string]any
+	for _, raw := range checks {
+		ch, _ := raw.(map[string]any)
+		if id, _ := ch["id"].(string); id == "guest_channel" {
+			guestChannel = ch
+			break
+		}
+	}
+	if guestChannel == nil {
+		t.Fatal("guest_channel check absent from preflight block")
+	}
+	if st, _ := guestChannel["status"].(string); st != "not_implemented" {
+		t.Errorf("guest_channel status = %q, want not_implemented", st)
 	}
 }
 
@@ -381,7 +509,7 @@ func TestCreateVMAdmissionRefusal(t *testing.T) {
 		t.Fatalf("create manager: %v", err)
 	}
 	t.Cleanup(func() { mgr.Close() })
-	srv := httptest.NewServer(api.New(st, eng, mgr, api.AuthConfig{Enabled: false}))
+	srv := httptest.NewServer(api.New(st, eng, mgr, api.AuthConfig{Enabled: false}, nil))
 	t.Cleanup(srv.Close)
 
 	body := map[string]any{"name": "fill-vm", "template_id": testTemplateDef.TemplateID}

@@ -3,14 +3,20 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 
 	"github.com/2389-research/observatory-v2/internal/events"
+	"github.com/2389-research/observatory-v2/internal/preflight"
 	"github.com/2389-research/observatory-v2/internal/runtime"
 	"github.com/2389-research/observatory-v2/internal/situation"
 	"github.com/2389-research/observatory-v2/internal/store"
 )
+
+// PreflightFunc is the preflight runner hook type. nil means no preflight
+// block in /host/status — honest for tests and configs that don't wire it.
+type PreflightFunc func(ctx context.Context, refresh bool) preflight.Report
 
 const (
 	Service    = "vmobsd"
@@ -23,12 +29,13 @@ const (
 // the lifecycle manager. The manager is required; future refactors that make
 // it optional should be explicit (not a nil-guard, which hides bugs).
 type Server struct {
-	store    *store.Store
-	engine   *situation.Engine
-	manager  *runtime.Manager
-	mux      *http.ServeMux
-	features map[string]bool
-	auth     authState
+	store     *store.Store
+	engine    *situation.Engine
+	manager   *runtime.Manager
+	mux       *http.ServeMux
+	features  map[string]bool
+	auth      authState
+	preflight PreflightFunc // nil = no preflight block in /host/status
 }
 
 type route struct {
@@ -38,12 +45,13 @@ type route struct {
 	handler http.HandlerFunc // nil marks a specced-but-unbuilt route
 }
 
-// New wires the API over st, eng, mgr, and the authentication config ac. Every
-// endpoint in SPEC §14 is present in the table: built ones serve, unbuilt ones
-// answer 501 missing_capability so an agent probing the spec surface is taught,
-// not stonewalled.
-func New(st *store.Store, eng *situation.Engine, mgr *runtime.Manager, ac AuthConfig) http.Handler {
-	s := &Server{store: st, engine: eng, manager: mgr, mux: http.NewServeMux(), auth: initAuthState(ac)}
+// New wires the API over st, eng, mgr, the authentication config ac, and an
+// optional preflight hook pf. When pf is nil, /host/status omits the preflight
+// block — honest for tests and configs that don't wire it. Every endpoint in
+// SPEC §14 is present in the table: built ones serve, unbuilt ones answer 501
+// missing_capability so an agent probing the spec surface is taught, not stonewalled.
+func New(st *store.Store, eng *situation.Engine, mgr *runtime.Manager, ac AuthConfig, pf PreflightFunc) http.Handler {
+	s := &Server{store: st, engine: eng, manager: mgr, mux: http.NewServeMux(), auth: initAuthState(ac), preflight: pf}
 	table := []route{
 		{"GET", "/meta", "meta", s.handleMeta},
 		{"GET", "/meta/event-kinds", "meta", s.handleEventKinds},
