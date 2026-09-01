@@ -340,10 +340,10 @@ func (r *runner) pingLoop(ctx context.Context, conn net.Conn, vmmGone <-chan str
 			}()
 
 		case <-pingTicker.C:
-			pingsPending++
-			if pingsPending > pingMissThreshold {
+			if pingsPending >= pingMissThreshold {
 				return "ping window expired", "redial"
 			}
+			pingsPending++
 			if err := proto.WriteControl(conn, proto.KindPing, struct{}{}); err != nil {
 				return fmt.Sprintf("ping write: %v", err), "redial"
 			}
@@ -478,6 +478,9 @@ func (r *runner) doShutdown(graceS int) error {
 }
 
 // doFinalize is the ctl finalize handler.
+// It replies ok:true once the signal is queued, before the supervision loop
+// actually transitions to phase=finalized. The adapter polls runner-state.json
+// for the finalized phase rather than trusting the ctl reply.
 func (r *runner) doFinalize() error {
 	select {
 	case r.finalizeCh <- struct{}{}:

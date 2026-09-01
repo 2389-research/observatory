@@ -35,13 +35,6 @@ import (
 //  4. Spool ends with vm.vmm_exited + end marker
 //  5. Run returns nil
 func TestRunnerAgainstRealGuestd(t *testing.T) {
-	if os.Getenv("VMOBS_RUNNER_TEST") == "" {
-		// Require explicit opt-in on linux: real guestd + child proc
-		// Use VMOBS_RUNNER_TEST=1 to enable.
-		// Skip cleanly so scripts/linux without the env still runs green.
-		t.Skip("set VMOBS_RUNNER_TEST=1 to run the linux integration test")
-	}
-
 	dir := t.TempDir()
 	spoolDir := filepath.Join(dir, "spool")
 	stateFile := filepath.Join(dir, "runner-state.json")
@@ -171,9 +164,17 @@ func TestRunnerAgainstRealGuestd(t *testing.T) {
 		runCancel()
 	}
 
-	// Assert spool contains vm.vmm_exited with graceful=false.
-	if !spoolContainsKind(t, spoolDir, "vm.vmm_exited") {
+	// Assert spool contains vm.vmm_exited with graceful=false and
+	// exit_observed_by=pidfile_stat (not just kind presence — verify the data).
+	if data := spoolFindKind(t, spoolDir, "vm.vmm_exited"); data == nil {
 		t.Error("spool missing vm.vmm_exited")
+	} else {
+		if v, ok := data["graceful"].(bool); !ok || v {
+			t.Errorf("vm.vmm_exited: expected graceful=false, got %v (%T)", data["graceful"], data["graceful"])
+		}
+		if v, _ := data["exit_observed_by"].(string); v != "pidfile_stat" {
+			t.Errorf("vm.vmm_exited: expected exit_observed_by=pidfile_stat, got %q", v)
+		}
 	}
 
 	// Assert at least one segment has an end marker (clean close).
@@ -272,6 +273,33 @@ func spoolContainsKind(t *testing.T, spoolDir, kind string) bool {
 		iter.Close()
 	}
 	return false
+}
+
+// spoolFindKind returns the Data map of the first envelope matching kind, or nil.
+func spoolFindKind(t *testing.T, spoolDir, kind string) map[string]any {
+	t.Helper()
+	segs, _ := filepath.Glob(filepath.Join(spoolDir, "seg-*.vmsp"))
+	for _, seg := range segs {
+		iter, err := spool.ReadSegment(seg)
+		if err != nil {
+			continue
+		}
+		for {
+			env, err := iter.Next()
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				break
+			}
+			if env.Kind == kind {
+				iter.Close()
+				return env.Data
+			}
+		}
+		iter.Close()
+	}
+	return nil
 }
 
 // spoolHasEndMarker returns true when any segment has a clean end marker.
