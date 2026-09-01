@@ -198,9 +198,10 @@ func (m *Manager) CreateBatch(ctx context.Context, req CreateBatchRequest) (*sto
 	coord := newBatchCoord(m, req.OnFailure, batchOpID, launchable)
 	for _, lm := range launchable {
 		lm := lm // capture
-		m.wg.Add(1)
-		go func() {
-			defer m.wg.Done()
+		// GoTracked returns false if the manager is closing; the member stays in
+		// provisioning until the next Reconcile repairs it — that is exactly what
+		// reconcile is for.
+		m.GoTracked(func() {
 			select {
 			case m.sem <- struct{}{}:
 			case <-m.ctx.Done():
@@ -218,7 +219,7 @@ func (m *Manager) CreateBatch(ctx context.Context, req CreateBatchRequest) (*sto
 			}
 			ok := m.runBatchMemberLaunch(lm, coord)
 			coord.memberDone(ok)
-		}()
+		})
 	}
 
 	return result, nil

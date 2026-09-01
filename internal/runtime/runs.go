@@ -353,22 +353,24 @@ func triggerReason(trigger concludeTrigger) string {
 
 // postConclude fires on_completion and reportGen after a run reaches terminal.
 func (m *Manager) postConclude(run *store.Run) {
-	// on_completion=stop: stop the VM if it's still live.
+	// on_completion=stop: stop the VM if it's still live. Runs on a tracked
+	// goroutine so conclusion returns immediately without waiting out the stop
+	// grace period. Close still drains it via wg.Wait before cancelling context.
+	// If GoTracked returns false the manager is closing; reconcile on next start
+	// will handle any VM left in stopping — that is exactly what reconcile is for.
 	if run.OnCompletion == "stop" {
-		m.stopVMAfterRun(run.VMID)
+		vmID := run.VMID
+		m.GoTracked(func() { m.stopVMAfterRun(vmID) })
 	}
 
 	// Enqueue report generation in a tracked goroutine so Close()'s wg.Wait()
-	// drains it before cancelling context. wg.Add precedes the go statement per
-	// the goroutine discipline rule (gotchas.md).
+	// drains it before cancelling context. If GoTracked returns false the manager
+	// is closing; reconcile on next start re-enqueues for terminal runs missing
+	// stored reports (R7) — that is exactly what reconcile is for.
 	if m.reportGen != nil {
 		gen := m.reportGen
 		runID := run.RunID
-		m.wg.Add(1)
-		go func() {
-			defer m.wg.Done()
-			gen(runID)
-		}()
+		m.GoTracked(func() { gen(runID) })
 	}
 }
 
@@ -386,12 +388,7 @@ func (m *Manager) EnqueueReport(runID string) bool {
 		return false
 	}
 	gen := m.reportGen
-	m.wg.Add(1)
-	go func() {
-		defer m.wg.Done()
-		gen(runID)
-	}()
-	return true
+	return m.GoTracked(func() { gen(runID) })
 }
 
 // stopVMAfterRun issues a stop action on the VM as a system-initiated stop.
@@ -467,17 +464,16 @@ func (m *Manager) SubmitRunResult(ctx context.Context, runID string, result json
 
 	// Trigger conclusion asynchronously (best-effort race resolution).
 	// The caller gets the run post-result-recording; the conclusion fires in the bg.
-	// wg.Add before go ensures Close()'s wg.Wait() blocks until this goroutine
-	// finishes — same pattern as enqueueLaunch in manager.go.
-	m.wg.Add(1)
-	go func() {
-		defer m.wg.Done()
+	// GoTracked ensures Close()'s wg.Wait() blocks until this goroutine finishes.
+	// If GoTracked returns false the manager is closing; the run stays in concluding
+	// until the next Reconcile sweeps it — that is exactly what reconcile is for.
+	m.GoTracked(func() {
 		concluded, err := m.concludeRun(m.ctx, runID, triggerGuestResult)
 		if err != nil {
-			// Log implicitly; conclusion races resolve via From pins.
+			// Conclusion races resolve via From pins; errors are expected on the loser.
 			_ = concluded
 		}
-	}()
+	})
 
 	return run, nil
 }

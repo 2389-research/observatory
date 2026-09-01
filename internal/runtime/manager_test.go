@@ -756,6 +756,26 @@ func queryEvents(t *testing.T, st *store.Store, kind string, limit int) ([]*even
 	return result.Events, nil
 }
 
+// TestCloseGateStopsNewWork: goroutines enqueued after Close starts must not
+// start; goroutines enqueued before must complete. Run with -race.
+func TestCloseGateStopsNewWork(t *testing.T) {
+	m := newManager(t, openStoreForManager(t), runtimetest.NewFake())
+	started := make(chan struct{})
+	release := make(chan struct{})
+	if ok := m.GoTracked(func() { close(started); <-release }); !ok {
+		t.Fatal("goTracked refused work before Close")
+	}
+	<-started
+
+	closeDone := make(chan struct{})
+	go func() { close(release); m.Close(); close(closeDone) }()
+	<-closeDone
+
+	if ok := m.GoTracked(func() { t.Error("work started after Close") }); ok {
+		t.Fatal("goTracked accepted work after Close")
+	}
+}
+
 func TestManagerCreateVMReplayNoRelaunch(t *testing.T) {
 	// AT-006 corollary: a replayed create returns the stored result and must
 	// not enqueue another launch — a relaunch could revive a stopped VM.

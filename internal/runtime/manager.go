@@ -76,7 +76,7 @@ type ManagerConfig struct {
 
 // Manager is the single lifecycle authority. It owns a bounded worker pool for
 // launch jobs so concurrent create requests do not exceed MaxParallelProvisions.
-// Close blocks until all in-flight launch jobs finish.
+// Close blocks until all in-flight tracked goroutines finish.
 type Manager struct {
 	st     *store.Store
 	rt     Runtime
@@ -86,6 +86,12 @@ type Manager struct {
 	// sem limits parallel provisioning to cfg.Admission.MaxParallelProvisions.
 	sem chan struct{}
 	wg  sync.WaitGroup
+
+	// closeMu / closed form the close gate. GoTracked holds an RLock while
+	// adding to wg; Close holds the write lock to flip closed before wg.Wait.
+	// This prevents the wg.Add/wg.Wait race described in gotchas.md.
+	closeMu sync.RWMutex
+	closed  bool
 
 	// ctx is the manager's root context; cancelled by Close to interrupt launches.
 	ctx    context.Context
@@ -137,10 +143,30 @@ func (m *Manager) Templates() map[string]Template { return maps.Clone(m.cfg.Temp
 // error for *UnavailableError to surface honest host-status information.
 func (m *Manager) Availability(ctx context.Context) error { return m.rt.Availability(ctx) }
 
-// Close waits for all in-flight launch jobs and then releases the manager's
-// context. In-flight jobs run to completion first; cancel only stops newly
-// queued work from starting.
+// GoTracked runs fn on a goroutine tracked by the close gate. It returns
+// false (and does not run fn) once Close has begun: work enqueued during
+// shutdown would race wg.Wait. Every manager goroutine must start here.
+func (m *Manager) GoTracked(fn func()) bool {
+	m.closeMu.RLock()
+	defer m.closeMu.RUnlock()
+	if m.closed {
+		return false
+	}
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		fn()
+	}()
+	return true
+}
+
+// Close waits for all in-flight tracked goroutines, then releases the
+// manager's context. The gate flips first so no new goroutine can slip in
+// between wg.Wait and cancel.
 func (m *Manager) Close() {
+	m.closeMu.Lock()
+	m.closed = true
+	m.closeMu.Unlock()
 	m.wg.Wait()
 	m.cancel()
 }
@@ -320,10 +346,10 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*store.VM, *
 }
 
 // enqueueLaunch acquires a semaphore slot and runs the launch job in a goroutine.
+// If GoTracked returns false the manager is closing; the VM stays in provisioning
+// until the next Reconcile repairs it — that is exactly what reconcile is for.
 func (m *Manager) enqueueLaunch(vm *store.VM, opID int64, tpl Template, vcpu int, memMiB, rootDisk, wsDisk int64) {
-	m.wg.Add(1)
-	go func() {
-		defer m.wg.Done()
+	m.GoTracked(func() {
 		// Acquire a provisioning slot.
 		select {
 		case m.sem <- struct{}{}:
@@ -334,7 +360,7 @@ func (m *Manager) enqueueLaunch(vm *store.VM, opID int64, tpl Template, vcpu int
 		}
 		defer func() { <-m.sem }()
 		m.runLaunch(vm, opID, tpl, vcpu, memMiB, rootDisk, wsDisk)
-	}()
+	})
 }
 
 // runLaunch executes the provisioning sequence: provisioning→starting→running
