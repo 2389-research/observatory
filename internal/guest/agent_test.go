@@ -371,3 +371,147 @@ func dialUnix(t *testing.T, addr string) net.Conn {
 	}
 	return conn
 }
+
+// TestShutdownAfterHello verifies: authenticated conn sends shutdown → receives
+// shutdown_ack, and the injected poweroff func is called exactly once.
+func TestShutdownAfterHello(t *testing.T) {
+	const token = "tok-shutdown"
+	agent, _ := makeTestAgent(token)
+
+	// Inject a sentinel poweroff func instead of exec-ing systemctl.
+	called := make(chan struct{}, 1)
+	agent.PoweroffFunc = func() {
+		called <- struct{}{}
+	}
+
+	ln := newUnixListener(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	go func() { _ = agent.ServeControl(ctx, ln) }()
+
+	conn := dialUnix(t, ln.Addr().String())
+	defer conn.Close()
+
+	sendHello(t, conn, token, proto.ProtocolVersion)
+	ack := readAck(t, conn)
+	if !ack.Accepted {
+		t.Fatalf("handshake rejected: %q", ack.Reason)
+	}
+
+	// Send shutdown with deadline_s=10.
+	sd := proto.Shutdown{DeadlineS: 10}
+	if err := proto.WriteControl(conn, proto.KindShutdown, sd); err != nil {
+		t.Fatalf("WriteControl shutdown: %v", err)
+	}
+
+	// Expect shutdown_ack back.
+	if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	env, err := proto.ReadControl(conn)
+	if err != nil {
+		t.Fatalf("ReadControl shutdown_ack: %v", err)
+	}
+	if env.Kind != proto.KindShutdownAck {
+		t.Errorf("want kind %q, got %q", proto.KindShutdownAck, env.Kind)
+	}
+
+	// Verify the poweroff func ran.
+	select {
+	case <-called:
+		// good
+	case <-time.After(2 * time.Second):
+		t.Error("poweroff func was not called within 2s of shutdown_ack")
+	}
+}
+
+// TestShutdownBeforeHello verifies: shutdown before a successful hello is
+// refused (the server sends an error envelope and closes the connection)
+// and the poweroff func is NOT called.
+func TestShutdownBeforeHello(t *testing.T) {
+	const token = "tok-sd-prehello"
+	agent, _ := makeTestAgent(token)
+
+	called := make(chan struct{}, 1)
+	agent.PoweroffFunc = func() {
+		called <- struct{}{}
+	}
+
+	ln := newUnixListener(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	go func() { _ = agent.ServeControl(ctx, ln) }()
+
+	conn := dialUnix(t, ln.Addr().String())
+	defer conn.Close()
+
+	// Send shutdown without doing the hello first — agent expects hello kind.
+	sd := proto.Shutdown{DeadlineS: 5}
+	if err := proto.WriteControl(conn, proto.KindShutdown, sd); err != nil {
+		t.Fatalf("WriteControl shutdown: %v", err)
+	}
+
+	// Server should respond with an error envelope and close the connection.
+	if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	env, err := proto.ReadControl(conn)
+	if err == nil {
+		// We might get an error envelope before connection close.
+		if env.Kind != proto.KindError {
+			t.Errorf("want error kind, got %q", env.Kind)
+		}
+		// Next read must fail (server closes the conn).
+		_, err = proto.ReadControl(conn)
+		if err == nil {
+			t.Error("want error after error envelope (conn should be closed)")
+		}
+	}
+	// If the first read already errored (server closed without sending an envelope),
+	// that is also acceptable — the connection is closed, which is the contract.
+
+	// Poweroff must NOT have been called.
+	select {
+	case <-called:
+		t.Error("poweroff func must NOT be called when shutdown arrives before hello")
+	case <-time.After(500 * time.Millisecond):
+		// good — not called
+	}
+}
+
+// TestReconnectAfterClose verifies that after a connection closes, the accept
+// loop accepts a new connection and a fresh hello succeeds.
+func TestReconnectAfterClose(t *testing.T) {
+	const token = "tok-reconnect"
+	agent, _ := makeTestAgent(token)
+
+	// Poweroff func is a no-op; shutdown is not part of this test.
+	agent.PoweroffFunc = func() {}
+
+	ln := newUnixListener(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	go func() { _ = agent.ServeControl(ctx, ln) }()
+
+	// First connection: complete the handshake, then close it.
+	conn1 := dialUnix(t, ln.Addr().String())
+	sendHello(t, conn1, token, proto.ProtocolVersion)
+	ack1 := readAck(t, conn1)
+	if !ack1.Accepted {
+		t.Fatalf("first conn: handshake rejected: %q", ack1.Reason)
+	}
+	conn1.Close()
+
+	// Second connection: a fresh hello must succeed — the accept loop must still be alive.
+	conn2 := dialUnix(t, ln.Addr().String())
+	defer conn2.Close()
+
+	sendHello(t, conn2, token, proto.ProtocolVersion)
+	ack2 := readAck(t, conn2)
+	if !ack2.Accepted {
+		t.Errorf("second conn (reconnect): handshake rejected: %q", ack2.Reason)
+	}
+}

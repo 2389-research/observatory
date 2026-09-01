@@ -1,4 +1,4 @@
-// ABOUTME: Agent: accepts control-channel connections, performs the hello handshake, serves capabilities/ping.
+// ABOUTME: Agent: accepts control-channel connections, performs the hello handshake, serves capabilities/ping/shutdown.
 // ABOUTME: Transport-agnostic: takes a net.Listener; vsock wiring happens only in cmd/vmobs-guestd main.
 package guest
 
@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os/exec"
 	"time"
 
 	"github.com/2389-research/observatory-v2/internal/guest/proto"
@@ -26,14 +27,25 @@ type Agent struct {
 	cfg      *BootConfig
 	manifest proto.CapabilityManifest
 	token    []byte // pre-converted for constant-time compare
+
+	// PoweroffFunc is called after the agent sends shutdown_ack. Tests override
+	// this to avoid actually powering off the machine. Production default execs
+	// "systemctl poweroff". Must not be nil.
+	PoweroffFunc func()
+}
+
+// defaultPoweroff is the production implementation: exec systemctl poweroff.
+func defaultPoweroff() {
+	_ = exec.Command("systemctl", "poweroff").Run()
 }
 
 // NewAgent constructs an Agent from a validated BootConfig and a capability manifest.
 func NewAgent(cfg *BootConfig, manifest proto.CapabilityManifest) *Agent {
 	return &Agent{
-		cfg:      cfg,
-		manifest: manifest,
-		token:    []byte(cfg.CapabilityToken),
+		cfg:          cfg,
+		manifest:     manifest,
+		token:        []byte(cfg.CapabilityToken),
+		PoweroffFunc: defaultPoweroff,
 	}
 }
 
@@ -138,7 +150,7 @@ func (a *Agent) handleConn(ctx context.Context, conn net.Conn) {
 	a.serveRequests(conn)
 }
 
-// serveRequests handles get_capabilities and ping until EOF, idle timeout, or error.
+// serveRequests handles authenticated verbs until EOF, idle timeout, or shutdown.
 func (a *Agent) serveRequests(conn net.Conn) {
 	for {
 		if err := conn.SetReadDeadline(time.Now().Add(idleTimeout)); err != nil {
@@ -158,6 +170,12 @@ func (a *Agent) serveRequests(conn net.Conn) {
 			if err := a.writeControl(conn, proto.KindPong, struct{}{}); err != nil {
 				return
 			}
+		case proto.KindShutdown:
+			// Reply ack first, then invoke poweroff — the host runner waits for
+			// the ack before its own grace deadline expires.
+			_ = a.writeControl(conn, proto.KindShutdownAck, struct{}{})
+			a.PoweroffFunc()
+			return
 		default:
 			a.sendError(conn, fmt.Sprintf("unknown kind %q", env.Kind))
 			return
