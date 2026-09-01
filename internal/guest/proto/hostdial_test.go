@@ -209,3 +209,61 @@ func TestDialHostVsockNoBytesBufferedAfterOK(t *testing.T) {
 		t.Errorf("sentinel: got 0x%02X, want 0x%02X — application bytes were buffered and lost", b[0], sentinel)
 	}
 }
+
+func TestDialHostVsockCancelSuccessRaceDeterministic(t *testing.T) {
+	// Server completes the handshake immediately; client cancels ctx from a
+	// goroutine racing the handshake. Run 50 iterations under -race.
+	//
+	// Every iteration must satisfy exactly one of:
+	//   (a) err != nil  — cancel won; OR
+	//   (b) err == nil and the conn is usable (a raw Write succeeds after a
+	//       fresh 200ms deadline, proving no instant deadline was left on it).
+	//
+	// A poisoned conn — nil err but SetDeadline(now) already applied — would
+	// make the Write return immediately with a timeout error. That is the bug
+	// this test detects.
+	const testPort uint32 = 10000
+	const iterations = 50
+
+	socketPath := newTestUnixServer(t, func(conn net.Conn) {
+		defer conn.Close()
+		buf := make([]byte, 64)
+		_, _ = conn.Read(buf)
+		_, _ = fmt.Fprintf(conn, "OK %d\n", testPort+1)
+		// Drain any probe byte the client sends after a successful dial.
+		conn.SetDeadline(time.Now().Add(500 * time.Millisecond)) //nolint:errcheck
+		probe := make([]byte, 1)
+		_, _ = conn.Read(probe)
+	})
+
+	for i := 0; i < iterations; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+
+		// Cancel races the handshake: fire in a separate goroutine with no delay.
+		go cancel()
+
+		conn, err := DialHostVsock(ctx, socketPath, testPort)
+		if err != nil {
+			// Cancel won — acceptable.
+			continue
+		}
+
+		// Success path: the conn must not carry a poisoned instant deadline.
+		// Apply a fresh 200ms deadline and confirm a Write does not time out
+		// instantly (a timed-out Write returns immediately).
+		defer conn.Close()
+		if setErr := conn.SetDeadline(time.Now().Add(200 * time.Millisecond)); setErr != nil {
+			t.Errorf("iter %d: SetDeadline on returned conn: %v", i, setErr)
+			continue
+		}
+		start := time.Now()
+		_, writeErr := conn.Write([]byte{0x01})
+		elapsed := time.Since(start)
+		if writeErr != nil && elapsed < 50*time.Millisecond {
+			// Write failed in under 50ms — the deadline was already expired when
+			// the conn was returned (the race bug).
+			t.Errorf("iter %d: Write on returned conn failed in %v (instant deadline leak): %v", i, elapsed, writeErr)
+		}
+		cancel() // already cancelled but harmless
+	}
+}

@@ -35,10 +35,12 @@ func DialHostVsock(ctx context.Context, udsPath string, port uint32) (net.Conn, 
 
 	// Watcher: for cancel-only contexts (no deadline), unblock handshake I/O
 	// when ctx is cancelled by forcing an immediate deadline on the conn.
-	// watchDone is closed when the handshake section exits (success or error).
+	// Invariant: watcher exit strictly precedes conn escape; cancel-vs-success
+	// is resolved by the ctx.Err() check below, not by timing.
 	watchDone := make(chan struct{})
-	defer close(watchDone)
+	watcherExited := make(chan struct{})
 	go func() {
+		defer close(watcherExited)
 		select {
 		case <-ctx.Done():
 			conn.SetDeadline(time.Now()) //nolint:errcheck
@@ -46,35 +48,52 @@ func DialHostVsock(ctx context.Context, udsPath string, port uint32) (net.Conn, 
 		}
 	}()
 
-	// Write the CONNECT line.
-	req := fmt.Sprintf("CONNECT %d\n", port)
-	if _, err := conn.Write([]byte(req)); err != nil {
-		conn.Close()
-		if ctx.Err() != nil {
-			return nil, fmt.Errorf("write CONNECT: %w", ctx.Err())
+	hsErr := func() error {
+		// Write the CONNECT line.
+		req := fmt.Sprintf("CONNECT %d\n", port)
+		if _, err := conn.Write([]byte(req)); err != nil {
+			conn.Close()
+			if ctx.Err() != nil {
+				return fmt.Errorf("write CONNECT: %w", ctx.Err())
+			}
+			return fmt.Errorf("write CONNECT: %w", err)
 		}
-		return nil, fmt.Errorf("write CONNECT: %w", err)
-	}
 
-	// Read the OK line one byte at a time to avoid consuming application bytes.
-	line, err := readLineByByte(conn, 64)
-	if err != nil {
-		conn.Close()
-		if ctx.Err() != nil {
-			return nil, fmt.Errorf("read handshake response: %w", ctx.Err())
+		// Read the OK line one byte at a time to avoid consuming application bytes.
+		line, err := readLineByByte(conn, 64)
+		if err != nil {
+			conn.Close()
+			if ctx.Err() != nil {
+				return fmt.Errorf("read handshake response: %w", ctx.Err())
+			}
+			return fmt.Errorf("read handshake response: %w", err)
 		}
-		return nil, fmt.Errorf("read handshake response: %w", err)
+
+		// Validate the response.
+		if !strings.HasPrefix(line, "OK ") {
+			conn.Close()
+			return fmt.Errorf("vsock handshake failed: got %q, want OK <port>", line)
+		}
+
+		return nil
+	}()
+
+	// Signal watcher and wait for it to fully exit before the conn can escape.
+	// After this point the watcher cannot touch conn.
+	close(watchDone)
+	<-watcherExited
+
+	if hsErr != nil {
+		return nil, hsErr
 	}
 
-	// Validate the response before clearing the deadline: only on success do
-	// we clear it. Error paths just close the conn and return.
-	if !strings.HasPrefix(line, "OK ") {
+	// Cancel raced a successful handshake: honor the cancel deterministically.
+	if ctx.Err() != nil {
 		conn.Close()
-		return nil, fmt.Errorf("vsock handshake failed: got %q, want OK <port>", line)
+		return nil, fmt.Errorf("dial host vsock: %w", ctx.Err())
 	}
 
-	// Success path: clear the handshake deadline so application I/O is
-	// undeadlined. The deferred close(watchDone) unblocks the watcher goroutine.
+	// Clear any instant deadline the watcher may have applied before it exited.
 	if err := conn.SetDeadline(zeroTime); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("clear deadline: %w", err)
