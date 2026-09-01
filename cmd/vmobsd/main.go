@@ -1,10 +1,11 @@
 // ABOUTME: vmobsd: the control-plane daemon. Loads host config, opens the
-// ABOUTME: event store, serves /api/v1 on a loopback socket until auth exists.
+// ABOUTME: event store, serves /api/v1 on loopback or TLS depending on mode.
 package main
 
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -168,9 +169,14 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready f
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", cfg.Server.Listen, err)
 	}
-	if tcp, ok := ln.Addr().(*net.TCPAddr); !ok || !tcp.IP.IsLoopback() {
-		ln.Close()
-		return fmt.Errorf("bound %s which is not loopback; refusing to serve without an authentication boundary", ln.Addr())
+	// Loopback-only mode: enforce loopback even if config validation was
+	// bypassed (defense in depth). HTTPS mode legitimately binds non-loopback —
+	// config validation already required auth+TLS there.
+	if cfg.Server.Mode != "https" {
+		if tcp, ok := ln.Addr().(*net.TCPAddr); !ok || !tcp.IP.IsLoopback() {
+			ln.Close()
+			return fmt.Errorf("bound %s which is not loopback; refusing to serve without an authentication boundary", ln.Addr())
+		}
 	}
 
 	eng := situation.New(st, situation.Config{
@@ -236,9 +242,15 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready f
 	srv := &http.Server{
 		Handler:           api.New(st, eng, mgr, ac),
 		ReadHeaderTimeout: 5 * time.Second,
+		TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS12},
 	}
 	serveErr := make(chan error, 1)
-	go func() { serveErr <- srv.Serve(ln) }()
+	switch cfg.Server.Mode {
+	case "https":
+		go func() { serveErr <- srv.ServeTLS(ln, cfg.Server.TLSCertFile, cfg.Server.TLSKeyFile) }()
+	default: // loopback_only — bound-address check already ran above
+		go func() { serveErr <- srv.Serve(ln) }()
+	}
 	ready(ln.Addr().String())
 
 	select {
