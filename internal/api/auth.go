@@ -620,6 +620,8 @@ func (s *Server) handleTokenRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// owner here is the ACTING caller's identity (audit semantics), not
+	// necessarily the token's owner — a privileged caller can revoke others' tokens.
 	_ = s.appendAuthEvent(r, "auth.token_revoked", map[string]any{
 		"token_id": tokenID,
 		"owner":    id.Owner,

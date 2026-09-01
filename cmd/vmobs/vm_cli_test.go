@@ -52,7 +52,6 @@ func newVMServer(t *testing.T) *httptest.Server {
 			RootDiskMiB:      4096,
 			WorkspaceDiskMiB: 8192,
 		},
-		Owner:     "local_operator",
 		Templates: map[string]runtime.Template{cliTestTemplate.TemplateID: cliTestTemplate},
 		Host:      runtime.HostResources{TotalMemoryMiB: 8192, CPUCores: 8, StateDiskFreeMiB: 100 * 1024},
 	})

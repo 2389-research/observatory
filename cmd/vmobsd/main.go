@@ -108,7 +108,6 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready f
 	mgr, err := runtime.NewManager(st, rt, runtime.ManagerConfig{
 		Admission:  cfg.Admission,
 		VMDefaults: cfg.VMDefaults,
-		Owner:      "local_operator",
 		Templates:  tpls,
 		Host:       host,
 	})

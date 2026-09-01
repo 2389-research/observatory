@@ -69,7 +69,6 @@ func defaultCfg() runtime.ManagerConfig {
 			NetworkPolicyID:  "transport-public-web",
 			StopGraceSeconds: 5,
 		},
-		Owner: "local_operator",
 		Templates: map[string]runtime.Template{
 			"tmpl-test": testTemplate(),
 		},
@@ -105,7 +104,7 @@ func TestManagerCreateAndLaunchHappyPath(t *testing.T) {
 	fk := runtimetest.NewFake()
 	mgr := newManager(t, st, fk)
 
-	vm, op, _, err := mgr.CreateVM(t.Context(), createReq("alpha"))
+	vm, op, _, err := mgr.CreateVM(t.Context(), "local_operator", createReq("alpha"))
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
@@ -186,7 +185,7 @@ func TestManagerLaunchFailure(t *testing.T) {
 	}
 	defer mgr2.Close()
 
-	vm, op, _, createErr := mgr2.CreateVM(t.Context(), createReq("beta"))
+	vm, op, _, createErr := mgr2.CreateVM(t.Context(), "local_operator", createReq("beta"))
 	if createErr != nil {
 		t.Fatalf("CreateVM: %v", createErr)
 	}
@@ -226,7 +225,7 @@ func TestManagerRuntimeUnavailable(t *testing.T) {
 	st := openStoreForManager(t)
 	mgr := newManager(t, st, runtime.ForHost()) // darwin → unavailable
 
-	vm, op, _, err := mgr.CreateVM(t.Context(), createReq("gamma"))
+	vm, op, _, err := mgr.CreateVM(t.Context(), "local_operator", createReq("gamma"))
 	if err == nil {
 		t.Fatal("expected error from unavailable runtime, got nil")
 	}
@@ -247,7 +246,7 @@ func TestManagerTemplateUnknown(t *testing.T) {
 	st := openStoreForManager(t)
 	mgr := newManager(t, st, runtimetest.NewFake())
 
-	_, _, _, err := mgr.CreateVM(t.Context(), runtime.CreateRequest{
+	_, _, _, err := mgr.CreateVM(t.Context(), "local_operator", runtime.CreateRequest{
 		Name:       "delta",
 		TemplateID: "tmpl-no-such",
 	})
@@ -268,7 +267,7 @@ func TestManagerDefaultsApplied(t *testing.T) {
 	mgr := newManager(t, st, runtimetest.NewFake())
 
 	// Zero-valued resources should pick up VMDefaults.
-	vm, _, _, err := mgr.CreateVM(t.Context(), runtime.CreateRequest{
+	vm, _, _, err := mgr.CreateVM(t.Context(), "local_operator", runtime.CreateRequest{
 		Name:       "defaults-check",
 		TemplateID: "tmpl-test",
 		// No VCPUCount, MemoryMiB, etc.
@@ -293,7 +292,7 @@ func TestManagerActionPauseKeepsReservation(t *testing.T) {
 	fk := runtimetest.NewFake()
 	mgr := newManager(t, st, fk)
 
-	vm, _, _, err := mgr.CreateVM(t.Context(), createReq("pause-test"))
+	vm, _, _, err := mgr.CreateVM(t.Context(), "local_operator", createReq("pause-test"))
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
@@ -325,7 +324,7 @@ func TestManagerStopRecordsGracefulVsForced(t *testing.T) {
 	mgr := newManager(t, st, fk)
 
 	// --- graceful stop ---
-	vm, _, _, err := mgr.CreateVM(t.Context(), createReq("stop-graceful"))
+	vm, _, _, err := mgr.CreateVM(t.Context(), "local_operator", createReq("stop-graceful"))
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
@@ -358,7 +357,7 @@ func TestManagerStopRecordsGracefulVsForced(t *testing.T) {
 	mgr2, _ := runtime.NewManager(st2, fk2, defaultCfg())
 	defer mgr2.Close()
 
-	vm2, _, _, _ := mgr2.CreateVM(t.Context(), createReq("stop-forced"))
+	vm2, _, _, _ := mgr2.CreateVM(t.Context(), "local_operator", createReq("stop-forced"))
 	mgr2.Close()
 	fk2.FailNext("Stop", vm2.VMID, &runtimetest.ForcedStop{})
 	_, _, err = mgr2.Action(t.Context(), vm2.VMID, "stop", nil)
@@ -385,7 +384,7 @@ func TestManagerForceStopFromPaused(t *testing.T) {
 	fk := runtimetest.NewFake()
 	mgr := newManager(t, st, fk)
 
-	vm, _, _, err := mgr.CreateVM(t.Context(), createReq("force-paused"))
+	vm, _, _, err := mgr.CreateVM(t.Context(), "local_operator", createReq("force-paused"))
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
@@ -409,7 +408,7 @@ func TestManagerRevisionMismatch(t *testing.T) {
 	fk := runtimetest.NewFake()
 	mgr := newManager(t, st, fk)
 
-	vm, _, _, err := mgr.CreateVM(t.Context(), createReq("rev-check"))
+	vm, _, _, err := mgr.CreateVM(t.Context(), "local_operator", createReq("rev-check"))
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
@@ -441,7 +440,7 @@ func TestManagerStopDuringLaunchCleansUp(t *testing.T) {
 	}
 	defer mgr.Close()
 
-	vm, _, _, err := mgr.CreateVM(t.Context(), createReq("race-stop"))
+	vm, _, _, err := mgr.CreateVM(t.Context(), "local_operator", createReq("race-stop"))
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
@@ -489,7 +488,7 @@ func TestManagerDeleteIdempotency(t *testing.T) {
 	fk := runtimetest.NewFake()
 	mgr := newManager(t, st, fk)
 
-	vm, _, _, err := mgr.CreateVM(t.Context(), createReq("delete-test"))
+	vm, _, _, err := mgr.CreateVM(t.Context(), "local_operator", createReq("delete-test"))
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
@@ -536,7 +535,7 @@ func TestManagerDeleteLiveVMRequiresForce(t *testing.T) {
 	fk := runtimetest.NewFake()
 	mgr := newManager(t, st, fk)
 
-	vm, _, _, err := mgr.CreateVM(t.Context(), createReq("delete-live"))
+	vm, _, _, err := mgr.CreateVM(t.Context(), "local_operator", createReq("delete-live"))
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
@@ -669,7 +668,7 @@ func TestManagerParallelLaunchCapped(t *testing.T) {
 	const n = 5
 	gates := make([]chan struct{}, n)
 	for i := range n {
-		vm, _, _, err := mgr.CreateVM(t.Context(), createReq(fmt.Sprintf("parallel-%d", i)))
+		vm, _, _, err := mgr.CreateVM(t.Context(), "local_operator", createReq(fmt.Sprintf("parallel-%d", i)))
 		if err != nil {
 			t.Fatalf("CreateVM %d: %v", i, err)
 		}
@@ -729,7 +728,7 @@ func TestManagerCapacity(t *testing.T) {
 	}
 
 	// Create a VM; capacity changes.
-	_, _, _, err = mgr.CreateVM(t.Context(), createReq("cap-check"))
+	_, _, _, err = mgr.CreateVM(t.Context(), "local_operator", createReq("cap-check"))
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
@@ -787,7 +786,7 @@ func TestManagerCreateVMReplayNoRelaunch(t *testing.T) {
 	req := createReq("replay-vm")
 	req.IdempotencyKey = &ikey
 
-	vm1, _, replayed1, err := mgr.CreateVM(t.Context(), req)
+	vm1, _, replayed1, err := mgr.CreateVM(t.Context(), "local_operator", req)
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
@@ -795,7 +794,7 @@ func TestManagerCreateVMReplayNoRelaunch(t *testing.T) {
 		t.Error("first CreateVM replayed = true, want false")
 	}
 
-	vm2, _, replayed2, err := mgr.CreateVM(t.Context(), req)
+	vm2, _, replayed2, err := mgr.CreateVM(t.Context(), "local_operator", req)
 	if err != nil {
 		t.Fatalf("CreateVM replay: %v", err)
 	}

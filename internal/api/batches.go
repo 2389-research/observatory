@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/2389-research/observatory-v2/internal/auth"
 	"github.com/2389-research/observatory-v2/internal/runtime"
 	"github.com/2389-research/observatory-v2/internal/store"
 )
@@ -146,6 +147,14 @@ type createBatchMember struct {
 }
 
 func (s *Server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
+	ident, ok := auth.IdentityFrom(r.Context())
+	if !ok {
+		writeError(w, http.StatusInternalServerError, Error{
+			Code: "internal", Message: "no identity in context", Retryable: false, Cause: "no_identity",
+		})
+		return
+	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
@@ -223,7 +232,7 @@ func (s *Server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	result, err := s.manager.CreateBatch(r.Context(), runtime.CreateBatchRequest{
+	result, err := s.manager.CreateBatch(r.Context(), ident.Owner, runtime.CreateBatchRequest{
 		Members:         members,
 		ReservationMode: body.ReservationMode,
 		OnFailure:       body.OnFailure,
@@ -303,5 +312,25 @@ func (s *Server) handleGetBatch(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+
+	// AT-079: cross-owner access is indistinguishable from missing.
+	ident, ok := auth.IdentityFrom(r.Context())
+	if !ok {
+		writeError(w, http.StatusInternalServerError, Error{
+			Code: "internal", Message: "no identity in context", Retryable: false, Cause: "no_identity",
+		})
+		return
+	}
+	if ident.Owner != result.Batch.Owner {
+		writeError(w, http.StatusNotFound, Error{
+			Code:        "not_found",
+			Message:     fmt.Sprintf("batch %s not found", raw),
+			Retryable:   false,
+			Cause:       "batch_not_found",
+			Remediation: []Remediation{metaRemediation()},
+		})
+		return
+	}
+
 	writeJSON(w, http.StatusOK, renderBatchResult(result))
 }

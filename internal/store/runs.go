@@ -122,10 +122,11 @@ type RunTransitionInput struct {
 	Reason, EvaluatedBy string // recorded on terminal transitions
 }
 
-// RunQuery pages runs by row_id keyset with optional VMID and Phase filters.
+// RunQuery pages runs by row_id keyset with optional VMID, Phase, and Owner filters.
 type RunQuery struct {
 	VMID  string // "" means no filter
 	Phase string // "" means no filter
+	Owner string // "" means no filter; non-empty restricts to this owner
 	After string // decimal row_id cursor, exclusive; "" means from the start
 	Limit int    // 0 = DefaultPageLimit
 }
@@ -452,6 +453,10 @@ func (s *Store) ListRuns(ctx context.Context, q RunQuery) ([]*Run, string, error
 	if q.Phase != "" {
 		where += " AND phase = ?"
 		args = append(args, q.Phase)
+	}
+	if q.Owner != "" {
+		where += " AND owner = ?"
+		args = append(args, q.Owner)
 	}
 	args = append(args, limit)
 

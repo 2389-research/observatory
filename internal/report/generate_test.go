@@ -42,7 +42,6 @@ func newManagerWithStore(t *testing.T, st *store.Store) *runtime.Manager {
 	mgr, err := runtime.NewManager(st, runtimetest.NewFake(), runtime.ManagerConfig{
 		Admission:  config.Admission{CPUOvercommitRatio: 4.0},
 		VMDefaults: config.VMDefaults{},
-		Owner:      "test",
 		Templates:  map[string]runtime.Template{},
 		Host:       runtime.HostResources{TotalMemoryMiB: 8192, CPUCores: 4, StateDiskFreeMiB: 100 * 1024},
 	})
@@ -403,7 +402,7 @@ func TestManagerWiring_TerminalRunTriggersReportOp(t *testing.T) {
 	fk := runtimetest.NewFake()
 
 	// Use NewManagerWithReportGen to wire the real generator before reconcile.
-	reportGenFn := report.MakeReportGenFn(st, "test", report.Options{})
+	reportGenFn := report.MakeReportGenFn(st, report.Options{})
 	mgr, err := runtime.NewManagerWithReportGen(st, fk, runtime.ManagerConfig{
 		Admission: config.Admission{CPUOvercommitRatio: 4.0},
 		VMDefaults: config.VMDefaults{
@@ -412,7 +411,6 @@ func TestManagerWiring_TerminalRunTriggersReportOp(t *testing.T) {
 			NetworkProfile: "transport", NetworkPolicyID: "net-pub",
 			StopGraceSeconds: 1,
 		},
-		Owner: "test",
 		Templates: map[string]runtime.Template{
 			"tmpl-test": {
 				TemplateID:       "tmpl-test",
@@ -435,7 +433,7 @@ func TestManagerWiring_TerminalRunTriggersReportOp(t *testing.T) {
 	t.Cleanup(func() { mgr.Close() })
 
 	// Create a VM and wait for it to reach running.
-	vm, _, _, err := mgr.CreateVM(t.Context(), runtime.CreateRequest{
+	vm, _, _, err := mgr.CreateVM(t.Context(), "test", runtime.CreateRequest{
 		Name: "wiring-test-vm", TemplateID: "tmpl-test",
 	})
 	if err != nil {
@@ -494,11 +492,10 @@ func TestManagerWiring_ReconcileReEnqueues(t *testing.T) {
 		t.Fatal("expected no report before manager starts")
 	}
 
-	reportGenFn := report.MakeReportGenFn(st, "test", report.Options{})
+	reportGenFn := report.MakeReportGenFn(st, report.Options{})
 	mgr, err := runtime.NewManagerWithReportGen(st, runtimetest.NewFake(), runtime.ManagerConfig{
 		Admission:  config.Admission{CPUOvercommitRatio: 4.0},
 		VMDefaults: config.VMDefaults{},
-		Owner:      "test",
 		Templates:  map[string]runtime.Template{},
 		Host:       runtime.HostResources{TotalMemoryMiB: 8192, CPUCores: 4, StateDiskFreeMiB: 100 * 1024},
 	}, reportGenFn)
@@ -543,11 +540,10 @@ func TestManagerWiring_ReconcileGuard(t *testing.T) {
 
 	// Create manager — reconcile fires. The guard must see the running op and skip
 	// re-enqueueing, leaving exactly one report op for this run.
-	reportGenFn := report.MakeReportGenFn(st, "test", report.Options{})
+	reportGenFn := report.MakeReportGenFn(st, report.Options{})
 	mgr, err := runtime.NewManagerWithReportGen(st, runtimetest.NewFake(), runtime.ManagerConfig{
 		Admission:  config.Admission{CPUOvercommitRatio: 4.0},
 		VMDefaults: config.VMDefaults{},
-		Owner:      "test",
 		Templates:  map[string]runtime.Template{},
 		Host:       runtime.HostResources{TotalMemoryMiB: 8192, CPUCores: 4, StateDiskFreeMiB: 100 * 1024},
 	}, reportGenFn)

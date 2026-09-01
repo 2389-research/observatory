@@ -311,10 +311,11 @@ var ErrNotTerminal = errors.New("run is not in a terminal phase")
 
 // MakeReportGenFn returns a func(runID string) that is safe to assign to
 // manager.reportGen. When called, it creates a run.report_generate operation,
-// generates the report, stores it, and finalises the operation. This function
-// is the real generator — it must never be called in tests that use the fake
-// runtime in a "served mode" (it operates over a real store). See SPEC §18.
-func MakeReportGenFn(st *store.Store, owner string, opts Options) func(runID string) {
+// generates the report, stores it, and finalises the operation. The operation
+// is attributed to the run's stored owner (ruling A10). This function is the
+// real generator — it must never be called in tests that use the fake runtime
+// in a "served mode" (it operates over a real store). See SPEC §18.
+func MakeReportGenFn(st *store.Store, opts Options) func(runID string) {
 	return func(runID string) {
 		ctx := context.Background()
 
@@ -331,8 +332,8 @@ func MakeReportGenFn(st *store.Store, owner string, opts Options) func(runID str
 			return
 		}
 
-		// Create the operation row.
-		opID, err := st.InsertReportOperation(ctx, owner, run.VMID, runID)
+		// Create the operation row. Owner from the run's stored record (ruling A10).
+		opID, err := st.InsertReportOperation(ctx, run.Owner, run.VMID, runID)
 		if err != nil {
 			// Can't record the op — skip generation; reconcile will retry.
 			return

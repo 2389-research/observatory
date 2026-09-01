@@ -10,12 +10,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/2389-research/observatory-v2/internal/auth"
 	"github.com/2389-research/observatory-v2/internal/store"
 )
-
-// operatorAuthor is the identity trusted ingress assigns to annotations until
-// the auth boundary lands (P5). Never taken from the request body.
-const operatorAuthor = "local_operator"
 
 // wireAttention is the attention item exactly as SPEC §12.7 shows it. Count is
 // a decimal string like every counter that can grow with the event stream.
@@ -366,6 +363,15 @@ func renderAnnotation(a *store.Annotation) wireAnnotation {
 }
 
 func (s *Server) handleAnnotationsCreate(w http.ResponseWriter, r *http.Request) {
+	// Author is always the authenticated identity's owner — never taken from the body.
+	ident, ok := auth.IdentityFrom(r.Context())
+	if !ok {
+		writeError(w, http.StatusInternalServerError, Error{
+			Code: "internal", Message: "no identity in context", Retryable: false, Cause: "no_identity",
+		})
+		return
+	}
+
 	var body struct {
 		TargetRef string            `json:"target_ref"`
 		Text      string            `json:"text"`
@@ -397,7 +403,7 @@ func (s *Server) handleAnnotationsCreate(w http.ResponseWriter, r *http.Request)
 
 	ann, err := s.store.CreateAnnotation(r.Context(), store.AnnotationInput{
 		TargetRef: body.TargetRef,
-		Author:    operatorAuthor,
+		Author:    ident.Owner,
 		Text:      body.Text,
 		Tags:      body.Tags,
 	})

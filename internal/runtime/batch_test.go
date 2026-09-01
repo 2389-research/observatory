@@ -96,7 +96,7 @@ func TestBatchOnFailureDefaultsKeepSuccessful(t *testing.T) {
 	mgr := newBatchManager(t, st, fk, 2)
 
 	req := batchReq("", "vm-default-a")
-	result, err := mgr.CreateBatch(t.Context(), req)
+	result, err := mgr.CreateBatch(t.Context(), "local_operator", req)
 	if err != nil {
 		t.Fatalf("CreateBatch with empty on_failure: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestBatchStopSuccessfulStopsSiblingsAndQueued(t *testing.T) {
 
 	fk.FailCall("Launch", 1, errors.New("injected launch failure"))
 
-	result, err := mgr.CreateBatch(t.Context(), batchReq("stop_successful", "vm-a", "vm-b", "vm-c"))
+	result, err := mgr.CreateBatch(t.Context(), "local_operator", batchReq("stop_successful", "vm-a", "vm-b", "vm-c"))
 	if err != nil {
 		t.Fatalf("CreateBatch: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestBatchStopSuccessfulPreservesSucceededOp(t *testing.T) {
 
 	fk.FailCall("Launch", 2, errors.New("injected launch failure"))
 
-	result, err := mgr.CreateBatch(t.Context(), batchReq("stop_successful", "vm-a", "vm-b"))
+	result, err := mgr.CreateBatch(t.Context(), "local_operator", batchReq("stop_successful", "vm-a", "vm-b"))
 	if err != nil {
 		t.Fatalf("CreateBatch: %v", err)
 	}
@@ -198,7 +198,7 @@ func TestBatchKeepSuccessfulLeavesSurvivors(t *testing.T) {
 
 	fk.FailCall("Launch", 2, errors.New("injected launch failure"))
 
-	result, err := mgr.CreateBatch(t.Context(), batchReq("keep_successful", "vm-a", "vm-b"))
+	result, err := mgr.CreateBatch(t.Context(), "local_operator", batchReq("keep_successful", "vm-a", "vm-b"))
 	if err != nil {
 		t.Fatalf("CreateBatch: %v", err)
 	}
@@ -234,12 +234,12 @@ func TestBatchManagerReplayNoRelaunch(t *testing.T) {
 	req := batchReq("keep_successful", "vm-a", "vm-b")
 	req.IdempotencyKey = &ikey
 
-	first, err := mgr.CreateBatch(t.Context(), req)
+	first, err := mgr.CreateBatch(t.Context(), "local_operator", req)
 	if err != nil {
 		t.Fatalf("CreateBatch: %v", err)
 	}
 
-	second, err := mgr.CreateBatch(t.Context(), req)
+	second, err := mgr.CreateBatch(t.Context(), "local_operator", req)
 	if err != nil {
 		t.Fatalf("CreateBatch replay: %v", err)
 	}

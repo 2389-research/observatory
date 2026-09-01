@@ -59,7 +59,6 @@ func newTemplateServer(t *testing.T) (*httptest.Server, *store.Store, *runtimete
 			RootDiskMiB:      4096,
 			WorkspaceDiskMiB: 8192,
 		},
-		Owner:     "local_operator",
 		Templates: map[string]runtime.Template{testTemplateDef.TemplateID: testTemplateDef},
 		Host:      runtime.HostResources{TotalMemoryMiB: 8192, CPUCores: 8, StateDiskFreeMiB: 100 * 1024},
 	})
@@ -375,7 +374,6 @@ func TestCreateVMAdmissionRefusal(t *testing.T) {
 			MaxParallelProvisions: 1,
 		},
 		VMDefaults: config.VMDefaults{MemoryMiB: 512, VCPUCount: 1, RootDiskMiB: 1024, WorkspaceDiskMiB: 1024},
-		Owner:      "local_operator",
 		Templates:  map[string]runtime.Template{testTemplateDef.TemplateID: testTemplateDef},
 		Host:       runtime.HostResources{TotalMemoryMiB: 512, CPUCores: 4, StateDiskFreeMiB: 100 * 1024},
 	})

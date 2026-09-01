@@ -57,7 +57,6 @@ func newRunCLIServer(t *testing.T) (*httptest.Server, *runtimetest.Fake, *store.
 			RootDiskMiB:      4096,
 			WorkspaceDiskMiB: 8192,
 		},
-		Owner:     "local_operator",
 		Templates: map[string]runtime.Template{runCLITestTemplate.TemplateID: runCLITestTemplate},
 		Host:      runtime.HostResources{TotalMemoryMiB: 8192, CPUCores: 8, StateDiskFreeMiB: 100 * 1024},
 	})

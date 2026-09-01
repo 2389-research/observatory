@@ -350,7 +350,6 @@ func TestSituationResponseByteBound(t *testing.T) {
 	mgr, err := runtime.NewManager(st, runtimetest.NewFake(), runtime.ManagerConfig{
 		Admission:  config.Admission{},
 		VMDefaults: config.VMDefaults{},
-		Owner:      "local_operator",
 		Templates:  map[string]runtime.Template{},
 		Host:       runtime.HostResources{TotalMemoryMiB: 8192, CPUCores: 4, StateDiskFreeMiB: 100 * 1024},
 	})

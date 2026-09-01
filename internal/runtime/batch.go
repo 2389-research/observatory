@@ -55,9 +55,10 @@ type batchLaunchMember struct {
 
 // CreateBatch validates each member, applies defaults, and calls the store to
 // atomically record the batch. Admitted members are launched asynchronously.
+// owner is the authenticated caller's identity (never from a request body).
 // AT-001: runtime Availability is checked first; nothing is persisted on failure.
 // AT-015: idempotent replay returns the original batch without re-running admission.
-func (m *Manager) CreateBatch(ctx context.Context, req CreateBatchRequest) (*store.CreateVMBatchResult, error) {
+func (m *Manager) CreateBatch(ctx context.Context, owner string, req CreateBatchRequest) (*store.CreateVMBatchResult, error) {
 	// AT-001: availability first.
 	if err := m.rt.Availability(ctx); err != nil {
 		return nil, fmt.Errorf("runtime not available: %w", err)
@@ -126,7 +127,7 @@ func (m *Manager) CreateBatch(ctx context.Context, req CreateBatchRequest) (*sto
 
 	// Build store callbacks.
 	var storeIn store.CreateVMBatchInput
-	storeIn.Owner = m.cfg.Owner
+	storeIn.Owner = owner
 	storeIn.IdempotencyKey = req.IdempotencyKey
 	storeIn.RequestHash = requestHash
 	storeIn.ReservationMode = req.ReservationMode

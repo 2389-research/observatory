@@ -601,6 +601,44 @@ func TestVMListKeysetAndFilter(t *testing.T) {
 	}
 }
 
+func TestListVMsFilterByOwner(t *testing.T) {
+	st := openStore(t)
+	// Create two VMs with different owners directly.
+	vmAlice := testUUID(101)
+	vmBob := testUUID(102)
+	for _, tc := range []struct{ vmID, name, owner string }{
+		{vmAlice, "alice-vm", "alice"},
+		{vmBob, "bob-vm", "bob"},
+	} {
+		_, _, _, err := st.CreateVMWithOperation(t.Context(), store.CreateVMInput{
+			VMID: tc.vmID, Name: tc.name, Owner: tc.owner,
+			TemplateID: "tmpl-001", TemplateDigest: "sha256:abc",
+			VCPUCount: 1, MemoryMiB: 512, RootDiskMiB: 4096, WorkspaceDiskMiB: 8192,
+			MemoryTotalMiB: 1280, NetworkProfile: "transport", NetworkPolicyID: "net",
+			Labels: map[string]string{}, Kind: "vm.create",
+			RequestHash: strings.Repeat(tc.owner[:1], 64),
+			Admit:       func(store.ReservationTotals) error { return nil },
+		})
+		if err != nil {
+			t.Fatalf("create %s: %v", tc.owner, err)
+		}
+	}
+	alice, err := st.ListVMs(t.Context(), store.VMQuery{Owner: "alice"})
+	if err != nil {
+		t.Fatalf("ListVMs alice: %v", err)
+	}
+	if len(alice) != 1 || alice[0].Owner != "alice" {
+		t.Errorf("owner=alice: got %d VMs", len(alice))
+	}
+	bob, err := st.ListVMs(t.Context(), store.VMQuery{Owner: "bob"})
+	if err != nil {
+		t.Fatalf("ListVMs bob: %v", err)
+	}
+	if len(bob) != 1 || bob[0].Owner != "bob" {
+		t.Errorf("owner=bob: got %d VMs", len(bob))
+	}
+}
+
 func TestVMGetUnknown(t *testing.T) {
 	st := openStore(t)
 	_, err := st.GetVM(t.Context(), testUUID(99))

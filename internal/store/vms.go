@@ -235,11 +235,12 @@ type OperationUpdate struct {
 	ErrorMessage *string
 }
 
-// VMQuery pages VMs by row_id keyset with an optional state filter.
+// VMQuery pages VMs by row_id keyset with optional state and owner filters.
 type VMQuery struct {
 	After  int64    // row_id cursor; 0 = from the start
 	Limit  int      // 0 = DefaultPageLimit
 	States []string // nil/empty = all states
+	Owner  string   // non-empty: restrict to this owner
 }
 
 // --- CreateVMWithOperation ---
@@ -776,6 +777,10 @@ func (s *Store) ListVMs(ctx context.Context, q VMQuery) ([]*VM, error) {
 		for _, s := range q.States {
 			args = append(args, s)
 		}
+	}
+	if q.Owner != "" {
+		where += " AND owner = ?"
+		args = append(args, q.Owner)
 	}
 	args = append(args, limit)
 

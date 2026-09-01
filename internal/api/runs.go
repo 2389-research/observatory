@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/2389-research/observatory-v2/internal/auth"
 	"github.com/2389-research/observatory-v2/internal/runtime"
 	"github.com/2389-research/observatory-v2/internal/store"
 )
@@ -240,6 +241,42 @@ func validateRunBlockHTTP(w http.ResponseWriter, rb *runBlockBody) bool {
 	return true
 }
 
+// resourceOwnerRun checks that the run's stored owner matches the caller's
+// authenticated identity. When they differ it writes the standard not_found 404
+// (same body as an unknown run ID — no existence oracle) and returns false. The
+// caller must return immediately without any further action or store write.
+//
+// This produces the same response as ErrRunNotFound so a cross-owner request is
+// indistinguishable from a missing resource (AT-079).
+func (s *Server) resourceOwnerRun(w http.ResponseWriter, r *http.Request, runOwner string) bool {
+	ident, ok := auth.IdentityFrom(r.Context())
+	if !ok {
+		writeError(w, http.StatusInternalServerError, Error{
+			Code:      "internal",
+			Message:   "no identity in context",
+			Retryable: false,
+			Cause:     "no_identity",
+		})
+		return false
+	}
+	if ident.Owner != runOwner {
+		// Deliberately indistinguishable from "not found": AT-079.
+		writeError(w, http.StatusNotFound, Error{
+			Code:      "not_found",
+			Message:   "run not found",
+			Retryable: false,
+			Cause:     "run_unknown",
+			Remediation: []Remediation{{
+				Action:    "get",
+				Params:    map[string]any{"path": basePath + "/runs"},
+				Rationale: "list all runs",
+			}},
+		})
+		return false
+	}
+	return true
+}
+
 // writeRunError maps run/store sentinel errors to API error shapes.
 func writeRunError(w http.ResponseWriter, err error) {
 	// 404: run not found.
@@ -321,6 +358,26 @@ func writeRunError(w http.ResponseWriter, err error) {
 // handleCreateRunForVM handles POST /vms/{id}/runs.
 func (s *Server) handleCreateRunForVM(w http.ResponseWriter, r *http.Request) {
 	vmID := r.PathValue("id")
+
+	// Owner comes from the authenticated identity; check VM ownership before creating.
+	ident, ok := auth.IdentityFrom(r.Context())
+	if !ok {
+		writeError(w, http.StatusInternalServerError, Error{
+			Code: "internal", Message: "no identity in context", Retryable: false, Cause: "no_identity",
+		})
+		return
+	}
+
+	// Fetch the VM first to verify ownership (AT-079: 404 is indistinguishable from missing).
+	vm, vmErr := s.store.GetVM(r.Context(), vmID)
+	if vmErr != nil {
+		writeVMError(w, vmErr)
+		return
+	}
+	if !s.resourceOwner(w, r, vm.Owner) {
+		return
+	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
@@ -353,7 +410,7 @@ func (s *Server) handleCreateRunForVM(w http.ResponseWriter, r *http.Request) {
 
 	run, isReplay, err := s.manager.CreateRun(r.Context(), runtime.RunRequest{
 		VMID:           vmID,
-		Owner:          s.manager.Owner(),
+		Owner:          ident.Owner,
 		Goal:           body.Goal,
 		CriteriaType:   body.SuccessCriteria.Type,
 		OnCompletion:   body.OnCompletion,
@@ -394,7 +451,15 @@ func (s *Server) handleCreateRunForVM(w http.ResponseWriter, r *http.Request) {
 // handleListRuns handles GET /runs.
 func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 	params := r.URL.Query()
-	q := store.RunQuery{}
+
+	ident, ok := auth.IdentityFrom(r.Context())
+	if !ok {
+		writeError(w, http.StatusInternalServerError, Error{
+			Code: "internal", Message: "no identity in context", Retryable: false, Cause: "no_identity",
+		})
+		return
+	}
+	q := store.RunQuery{Owner: ident.Owner}
 
 	if raw := params.Get("vm_id"); raw != "" {
 		q.VMID = raw
@@ -476,6 +541,9 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		writeRunError(w, err)
 		return
 	}
+	if !s.resourceOwnerRun(w, r, run.Owner) {
+		return
+	}
 	writeJSON(w, http.StatusOK, renderRun(run))
 }
 
@@ -490,6 +558,17 @@ type concludeRunBody struct {
 // handleConcludeRun handles POST /runs/{id}/conclude.
 func (s *Server) handleConcludeRun(w http.ResponseWriter, r *http.Request) {
 	runID := r.PathValue("id")
+
+	// Ownership check: fetch run first (AT-079: same 404 as unknown run).
+	currentRun, fetchErr := s.store.GetRun(r.Context(), runID)
+	if fetchErr != nil {
+		writeRunError(w, fetchErr)
+		return
+	}
+	if !s.resourceOwnerRun(w, r, currentRun.Owner) {
+		return
+	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
@@ -527,8 +606,7 @@ func (s *Server) handleConcludeRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// We need the current run to populate details on error responses.
-	currentRun, _ := s.store.GetRun(r.Context(), runID)
+	// currentRun was already fetched above for the ownership check.
 
 	run, err := s.manager.ConcludeRun(r.Context(), runID, body.Verdict, body.Abort, body.Reason)
 	if err != nil {
@@ -576,10 +654,13 @@ func (s *Server) handleGetRunReport(w http.ResponseWriter, r *http.Request) {
 	runID := r.PathValue("id")
 	ctx := r.Context()
 
-	// Verify the run exists before checking the report.
+	// Verify the run exists and check ownership before checking the report.
 	run, err := s.store.GetRun(ctx, runID)
 	if err != nil {
 		writeRunError(w, err)
+		return
+	}
+	if !s.resourceOwnerRun(w, r, run.Owner) {
 		return
 	}
 

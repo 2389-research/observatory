@@ -69,7 +69,6 @@ var validActions = []string{"start", "pause", "resume", "stop", "force_stop"}
 type ManagerConfig struct {
 	Admission  config.Admission
 	VMDefaults config.VMDefaults
-	Owner      string // "local_operator" until P5 auth lands
 	Templates  map[string]Template
 	Host       HostResources
 }
@@ -178,10 +177,6 @@ func (m *Manager) SetReportGen(fn func(runID string)) {
 	m.reportGen = fn
 }
 
-// Owner returns the configured owner string used when creating runs and other
-// resources on behalf of the operator.
-func (m *Manager) Owner() string { return m.cfg.Owner }
-
 // Capacity returns the current usable/reserved/free view of host resources.
 func (m *Manager) Capacity(ctx context.Context) (CapacitySnapshot, error) {
 	totals, err := m.st.ReservationTotals(ctx)
@@ -222,9 +217,10 @@ type CreateRequest struct {
 }
 
 // CreateVM validates and creates a VM, then asynchronously provisions it.
+// owner is the authenticated caller's identity (never from a request body).
 // On idempotent replay the bool is true and the stored result is returned
 // without re-provisioning.
-func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*store.VM, *store.Operation, bool, error) {
+func (m *Manager) CreateVM(ctx context.Context, owner string, req CreateRequest) (*store.VM, *store.Operation, bool, error) {
 	// AT-001: check runtime availability first; nothing persisted on failure.
 	if err := m.rt.Availability(ctx); err != nil {
 		return nil, nil, false, fmt.Errorf("runtime not available: %w", err)
@@ -309,7 +305,7 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*store.VM, *
 	vm, op, replayed, err := m.st.CreateVMWithOperation(ctx, store.CreateVMInput{
 		VMID:             vmID,
 		Name:             req.Name,
-		Owner:            m.cfg.Owner,
+		Owner:            owner,
 		TemplateID:       tpl.TemplateID,
 		TemplateDigest:   tpl.Digest,
 		VCPUCount:        vcpu,
@@ -487,8 +483,10 @@ func (m *Manager) Action(ctx context.Context, vmID, action string, expectedRevis
 		return nil, nil, err
 	}
 
+	// Attribute the action to the VM's stored owner (ruling A10: system-initiated
+	// operations carry the affected resource's owner).
 	opID, err := m.st.InsertActionOperation(ctx, store.ActionOperationInput{
-		Owner:       m.cfg.Owner,
+		Owner:       vm.Owner,
 		VMID:        vmID,
 		Phase:       action,
 		RequestHash: fmt.Sprintf("%s:%s:%d", action, vmID, vm.Revision),

@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/2389-research/observatory-v2/internal/auth"
 	"github.com/2389-research/observatory-v2/internal/runtime"
 	"github.com/2389-research/observatory-v2/internal/store"
 )
@@ -424,6 +425,42 @@ func writeVMError(w http.ResponseWriter, err error) {
 	})
 }
 
+// resourceOwner checks that the resource's stored owner matches the caller's
+// authenticated identity. When they differ it writes the standard not_found 404
+// (same body as an unknown ID — no existence oracle) and returns false. The
+// caller must return immediately without any further action or store write.
+//
+// This deliberately produces the same response as ErrVMUnknown / ErrRunNotFound
+// so a cross-owner request is indistinguishable from a missing resource (AT-079).
+func (s *Server) resourceOwner(w http.ResponseWriter, r *http.Request, resourceOwner string) bool {
+	ident, ok := auth.IdentityFrom(r.Context())
+	if !ok {
+		writeError(w, http.StatusInternalServerError, Error{
+			Code:      "internal",
+			Message:   "no identity in context",
+			Retryable: false,
+			Cause:     "no_identity",
+		})
+		return false
+	}
+	if ident.Owner != resourceOwner {
+		// Deliberately indistinguishable from "not found": AT-079.
+		writeError(w, http.StatusNotFound, Error{
+			Code:      "not_found",
+			Message:   "VM not found",
+			Retryable: false,
+			Cause:     "vm_unknown",
+			Remediation: []Remediation{{
+				Action:    "get",
+				Params:    map[string]any{"path": basePath + "/vms"},
+				Rationale: "list all VMs",
+			}},
+		})
+		return false
+	}
+	return true
+}
+
 // --- handlers ---
 
 func (s *Server) handleHostStatus(w http.ResponseWriter, r *http.Request) {
@@ -519,6 +556,15 @@ type createVMBody struct {
 }
 
 func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
+	// Owner comes from the authenticated identity; never from the request body.
+	ident, ok := auth.IdentityFrom(r.Context())
+	if !ok {
+		writeError(w, http.StatusInternalServerError, Error{
+			Code: "internal", Message: "no identity in context", Retryable: false, Cause: "no_identity",
+		})
+		return
+	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
@@ -558,7 +604,7 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 			ProgressEvents: body.Run.ProgressEvents,
 		}
 	}
-	vm, op, replayed, err := s.manager.CreateVM(r.Context(), req)
+	vm, op, replayed, err := s.manager.CreateVM(r.Context(), ident.Owner, req)
 	if err != nil {
 		writeVMError(w, err)
 		return
@@ -577,7 +623,14 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListVMs(w http.ResponseWriter, r *http.Request) {
 	params := r.URL.Query()
-	q := store.VMQuery{}
+	ident, ok := auth.IdentityFrom(r.Context())
+	if !ok {
+		writeError(w, http.StatusInternalServerError, Error{
+			Code: "internal", Message: "no identity in context", Retryable: false, Cause: "no_identity",
+		})
+		return
+	}
+	q := store.VMQuery{Owner: ident.Owner}
 
 	if raw := params.Get("after"); raw != "" {
 		v, err := strconv.ParseInt(raw, 10, 64)
@@ -643,6 +696,9 @@ func (s *Server) handleGetVM(w http.ResponseWriter, r *http.Request) {
 		writeVMError(w, err)
 		return
 	}
+	if !s.resourceOwner(w, r, vm.Owner) {
+		return
+	}
 	writeJSON(w, http.StatusOK, renderVM(vm))
 }
 
@@ -653,6 +709,18 @@ type vmActionBody struct {
 
 func (s *Server) handleVMAction(w http.ResponseWriter, r *http.Request) {
 	vmID := r.PathValue("id")
+
+	// Fetch first, then check ownership — no action operation is created on the
+	// denied path (AT-079: no side effects).
+	vm, err := s.store.GetVM(r.Context(), vmID)
+	if err != nil {
+		writeVMError(w, err)
+		return
+	}
+	if !s.resourceOwner(w, r, vm.Owner) {
+		return
+	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
@@ -693,19 +761,30 @@ func (s *Server) handleVMAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	vm, op, err := s.manager.Action(r.Context(), vmID, body.Action, &rev)
+	updVM, op, err := s.manager.Action(r.Context(), vmID, body.Action, &rev)
 	if err != nil {
 		writeVMError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"vm":        renderVM(vm),
+		"vm":        renderVM(updVM),
 		"operation": renderOperation(op),
 	})
 }
 
 func (s *Server) handleDeleteVM(w http.ResponseWriter, r *http.Request) {
 	vmID := r.PathValue("id")
+
+	// Fetch first, then check ownership — no store mutation on the denied path.
+	existingVM, err := s.store.GetVM(r.Context(), vmID)
+	if err != nil {
+		writeVMError(w, err)
+		return
+	}
+	if !s.resourceOwner(w, r, existingVM.Owner) {
+		return
+	}
+
 	params := r.URL.Query()
 	force := params.Get("force") == "true"
 
@@ -747,6 +826,28 @@ func (s *Server) handleGetOperation(w http.ResponseWriter, r *http.Request) {
 	op, err := s.store.GetOperation(r.Context(), id)
 	if err != nil {
 		writeVMError(w, err)
+		return
+	}
+	// Operation ownership check post-fetch (AT-079: indistinguishable from missing).
+	ident, identOK := auth.IdentityFrom(r.Context())
+	if !identOK {
+		writeError(w, http.StatusInternalServerError, Error{
+			Code: "internal", Message: "no identity in context", Retryable: false, Cause: "no_identity",
+		})
+		return
+	}
+	if op.Owner != ident.Owner {
+		writeError(w, http.StatusNotFound, Error{
+			Code:      "not_found",
+			Message:   "operation not found",
+			Retryable: false,
+			Cause:     "operation_unknown",
+			Remediation: []Remediation{{
+				Action:    "get",
+				Params:    map[string]any{"path": basePath + "/operations/{id}"},
+				Rationale: "the operation ID is in the vm.create or vm.action response",
+			}},
+		})
 		return
 	}
 	writeJSON(w, http.StatusOK, renderOperation(op))

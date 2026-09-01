@@ -58,7 +58,7 @@ func waitForVMState(t *testing.T, st *store.Store, vmID, wantState string) *stor
 // launchedVM creates a VM and waits for it to reach running state.
 func launchedVM(t *testing.T, st *store.Store, mgr *runtime.Manager, name string) *store.VM {
 	t.Helper()
-	vm, _, _, err := mgr.CreateVM(t.Context(), createReq(name))
+	vm, _, _, err := mgr.CreateVM(t.Context(), "local_operator", createReq(name))
 	if err != nil {
 		t.Fatalf("CreateVM %s: %v", name, err)
 	}
@@ -113,7 +113,7 @@ func TestRunCreateStandaloneErrorsOnNonRunningVM(t *testing.T) {
 	mgr := newManager(t, st, fk)
 
 	// Create a VM but don't wait for it — it's in provisioning.
-	vm, _, _, err := mgr.CreateVM(t.Context(), createReq("run-create-provisioning"))
+	vm, _, _, err := mgr.CreateVM(t.Context(), "local_operator", createReq("run-create-provisioning"))
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestRunLaunchAttachPendingThenRunning(t *testing.T) {
 
 	// Create a VM with a launch-attached run.
 	req := createReq("launch-attach-vm")
-	vm, _, _, err := mgr.CreateVM(t.Context(), req)
+	vm, _, _, err := mgr.CreateVM(t.Context(), "local_operator", req)
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestRunLaunchFailConcludesAttachedRunInconclusive(t *testing.T) {
 	}
 	defer mgr.Close()
 
-	vm, _, _, err := mgr.CreateVM(t.Context(), createReq("launch-fail-vm"))
+	vm, _, _, err := mgr.CreateVM(t.Context(), "local_operator", createReq("launch-fail-vm"))
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
@@ -948,7 +948,7 @@ func TestCreateVMWithRunAttachmentHook(t *testing.T) {
 			OnCompletion: "keep_running",
 		},
 	}
-	vm, _, _, err := mgr.CreateVM(t.Context(), req)
+	vm, _, _, err := mgr.CreateVM(t.Context(), "local_operator", req)
 	if err != nil {
 		t.Fatalf("CreateVM with attachment: %v", err)
 	}
@@ -1001,7 +1001,7 @@ func TestCreateVMWithRunAttachmentLaunchFail(t *testing.T) {
 			OnCompletion: "keep_running",
 		},
 	}
-	vm, _, _, err := mgr.CreateVM(t.Context(), req)
+	vm, _, _, err := mgr.CreateVM(t.Context(), "local_operator", req)
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}

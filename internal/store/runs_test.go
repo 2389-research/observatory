@@ -669,6 +669,50 @@ func TestListRunsFilterByVMAndPhase(t *testing.T) {
 	}
 }
 
+func TestListRunsFilterByOwner(t *testing.T) {
+	st := openStore(t)
+	vmA := mustCreateRunVM(t, st)
+	vmB := mustCreateRunVM(t, st)
+
+	inA := baseRunInput(vmA)
+	inA.RequestHash = strings.Repeat("a", 64)
+	inA.Owner = "alice"
+	if _, _, err := st.CreateRun(t.Context(), inA); err != nil {
+		t.Fatalf("run alice: %v", err)
+	}
+
+	inB := baseRunInput(vmB)
+	inB.RequestHash = strings.Repeat("b0", 32)
+	inB.Owner = "bob"
+	if _, _, err := st.CreateRun(t.Context(), inB); err != nil {
+		t.Fatalf("run bob: %v", err)
+	}
+
+	runsAlice, _, err := st.ListRuns(t.Context(), store.RunQuery{Owner: "alice"})
+	if err != nil {
+		t.Fatalf("ListRuns alice: %v", err)
+	}
+	if len(runsAlice) != 1 || runsAlice[0].Owner != "alice" {
+		t.Errorf("owner=alice filter: got %d runs, owners %v", len(runsAlice), ownersOf(runsAlice))
+	}
+
+	runsBob, _, err := st.ListRuns(t.Context(), store.RunQuery{Owner: "bob"})
+	if err != nil {
+		t.Fatalf("ListRuns bob: %v", err)
+	}
+	if len(runsBob) != 1 || runsBob[0].Owner != "bob" {
+		t.Errorf("owner=bob filter: got %d runs, owners %v", len(runsBob), ownersOf(runsBob))
+	}
+}
+
+func ownersOf(runs []*store.Run) []string {
+	out := make([]string, len(runs))
+	for i, r := range runs {
+		out[i] = r.Owner
+	}
+	return out
+}
+
 func TestListRunsInPhases(t *testing.T) {
 	st := openStore(t)
 	vmID := mustCreateRunVM(t, st)

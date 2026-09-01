@@ -49,7 +49,6 @@ func newRunServer(t *testing.T) (string, *store.Store, *runtimetest.Fake) {
 			RootDiskMiB:      4096,
 			WorkspaceDiskMiB: 8192,
 		},
-		Owner:     "local_operator",
 		Templates: map[string]runtime.Template{testTemplateDef.TemplateID: testTemplateDef},
 		Host:      runtime.HostResources{TotalMemoryMiB: 8192, CPUCores: 8, StateDiskFreeMiB: 100 * 1024},
 	})
@@ -893,7 +892,6 @@ func newRunServerWithReportGen(t *testing.T) (string, *store.Store, *runtimetest
 			RootDiskMiB:      4096,
 			WorkspaceDiskMiB: 8192,
 		},
-		Owner:     "local_operator",
 		Templates: map[string]runtime.Template{testTemplateDef.TemplateID: testTemplateDef},
 		Host:      runtime.HostResources{TotalMemoryMiB: 8192, CPUCores: 8, StateDiskFreeMiB: 100 * 1024},
 	}, func(runID string) {

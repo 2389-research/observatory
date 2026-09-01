@@ -58,7 +58,6 @@ func newAuthServer(t *testing.T) (*httptest.Server, *store.Store, *auth.Store) {
 	mgr, err := runtime.NewManager(st, runtimetest.NewFake(), runtime.ManagerConfig{
 		Admission:  config.Admission{},
 		VMDefaults: config.VMDefaults{},
-		Owner:      testOperator,
 		Templates:  map[string]runtime.Template{},
 		Host:       runtime.HostResources{TotalMemoryMiB: 8192, CPUCores: 4, StateDiskFreeMiB: 100 * 1024},
 	})
@@ -471,7 +470,6 @@ func TestAuthDisabledInjectsLocalOperator(t *testing.T) {
 	mgr, err := runtime.NewManager(st, runtimetest.NewFake(), runtime.ManagerConfig{
 		Admission:  config.Admission{},
 		VMDefaults: config.VMDefaults{},
-		Owner:      testOperator,
 		Templates:  map[string]runtime.Template{},
 		Host:       runtime.HostResources{TotalMemoryMiB: 8192, CPUCores: 4, StateDiskFreeMiB: 100 * 1024},
 	})
@@ -892,7 +890,6 @@ func TestTokenEndpointsDisabled(t *testing.T) {
 	mgr, err := runtime.NewManager(st, runtimetest.NewFake(), runtime.ManagerConfig{
 		Admission:  config.Admission{},
 		VMDefaults: config.VMDefaults{},
-		Owner:      testOperator,
 		Templates:  map[string]runtime.Template{},
 		Host:       runtime.HostResources{TotalMemoryMiB: 8192, CPUCores: 4, StateDiskFreeMiB: 100 * 1024},
 	})
