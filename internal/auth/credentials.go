@@ -83,9 +83,15 @@ func (p passwordHash) verify(password string) bool {
 
 // InitStore creates the credential directory (0700) and writes an operator
 // record. It fails with ErrAlreadyInitialized if operator.json already exists.
+// If the directory already exists with wider permissions, InitStore tightens
+// it to 0700 before proceeding.
 func InitStore(dir, username, password string) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("create credential dir: %w", err)
+	}
+	// MkdirAll does not chmod an existing directory; enforce 0700 explicitly.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("secure credential dir: %w", err)
 	}
 	opPath := filepath.Join(dir, operatorFile)
 	if _, err := os.Stat(opPath); err == nil {
@@ -111,12 +117,21 @@ func InitStore(dir, username, password string) (*Store, error) {
 	return &Store{dir: dir}, nil
 }
 
-// OpenStore opens an existing credential store. It fails if operator.json
-// is absent — use InitStore to create one.
+// OpenStore opens an existing credential store. It fails if operator.json is
+// absent (use InitStore to create one) or if the directory has group/other
+// access bits set (required mode is 0700; the error names the path so the
+// daemon can surface it as a remediable config problem).
 func OpenStore(dir string) (*Store, error) {
+	di, err := os.Stat(dir)
+	if err != nil {
+		return nil, fmt.Errorf("credential store not initialized at %s: %w", dir, err)
+	}
+	if di.Mode().Perm()&0o077 != 0 {
+		return nil, fmt.Errorf("credential dir %s has insecure permissions %o (required: 0700); run: chmod 700 %s", dir, di.Mode().Perm(), dir)
+	}
 	opPath := filepath.Join(dir, operatorFile)
 	if _, err := os.Stat(opPath); err != nil {
-		return nil, fmt.Errorf("credential store not initialized: %w", err)
+		return nil, fmt.Errorf("credential store not initialized at %s: %w", dir, err)
 	}
 	return &Store{dir: dir}, nil
 }

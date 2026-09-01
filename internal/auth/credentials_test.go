@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -56,5 +57,39 @@ func TestStorePermissions(t *testing.T) {
 	fi, _ := os.Stat(filepath.Join(dir, "operator.json"))
 	if fi.Mode().Perm() != 0o600 {
 		t.Fatalf("operator.json mode = %o, want 600", fi.Mode().Perm())
+	}
+}
+
+func TestInitStoreTightensExistingDir(t *testing.T) {
+	// Pre-create the dir with permissive 0755; InitStore must tighten it.
+	dir := filepath.Join(t.TempDir(), "auth")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InitStore(dir, "op", "longenoughpw"); err != nil {
+		t.Fatalf("InitStore: %v", err)
+	}
+	di, _ := os.Stat(dir)
+	if di.Mode().Perm() != 0o700 {
+		t.Fatalf("dir mode after InitStore = %o, want 700", di.Mode().Perm())
+	}
+}
+
+func TestOpenStoreRejectsInsecureDir(t *testing.T) {
+	// Initialize a valid store, then widen the dir — OpenStore must refuse.
+	dir := filepath.Join(t.TempDir(), "auth")
+	if _, err := InitStore(dir, "op", "longenoughpw"); err != nil {
+		t.Fatalf("InitStore: %v", err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := OpenStore(dir)
+	if err == nil {
+		t.Fatal("OpenStore on 0755 dir succeeded; want error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, dir) {
+		t.Errorf("error %q does not mention the path %q", msg, dir)
 	}
 }
