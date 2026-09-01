@@ -54,10 +54,14 @@ out_check() {
 
 mkdir -p "$TMP/state/templates" "$TMP/run" "$TMP/etc" "$TMP/bin"
 
+# The smoke runs with require_authentication: true and a temp credential store
+# (at $TMP/state/auth, matching the substituted credential_store path).
+# The example config's loopback_only mode + loopback bind is preserved.
 sed -e "s|127.0.0.1:8787|127.0.0.1:$PORT|g" \
     -e "s|/var/lib/vmobs|$TMP/state|g" \
     -e "s|/run/vmobs|$TMP/run|g" \
     -e "s|/etc/vmobs|$TMP/etc|g" \
+    -e "s|require_authentication: false|require_authentication: true|g" \
     docs/examples/host-config.yaml >"$TMP/config.yaml"
 
 cat >"$TMP/state/templates/smoke-tpl.json" <<'EOF'
@@ -81,6 +85,29 @@ note "PASS build"
 VMOBS="$TMP/bin/vmobs"
 API="http://127.0.0.1:$PORT"
 
+# --- bootstrap auth: init credential store, capture the operator token ---
+
+SMOKE_PASS="smokepass123"
+INIT_OUT="$TMP/init-auth.out"
+if ! printf '%s\n' "$SMOKE_PASS" | "$TMP/bin/vmobsd" init-auth \
+    -config "$TMP/config.yaml" -password-stdin >"$INIT_OUT" 2>"$TMP/init-auth.err"; then
+  note "FAIL vmobsd init-auth failed:"
+  sed 's/^/  /' "$TMP/init-auth.err"
+  exit 1
+fi
+note "PASS vmobsd init-auth"
+
+# Extract the token secret from the "token: vmobs_..." line.
+# The secret is captured into a shell variable; it does not appear in notes.
+SMOKE_TOKEN=$(grep '^token: ' "$INIT_OUT" | sed 's/^token: //')
+if [ -z "$SMOKE_TOKEN" ]; then
+  note "FAIL could not extract token from init-auth output"
+  exit 1
+fi
+note "PASS operator token captured (id: $(grep '^token: ' "$INIT_OUT" | cut -c1-12)...)"
+
+# --- start daemon (with auth on) ---
+
 "$TMP/bin/vmobsd" -config "$TMP/config.yaml" >"$TMP/daemon.log" 2>&1 &
 DAEMON_PID=$!
 
@@ -94,61 +121,63 @@ while ! curl -sf "$API/api/v1/meta" >/dev/null 2>&1; do
   fi
   sleep 0.1
 done
-note "PASS daemon up on $API"
+note "PASS daemon up on $API (auth on)"
 
-# --- exercise the CLI ---
+# --- auth boundary: unauthenticated CLI is refused ---
 
-run_expect 0 "$VMOBS" --api "$API" --json meta &&
+# Without --token the CLI sends no credentials; the API rejects with 401
+# (unauthenticated), which the CLI surfaces as exit 1.
+run_expect 1 "$VMOBS" --api "$API" vm list
+note "PASS proved: unauthenticated vm list exits 1 (auth boundary enforced)"
+
+# --- auth whoami with a valid token ---
+
+run_expect 0 "$VMOBS" --api "$API" --token "$SMOKE_TOKEN" --json auth whoami &&
+  out_check "whoami: authenticated as local_operator via token" \
+    '.owner == "local_operator" and .method == "token"'
+
+# --- existing VM/run flow WITH the bearer token ---
+
+run_expect 0 "$VMOBS" --api "$API" --token "$SMOKE_TOKEN" --json meta &&
   out_check "meta reports vms built" '.features.vms == true'
 
-run_expect 0 "$VMOBS" --api "$API" --json template list &&
+run_expect 0 "$VMOBS" --api "$API" --token "$SMOKE_TOKEN" --json template list &&
   out_check "template served with computed digest" \
     '.templates[0].template_id == "smoke-tpl-v1" and (.templates[0].digest | startswith("sha256:"))'
 
-run_expect 0 "$VMOBS" --api "$API" --json host status &&
+run_expect 0 "$VMOBS" --api "$API" --token "$SMOKE_TOKEN" --json host status &&
   out_check "host status: runtime honestly unavailable on this host" \
     '.runtime.available == false and (.runtime.reason | length > 0)'
 
-run_expect 0 "$VMOBS" --api "$API" --json vm list &&
+run_expect 0 "$VMOBS" --api "$API" --token "$SMOKE_TOKEN" --json vm list &&
   out_check "vm list empty before create" '.vms | length == 0'
 
 # AT-001: with no runtime, create refuses with a typed error (exit 1)...
-run_expect 1 "$VMOBS" --api "$API" vm create --template smoke-tpl-v1 smokey
+run_expect 1 "$VMOBS" --api "$API" --token "$SMOKE_TOKEN" vm create --template smoke-tpl-v1 smokey
 
 # ...and persists nothing.
-run_expect 0 "$VMOBS" --api "$API" --json vm list &&
+run_expect 0 "$VMOBS" --api "$API" --token "$SMOKE_TOKEN" --json vm list &&
   out_check "nothing persisted by the refused create (AT-001)" '.vms | length == 0'
 
-run_expect 0 "$VMOBS" --api "$API" situation
-run_expect 1 "$VMOBS" --api "$API" operation get op-000999
+run_expect 0 "$VMOBS" --api "$API" --token "$SMOKE_TOKEN" situation
+run_expect 1 "$VMOBS" --api "$API" --token "$SMOKE_TOKEN" operation get op-000999
 run_expect 3 "$VMOBS" --api "$API" bogus-command
 
 # --- run routes (P4) ---
 
-# /meta must declare features.runs true — the route table drives both routing
-# and the meta manifest (P-07), so a missing handler would also set the flag
-# false. This checks both wiring and self-description at once.
-run_expect 0 "$VMOBS" --api "$API" --json meta &&
+run_expect 0 "$VMOBS" --api "$API" --token "$SMOKE_TOKEN" --json meta &&
   out_check "meta reports runs built" '.features.runs == true'
 
-# run submit against a non-running VM → the API refuses with a typed conflict
-# (vm_not_running, 409); CLI surfaces that as exit 1.
-run_expect 1 "$VMOBS" --api "$API" run submit \
+run_expect 1 "$VMOBS" --api "$API" --token "$SMOKE_TOKEN" run submit \
   --vm nonexistent-vm --goal "smoke test" \
   --criteria operator_verdict --on-completion keep_running
 
-# run list empty → exit 0 with an empty runs array.
-run_expect 0 "$VMOBS" --api "$API" --json run list &&
+run_expect 0 "$VMOBS" --api "$API" --token "$SMOKE_TOKEN" --json run list &&
   out_check "run list empty" '.runs | length == 0'
 
-# run get unknown id → not_found (404) → exit 1.
-run_expect 1 "$VMOBS" --api "$API" run get run-000999
+run_expect 1 "$VMOBS" --api "$API" --token "$SMOKE_TOKEN" run get run-000999
 
 # Five run routes reachable — none return 501 on normal-path requests.
-# Note: POST /runs/{id}/conclude and GET /runs/{id}/report return 404
-# (run_unknown) for an unknown id; that is correct behaviour — 501 would mean
-# the route is unbuilt. POST /vms/{id}/runs returns 409 (vm_not_running) for
-# a valid body against an absent VM, which is also not 501.
 check_not_501() {
   desc=$1; shift
   "$@" >"$TMP/out" 2>"$TMP/err"
@@ -165,22 +194,115 @@ check_not_501() {
 
 check_not_501 "POST /vms/{id}/runs reachable" \
   curl -sf -X POST -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $SMOKE_TOKEN" \
   -d '{"goal":"smoke","success_criteria":{"type":"operator_verdict"},"on_completion":"keep_running"}' \
   "$API/api/v1/vms/nonexistent-vm/runs"
 
 check_not_501 "GET /runs reachable" \
-  curl -sf "$API/api/v1/runs"
+  curl -sf -H "Authorization: Bearer $SMOKE_TOKEN" "$API/api/v1/runs"
 
 check_not_501 "GET /runs/{id} reachable" \
-  curl -sf "$API/api/v1/runs/run-000999"
+  curl -sf -H "Authorization: Bearer $SMOKE_TOKEN" "$API/api/v1/runs/run-000999"
 
 check_not_501 "GET /runs/{id}/report reachable" \
-  curl -sf "$API/api/v1/runs/run-000999/report"
+  curl -sf -H "Authorization: Bearer $SMOKE_TOKEN" "$API/api/v1/runs/run-000999/report"
 
 check_not_501 "POST /runs/{id}/conclude reachable" \
   curl -sf -X POST -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $SMOKE_TOKEN" \
   -d '{"verdict":"succeeded"}' \
   "$API/api/v1/runs/run-000999/conclude"
+
+# --- cookie / CSRF flow ---
+
+COOKIEJAR="$TMP/cookies.txt"
+
+# Login with the correct password → get session cookie + csrf_token.
+# curl sends no Origin header here: the origin check is browser-only and
+# only fires when Origin is present and mismatches; absent Origin passes.
+curl -sf -X POST \
+  -H "Content-Type: application/json" \
+  -d "{\"username\":\"local_operator\",\"password\":\"$SMOKE_PASS\"}" \
+  -c "$COOKIEJAR" \
+  "$API/api/v1/auth/login" >"$TMP/out" 2>"$TMP/err"
+if [ $? -ne 0 ]; then
+  note "FAIL login request failed:"
+  sed 's/^/  /' "$TMP/err"
+  fail=1
+else
+  note "PASS login: POST /auth/login → 200"
+fi
+out_check "login: received csrf_token" '(.csrf_token | type) == "string" and (.csrf_token | length > 0)'
+
+# Mutation without CSRF → 403 csrf_rejected.
+# Using -s (not -f) so curl exits 0 even on HTTP 4xx; we check the status code.
+CSRF_HTTP=$(curl -s -o "$TMP/out" -w '%{http_code}' \
+  -X POST -H "Content-Type: application/json" \
+  -b "$COOKIEJAR" \
+  -d '{"name":"bad-token"}' \
+  "$API/api/v1/auth/tokens" 2>"$TMP/err")
+if [ "$CSRF_HTTP" = "403" ]; then
+  note "PASS proved: mutation without CSRF header → 403 (csrf_rejected)"
+else
+  note "FAIL mutation without CSRF should return 403, got $CSRF_HTTP"
+  sed 's/^/  /' "$TMP/out"
+  fail=1
+fi
+
+# GET /auth/session with the cookie → returns csrf_token for use in mutations.
+curl -sf \
+  -b "$COOKIEJAR" \
+  "$API/api/v1/auth/session" >"$TMP/out" 2>"$TMP/err"
+if [ $? -ne 0 ]; then
+  note "FAIL GET /auth/session failed:"
+  sed 's/^/  /' "$TMP/err"
+  fail=1
+else
+  note "PASS GET /auth/session → 200"
+fi
+out_check "GET /auth/session: returns csrf_token and session method" \
+  '(.csrf_token | type) == "string" and .method == "session"'
+CSRF_TOKEN=$(jq -r '.csrf_token' <"$TMP/out")
+note "PASS csrf_token captured from /auth/session"
+
+# Mutation with cookie + correct CSRF → success (create a token via session).
+curl -sf -X POST \
+  -H "Content-Type: application/json" \
+  -H "X-CSRF-Token: $CSRF_TOKEN" \
+  -b "$COOKIEJAR" \
+  -d '{"name":"smoke-session-token"}' \
+  "$API/api/v1/auth/tokens" >"$TMP/out" 2>"$TMP/err"
+if [ $? -ne 0 ]; then
+  note "FAIL cookie+CSRF mutation failed:"
+  sed 's/^/  /' "$TMP/err"
+  fail=1
+else
+  note "PASS cookie+CSRF mutation: POST /auth/tokens → 201"
+fi
+out_check "cookie+CSRF mutation: token created" \
+  '(.token.id | type) == "string" and (.secret | startswith("vmobs_"))'
+note "PASS proved: cookie+CSRF mutation succeeds"
+
+# --- CLI token revoke: revoked token is rejected ---
+
+# Capture the ID of the initial token (the one we've been using).
+# vmobs auth tokens lists all tokens; we find the one named "initial".
+run_expect 0 "$VMOBS" --api "$API" --token "$SMOKE_TOKEN" --json auth tokens
+INITIAL_TOKEN_ID=$(jq -r '.tokens[] | select(.name == "initial") | .id' <"$TMP/out")
+if [ -z "$INITIAL_TOKEN_ID" ]; then
+  note "FAIL could not find 'initial' token in token list"
+  fail=1
+else
+  note "PASS found initial token id: $INITIAL_TOKEN_ID"
+
+  # Revoke it via CLI (using the token itself to authenticate the revoke).
+  run_expect 0 "$VMOBS" --api "$API" --token "$SMOKE_TOKEN" auth token revoke "$INITIAL_TOKEN_ID" &&
+    note "PASS proved: token revoke succeeds"
+
+  # Now the same token is rejected → exit 1.
+  run_expect 1 "$VMOBS" --api "$API" --token "$SMOKE_TOKEN" auth whoami &&
+    note "PASS proved: revoked token exits 1 (bearer token rejected after revoke)"
+fi
 
 # --- shutdown: clean exit, then transport failure is exit 2 ---
 

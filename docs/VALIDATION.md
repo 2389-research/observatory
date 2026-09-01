@@ -1,5 +1,22 @@
 # Specification Package Validation
 
+## Revision 6 (2026-09-01) — update require_authentication comment in example config
+
+Run after rewording the `require_authentication` comment in `docs/examples/host-config.yaml` from a forward reference to a past-tense statement of truth (P5 Task 13 closed; smoke runs with auth on; the example shows the dev default).
+
+### Results
+
+- 46 package checks passed (`uv run docs/validation/check.py`, exit 0).
+- All revision-5 results hold; only the comment text in `docs/examples/host-config.yaml` changed (value `false` preserved for the dev-default example).
+
+### Check log
+
+- PASS — All 46 checks (identical list to revision 5; output elided for brevity).
+
+These checks validate the handoff documents and synthetic interface examples. **They are not tests of a running Firecracker Observatory implementation.** No VMM, guest sensor, proxy, terminal, isolation, crash-recovery or performance acceptance test was executed as part of preparing this package.
+
+The canonical check is `validation/check.py`, run as `uv run docs/validation/check.py`. Re-run it after changing any file in `docs/` and append a dated revision below. Earlier revisions are the historical record; never rewrite them.
+
 ## Revision 5 (2026-09-01) — auth and https-mode fields in example config
 
 Run after adding `session_ttl_minutes: 720`, `tls_cert_file: ""`, and `tls_key_file: ""` to `docs/examples/host-config.yaml` to match the new struct fields introduced by the P5 auth validation matrix.

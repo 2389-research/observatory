@@ -214,10 +214,10 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready f
 	}
 	defer mgr.Close()
 
-	// Build auth config. When auth is off (dev mode), the API injects a
-	// local_operator/none identity on every request.
-	// P5 Task 13 enables auth in the smoke config; see the marker comment in
-	// docs/examples/host-config.yaml.
+	// Build auth config. When auth is off (dev mode, loopback only), the API
+	// injects a local_operator/none identity on every request. The smoke test
+	// runs with require_authentication: true; the example config shows the
+	// dev-default (false, loopback only).
 	ac := api.AuthConfig{Enabled: false}
 	if cfg.AuthEnabled() {
 		credStore, err := auth.OpenStore(cfg.Auth.CredentialStore)

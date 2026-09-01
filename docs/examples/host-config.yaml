@@ -14,7 +14,8 @@ server:
 
 auth:
   mode: local_operator
-  # P5 Task 13 enables auth here — credential store must exist before flipping to true.
+  # Dev default: false is valid only on loopback. Production and the smoke test
+  # run with true; the credential store must exist (run vmobsd init-auth first).
   require_authentication: false
   credential_store: "/var/lib/vmobs/auth"
   csrf_protection: true
