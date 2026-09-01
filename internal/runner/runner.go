@@ -223,9 +223,9 @@ func (r *runner) supervisionLoop(ctx context.Context, vmmGone <-chan struct{}) e
 			fmt.Fprintf(os.Stderr, "runner: write state (attached): %v\n", err)
 		}
 
-		// Serve pings. Returns (reason, action) where reason is the channel_lost
-		// reason string and action is one of "redial", "vmm_gone", "finalize", "ctx_done".
-		reason, action, shuttingDown := r.pingLoop(ctx, conn, vmmGone)
+		// Serve pings. Returns (lostReason, action) where action is one of
+		// "redial", "vmm_gone", "finalize", "ctx_done".
+		reason, action := r.pingLoop(ctx, conn, vmmGone)
 
 		switch action {
 		case "ctx_done":
@@ -242,7 +242,6 @@ func (r *runner) supervisionLoop(ctx context.Context, vmmGone <-chan struct{}) e
 		if err := r.writeState(); err != nil {
 			fmt.Fprintf(os.Stderr, "runner: write state (degraded): %v\n", err)
 		}
-		_ = shuttingDown // tracked by r.shutdownRequested
 		select {
 		case <-ctx.Done():
 			return r.cleanExit(ctx.Err())
@@ -257,9 +256,9 @@ func (r *runner) supervisionLoop(ctx context.Context, vmmGone <-chan struct{}) e
 }
 
 // pingLoop runs the ping/pong cycle for one established connection.
-// It returns (lostReason, action, _) where action is "redial", "vmm_gone",
+// It returns (lostReason, action) where action is "redial", "vmm_gone",
 // "finalize", or "ctx_done".
-func (r *runner) pingLoop(ctx context.Context, conn net.Conn, vmmGone <-chan struct{}) (reason, action string, _ bool) {
+func (r *runner) pingLoop(ctx context.Context, conn net.Conn, vmmGone <-chan struct{}) (reason, action string) {
 	// Read loop: pushes envelopes into readCh, errors into readErrCh.
 	readCh := make(chan proto.Envelope, 16)
 	readErrCh := make(chan error, 1)
@@ -309,13 +308,13 @@ func (r *runner) pingLoop(ctx context.Context, conn net.Conn, vmmGone <-chan str
 	for {
 		select {
 		case <-ctx.Done():
-			return "", "ctx_done", false
+			return "", "ctx_done"
 
 		case <-vmmGone:
-			return "", "vmm_gone", false
+			return "", "vmm_gone"
 
 		case <-r.finalizeCh:
-			return "", "finalize", false
+			return "", "finalize"
 
 		case req := <-r.shutdownCh:
 			// Send KindShutdown to the guest.
@@ -343,10 +342,10 @@ func (r *runner) pingLoop(ctx context.Context, conn net.Conn, vmmGone <-chan str
 		case <-pingTicker.C:
 			pingsPending++
 			if pingsPending > pingMissThreshold {
-				return "ping window expired", "redial", false
+				return "ping window expired", "redial"
 			}
 			if err := proto.WriteControl(conn, proto.KindPing, struct{}{}); err != nil {
-				return fmt.Sprintf("ping write: %v", err), "redial", false
+				return fmt.Sprintf("ping write: %v", err), "redial"
 			}
 			// Write state on each ping cycle.
 			if err := r.writeState(); err != nil {
@@ -355,7 +354,7 @@ func (r *runner) pingLoop(ctx context.Context, conn net.Conn, vmmGone <-chan str
 
 		case env, ok := <-readCh:
 			if !ok {
-				return "read channel closed", "redial", false
+				return "read channel closed", "redial"
 			}
 			switch env.Kind {
 			case proto.KindPong:
@@ -371,7 +370,7 @@ func (r *runner) pingLoop(ctx context.Context, conn net.Conn, vmmGone <-chan str
 			if err != nil {
 				msg = fmt.Sprintf("read: %v", err)
 			}
-			return msg, "redial", false
+			return msg, "redial"
 		}
 	}
 }
