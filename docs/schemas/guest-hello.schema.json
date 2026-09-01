@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vmobs:schema:guest-hello:1",
+  "title": "Guest channel Hello message v1",
+  "description": "Sent by the host to the guest after the vsock CONNECT handshake. auth_proof is compared constant-time by the guest.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "vm_id",
+    "boot_id",
+    "source_instance",
+    "resume_cursor",
+    "auth_proof"
+  ],
+  "properties": {
+    "protocol_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "vm_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "boot_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "source_instance": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "resume_cursor": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)$",
+      "description": "Decimal string. Counters that can exceed JS safe integers are decimal strings."
+    },
+    "auth_proof": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    }
+  }
+}

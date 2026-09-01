@@ -1,5 +1,18 @@
 # Specification Package Validation
 
+## Revision 8 (2026-09-01) — L0 Task 2: add guest-protocol.md and two schemas
+
+Run after adding `docs/guest-protocol.md` (wire framing, handshake sequence, deadlines), `docs/schemas/guest-hello.schema.json`, and `docs/schemas/guest-capability.schema.json`. The new doc and schemas add no new check.py logic; all 46 existing checks continue to pass and the new schemas are Draft 2020-12 compliant.
+
+### Results
+
+- 46 package checks passed (`uv run docs/validation/check.py`, exit 0).
+- All revision-7 results hold; only the three new docs files were added.
+
+### Check log
+
+- PASS — All 46 checks (identical list to revision 7; output elided for brevity).
+
 ## Revision 7 (2026-09-01) — L0 Task 1: add docs/runbooks/aibox03.md
 
 Run after adding `docs/runbooks/aibox03.md` (aibox03 host runbook: host facts, setup.sh walkthrough, root-helper verbs, Firecracker re-pin procedure). The runbook is prose only; no schema, example, or check.py logic changed.

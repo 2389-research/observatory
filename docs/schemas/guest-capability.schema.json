@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vmobs:schema:guest-capability:1",
+  "title": "Guest capability manifest v1",
+  "description": "Sent by guestd in response to get_capabilities. schema must be 'vmobs.guest_capability.v1'.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "kernel_release",
+    "features"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "vmobs.guest_capability.v1"
+    },
+    "kernel_release": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "features": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/feature"
+      }
+    }
+  },
+  "$defs": {
+    "feature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "present"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "enum": [
+            "btf",
+            "bpf_syscall",
+            "fanotify",
+            "fanotify_report_fid",
+            "cgroup_v2",
+            "devpts",
+            "vsock",
+            "virtio_net",
+            "virtio_blk",
+            "ext4"
+          ]
+        },
+        "present": {
+          "type": "boolean"
+        },
+        "evidence": {
+          "type": "string",
+          "maxLength": 512
+        }
+      }
+    }
+  }
+}
