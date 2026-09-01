@@ -27,7 +27,7 @@ var (
 	ErrSubmissionRejected = errors.New("submission rejected")
 	// ErrRunNotAcceptingSubmissions: the run is not in a phase that accepts progress
 	// or result submissions (concluding or terminal).
-	ErrRunNotAcceptingSubmissions = errors.New("run is not in pending or running phase; submissions are not accepted")
+	ErrRunNotAcceptingSubmissions = errors.New("run does not accept submissions; only pending or running runs do")
 	// ErrReportNotFound: no report has been stored for this run_id.
 	ErrReportNotFound = errors.New("run report not found")
 	// ErrReportImmutable: a report has already been stored for this run_id;

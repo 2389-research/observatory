@@ -24,6 +24,12 @@ var ErrRunConcluded = errors.New("run is already in a terminal phase")
 // whose criteria_type is not operator_verdict.
 var ErrVerdictCriteriaMismatch = errors.New("verdict can only be supplied for operator_verdict runs")
 
+// ErrConcludeArgsMissing is returned when ConcludeRun is called with neither
+// a verdict nor abort=true. The caller must supply one or the other; silently
+// concluding as inconclusive would fabricate a reason that does not reflect
+// reality (the VM is still alive).
+var ErrConcludeArgsMissing = errors.New("conclude requires a verdict or abort")
+
 // --- concludeTrigger describes what caused a run to conclude ---
 
 type concludeTrigger int
@@ -68,6 +74,8 @@ func (m *Manager) CreateRun(ctx context.Context, req RunRequest) (*store.Run, bo
 		h := fmt.Sprintf("%s|%s|%s|%s|%s", req.VMID, req.Owner, req.Goal, req.CriteriaType, req.OnCompletion)
 		requestHash = fmt.Sprintf("%x", []byte(h))
 	} else {
+		// Non-key path: request_hash is stored but never used for replay matching;
+		// any deterministic value suffices.
 		requestHash = fmt.Sprintf("%x", []byte(req.Goal+req.CriteriaType))
 	}
 
@@ -116,21 +124,15 @@ func (m *Manager) ConcludeRun(ctx context.Context, runID string, verdict *string
 		return m.concludeRunAbort(ctx, runID, reason)
 	}
 
-	// For operator_verdict: require a verdict.
-	if run.CriteriaType == "operator_verdict" {
-		if verdict == nil {
-			// No verdict and not aborting: this is a caller error but not covered
-			// by the brief's error surface. Treat as inconclusive from system.
-			return m.concludeRun(ctx, runID, triggerVMTerminal)
-		}
-		// We need to carry the verdict into concludeRun. Since concludeRun uses
-		// a trigger enum, we handle operator_verdict inline here.
-		return m.concludeRunWithVerdict(ctx, runID, verdict, reason)
+	// No verdict and not aborting: the caller has supplied neither instruction.
+	// Silently concluding would fabricate a reason (the VM is still alive).
+	if verdict == nil {
+		return nil, ErrConcludeArgsMissing
 	}
 
-	// Non-operator_verdict with no verdict and not aborting is unusual — leave
-	// it to concludeRun's truth table.
-	return m.concludeRun(ctx, runID, triggerVMTerminal)
+	// Verdict supplied — only valid for operator_verdict runs (checked above for
+	// the mismatch case). Handle inline because concludeRun uses a trigger enum.
+	return m.concludeRunWithVerdict(ctx, runID, verdict, reason)
 }
 
 // concludeRunAbort handles the abort path (any criteria type): transitions to

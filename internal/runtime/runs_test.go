@@ -388,6 +388,54 @@ func TestConcludeRunOnTerminalErrors(t *testing.T) {
 	}
 }
 
+// TestConcludeRunNoVerdictNoAbort verifies that ConcludeRun called with
+// verdict==nil and abort==false returns ErrConcludeArgsMissing and leaves
+// the run in its current (non-terminal) phase. This covers both operator_verdict
+// and guest_result criteria: neither should silently conclude as inconclusive.
+func TestConcludeRunNoVerdictNoAbort(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		criteriaType string
+	}{
+		{"operator_verdict", "operator_verdict"},
+		{"guest_result", "guest_result"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := openStoreForManager(t)
+			fk := runtimetest.NewFake()
+			mgr := newManager(t, st, fk)
+
+			vm := launchedVM(t, st, mgr, "no-verdict-vm-"+tc.name)
+
+			run, _, err := mgr.CreateRun(t.Context(), runtime.RunRequest{
+				VMID:         vm.VMID,
+				Owner:        "local_operator",
+				Goal:         "must not silently conclude",
+				CriteriaType: tc.criteriaType,
+				OnCompletion: "keep_running",
+			})
+			if err != nil {
+				t.Fatalf("CreateRun: %v", err)
+			}
+
+			// Call with nil verdict and abort=false — must return the sentinel.
+			_, err = mgr.ConcludeRun(t.Context(), run.RunID, nil, false, "")
+			if !errors.Is(err, runtime.ErrConcludeArgsMissing) {
+				t.Errorf("expected ErrConcludeArgsMissing, got %v", err)
+			}
+
+			// Run phase must be unchanged (still running, not terminal).
+			runNow, readErr := st.GetRun(t.Context(), run.RunID)
+			if readErr != nil {
+				t.Fatalf("GetRun: %v", readErr)
+			}
+			if runNow.Phase != "running" {
+				t.Errorf("phase changed to %q; want running (no side effects)", runNow.Phase)
+			}
+		})
+	}
+}
+
 // --- guest_result conclusion ---
 
 func TestRunGuestResultFailed(t *testing.T) {
