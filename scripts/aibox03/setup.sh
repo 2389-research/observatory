@@ -46,7 +46,10 @@ install -d -o root -g root -m 0755 /srv/vmobs/jail
 
 # 6. vmobs-privd daemon.
 go_bin="$(command -v go || true)"
-[ -n "$go_bin" ] || { echo "go not found in PATH; add mise/go to root PATH" >&2; exit 1; }
+if [ -z "$go_bin" ] && [ -n "${SUDO_USER:-}" ]; then
+  go_bin="$(ls -d "/home/$SUDO_USER/.local/share/mise/installs/go/"[0-9]*.[0-9]*.[0-9]*/bin/go 2>/dev/null | sort -V | tail -1 || true)"
+fi
+[ -n "$go_bin" ] || { echo "go not found in PATH or operator mise installs; add go to PATH" >&2; exit 1; }
 "$go_bin" build -o /usr/local/sbin/vmobs-privd "$repo/cmd/vmobs-privd"
 
 # Substitute the invoking user's uid/gid into the unit before installing.

@@ -82,7 +82,7 @@ scripts/linux 'true'   # sync the latest tree to aibox03
 ssh -t harper@100.64.0.100 'cd vmobs-build && sudo sh scripts/aibox03/setup.sh'
 ```
 
-setup.sh builds `cmd/vmobs-privd` on aibox03, installs the binary to `/usr/local/sbin/vmobs-privd`, writes `/etc/systemd/system/vmobs-privd.service` (with the operator's uid/gid substituted from `$SUDO_UID`/`$SUDO_GID`), and restarts the unit.
+setup.sh builds `cmd/vmobs-privd` on aibox03, installs the binary to `/usr/local/sbin/vmobs-privd`, writes `/etc/systemd/system/vmobs-privd.service` (with the operator's uid/gid substituted from `$SUDO_UID`/`$SUDO_GID`), and restarts the unit. The build step resolves `go` from root's PATH first; if absent, it falls back to the operator's mise-managed go under `/home/$SUDO_USER/.local/share/mise/installs/go/`.
 
 ### Health check
 
