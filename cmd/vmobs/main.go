@@ -59,6 +59,14 @@ commands:
                             lifecycle action (pause|resume|stop|force_stop)
   vm delete VM-ID [--force] [--revision N]
                             delete a VM (--force stops it first)
+  run submit --vm ID --goal TEXT --criteria TYPE --on-completion POLICY [--progress-events] [--idempotency-key K]
+                            create a standalone run on a running VM
+  run list [--vm ID] [--phase P] [--after CURSOR] [--limit N]
+                            list runs (keyset paged)
+  run get RUN-ID            full run detail
+  run conclude [--verdict succeeded|failed | --abort] [--reason TEXT] RUN-ID
+                            conclude a run with verdict or abort
+  run report RUN-ID         get the run report (generated|pending|failed)
   operation get OP-ID       operation detail
   template list             list approved templates
   host status               runtime availability and capacity
@@ -112,6 +120,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return c.attention(rest[1:])
 	case "vm":
 		return c.dispatchVMCmd(rest[1:])
+	case "run":
+		return c.dispatchRunCmd(rest[1:])
 	case "operation":
 		return c.dispatchOperationCmd(rest[1:])
 	case "template":

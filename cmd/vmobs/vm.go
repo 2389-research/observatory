@@ -231,6 +231,11 @@ func (c *client) vmCreate(args []string) int {
 	memMiB := fs.Int64("memory", 0, "memory MiB (0 = daemon default)")
 	rootMiB := fs.Int64("root-disk", 0, "root disk MiB (0 = daemon default)")
 	wsMiB := fs.Int64("workspace-disk", 0, "workspace disk MiB (0 = daemon default)")
+	// Run attachment flags: all-or-none (goal + criteria + on-completion together).
+	runGoal := fs.String("run-goal", "", "launch-attached run: goal text")
+	runCriteria := fs.String("run-criteria", "", "launch-attached run: criteria type (operator_verdict|guest_result|exec_exit_zero)")
+	runOnCompletion := fs.String("run-on-completion", "", "launch-attached run: on_completion policy (keep_running|stop)")
+	runProgressEvents := fs.Bool("run-progress-events", false, "launch-attached run: emit run.progress events")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
@@ -244,6 +249,24 @@ func (c *client) vmCreate(args []string) int {
 		return exitUsage
 	}
 	name := rest[0]
+
+	// All-or-none validation for run flags: providing any strict subset is a
+	// usage error. The API is the authority for value validation (criteria type,
+	// on-completion value, R2 refusal). We only enforce presence here.
+	runFlagCount := 0
+	if *runGoal != "" {
+		runFlagCount++
+	}
+	if *runCriteria != "" {
+		runFlagCount++
+	}
+	if *runOnCompletion != "" {
+		runFlagCount++
+	}
+	if runFlagCount > 0 && runFlagCount < 3 {
+		fmt.Fprintln(c.stderr, "vmobs: --run-goal, --run-criteria, and --run-on-completion must all be set together")
+		return exitUsage
+	}
 
 	reqBody := map[string]any{
 		"name":        name,
@@ -263,6 +286,16 @@ func (c *client) vmCreate(args []string) int {
 	}
 	if *wsMiB != 0 {
 		reqBody["workspace_disk_mib"] = *wsMiB
+	}
+	if runFlagCount == 3 {
+		reqBody["run"] = map[string]any{
+			"goal": *runGoal,
+			"success_criteria": map[string]any{
+				"type": *runCriteria,
+			},
+			"on_completion":   *runOnCompletion,
+			"progress_events": *runProgressEvents,
+		}
 	}
 
 	encoded, _ := json.Marshal(reqBody)
