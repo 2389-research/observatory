@@ -61,7 +61,7 @@ func TestRealOpsNetworkLifecycle(t *testing.T) {
 	}
 }
 
-// TestNetArgvConstruction verifies that netSetupCommands and netTeardownCommands
+// TestNetArgvConstruction verifies that NetSetupCommands and NetTeardownCommands
 // produce the exact argv sequences the root helper uses, with no shell metacharacters.
 func TestNetArgvConstruction(t *testing.T) {
 	id := "vm-test-001"
@@ -81,14 +81,10 @@ func TestNetArgvConstruction(t *testing.T) {
 	//   ip link add veth-<id> type veth peer name eth-up netns vmobs-<id>
 	//   ip link set veth-<id> up
 	//   ip netns exec vmobs-<id> ip link set eth-up up
-	//   nft -f - <<EOF (stdin: the nft table definition)
-	//     => split into: nft with the stdin text as a separate -f /dev/stdin or via a file approach.
-	//     The Go port passes the nft script as stdin to nft -f /dev/stdin.
-	//
-	// This test checks exact argv slices (not stdin).
+	//   ip netns exec vmobs-<id> nft -f -  (stdin: NetSetupNFTScript())
 
-	if len(setup) < 7 {
-		t.Fatalf("netSetupCommands: expected ≥7 commands, got %d: %v", len(setup), setup)
+	if len(setup) != 8 {
+		t.Fatalf("NetSetupCommands: expected exactly 8 commands, got %d: %v", len(setup), setup)
 	}
 
 	// Command 0: ip netns add <ns>
@@ -112,20 +108,14 @@ func TestNetArgvConstruction(t *testing.T) {
 	// Command 6: ip netns exec <ns> ip link set eth-up up
 	assertArgv(t, setup[6], "ip", "netns", "exec", ns, "ip", "link", "set", "eth-up", "up")
 
-	// Command 7 (nft): nft -f /dev/stdin  — check prefix and no shell metacharacters.
-	if len(setup) < 8 {
-		t.Fatalf("netSetupCommands: expected ≥8 commands (including nft), got %d", len(setup))
-	}
-	nftCmd := setup[7]
-	if len(nftCmd) < 2 || nftCmd[0] != "nft" {
-		t.Errorf("setup[7] should start with 'nft', got %v", nftCmd)
-	}
+	// Command 7 (nft): ip netns exec <ns> nft -f -  — must run inside the namespace.
+	assertArgv(t, setup[7], "ip", "netns", "exec", ns, "nft", "-f", "-")
 
 	// ---- Teardown command sequence verification ----
 	// ip link del veth-<id>   (best-effort; error ignored in executor)
 	// ip netns del vmobs-<id> (best-effort; error ignored in executor)
 	if len(teardown) != 2 {
-		t.Fatalf("netTeardownCommands: expected 2 commands, got %d: %v", len(teardown), teardown)
+		t.Fatalf("NetTeardownCommands: expected 2 commands, got %d: %v", len(teardown), teardown)
 	}
 	assertArgv(t, teardown[0], "ip", "link", "del", veth)
 	assertArgv(t, teardown[1], "ip", "netns", "del", ns)
@@ -159,6 +149,172 @@ func TestNetArgvConstruction(t *testing.T) {
 		if !strings.Contains(nftStdin, want) {
 			t.Errorf("NFT script missing %q; script:\n%s", want, nftStdin)
 		}
+	}
+}
+
+// TestNetProbeCommands verifies that NetProbeCommands returns the exact argv sequences
+// used to check whether a netns is fully configured.
+func TestNetProbeCommands(t *testing.T) {
+	id := "vm-probe-001"
+	ns := "vmobs-" + id
+	veth := "veth-" + id
+
+	probes := privd.NetProbeCommands(id)
+
+	if len(probes) != 3 {
+		t.Fatalf("NetProbeCommands: expected 3 commands, got %d: %v", len(probes), probes)
+	}
+
+	// Probe 0: tap0 inside the netns
+	assertArgv(t, probes[0], "ip", "netns", "exec", ns, "ip", "link", "show", "tap0")
+	// Probe 1: eth-up inside the netns
+	assertArgv(t, probes[1], "ip", "netns", "exec", ns, "ip", "link", "show", "eth-up")
+	// Probe 2: veth-<id> on the host
+	assertArgv(t, probes[2], "ip", "link", "show", veth)
+}
+
+// fakeRunner is an injectable command runner for non-root orchestration tests.
+// It records which argv sequences were attempted and returns preset answers.
+type fakeRunner struct {
+	ran     [][]string
+	answers map[string]error // keyed by strings.Join(argv, " ")
+}
+
+func (f *fakeRunner) run(argv []string) error {
+	f.ran = append(f.ran, argv)
+	key := strings.Join(argv, " ")
+	if err, ok := f.answers[key]; ok {
+		return err
+	}
+	return nil // success by default
+}
+
+// newFakeRunner creates a fakeRunner with a map of argv→error answers.
+func newFakeRunner(answers map[string]error) *fakeRunner {
+	return &fakeRunner{answers: answers}
+}
+
+// TestNetOrchestration_AbsentNetns verifies that when the netns does not exist
+// (ip netns list returns empty), full setup runs.
+func TestNetOrchestration_AbsentNetns(t *testing.T) {
+	id := "vm-orch-001"
+	ns := "vmobs-" + id
+
+	runner := newFakeRunner(map[string]error{
+		// ip netns list returns success but empty (no ns found) — simulated by default success
+		// but the list output will contain no match; we fake via a special answer key for list.
+		// We use a sentinel: list command returns error so the existence check returns false.
+		// Actually we need to simulate output. Use the NotFoundError sentinel approach:
+		// netnsExists parses output, so we fake the list cmd to succeed with no output.
+		// But fakeRunner.run() just tracks errors, not stdout. We need the seam on
+		// RealOps to accept a runner that also fakes the probe behavior.
+		// The injectable runner handles all exec calls; the fake answers drive probe results.
+		// ip netns list → no answer override → returns nil (success), but the fake needs
+		// to report "absent". We use a special error sentinel for "netns list not found".
+	})
+
+	// For the absent case: ip netns list will be called; the fakeRunner records it and returns nil.
+	// Because the fakeRunner records calls and the existence check uses the runner's output
+	// (we inject a listOutput field), we use the richer FakeOpsForTest type.
+	// See: the injectable runner on RealOps takes (argv []string) → error, but the
+	// existence probe also needs stdout. So the seam must be broader.
+	//
+	// Instead, we use NetnsExistsFunc and ProbeHealthyFunc as the two injectable probes,
+	// keeping RunCmd for the actual setup/teardown/nft commands.
+	// This matches what the implementation exposes via RealOpsTestHooks.
+
+	hooks := privd.RealOpsTestHooks{
+		NetnsExists:  func(_ string) bool { return false },
+		ProbeHealthy: nil, // not called when netns absent
+		RunCmd:       runner.run,
+	}
+
+	cfg := privd.RealOpsCfg{NftPath: "/usr/sbin/nft", IPPath: "/usr/sbin/ip"}
+	ops := privd.NewRealOpsWithHooks(cfg, hooks)
+
+	entry := privd.VMEntry{VMID: id, NetCIDR: "10.0.0.0/30"}
+	req := privd.AllocateNetworkReq{VMID: id, CIDR: entry.NetCIDR}
+	if err := ops.AllocateNetwork(entry, req); err != nil {
+		t.Fatalf("AllocateNetwork (absent): %v", err)
+	}
+
+	// All 8 setup commands must have run.
+	want := privd.NetSetupCommands(id, entry.NetCIDR)
+	if len(runner.ran) != len(want) {
+		t.Fatalf("expected %d commands ran, got %d\n  ran: %v", len(want), len(runner.ran), runner.ran)
+	}
+	for i, argv := range want {
+		assertArgv(t, runner.ran[i], argv...)
+	}
+
+	// Check nft ran inside the netns.
+	assertArgv(t, runner.ran[7], "ip", "netns", "exec", ns, "nft", "-f", "-")
+}
+
+// TestNetOrchestration_PresentHealthy verifies that when netns exists and interfaces
+// are all present, no setup commands run (return success immediately).
+func TestNetOrchestration_PresentHealthy(t *testing.T) {
+	id := "vm-orch-002"
+
+	runner := newFakeRunner(nil)
+	hooks := privd.RealOpsTestHooks{
+		NetnsExists:  func(_ string) bool { return true },
+		ProbeHealthy: func(_ string) bool { return true },
+		RunCmd:       runner.run,
+	}
+
+	cfg := privd.RealOpsCfg{NftPath: "/usr/sbin/nft", IPPath: "/usr/sbin/ip"}
+	ops := privd.NewRealOpsWithHooks(cfg, hooks)
+
+	entry := privd.VMEntry{VMID: id, NetCIDR: "10.0.0.0/30"}
+	req := privd.AllocateNetworkReq{VMID: id, CIDR: entry.NetCIDR}
+	if err := ops.AllocateNetwork(entry, req); err != nil {
+		t.Fatalf("AllocateNetwork (present+healthy): %v", err)
+	}
+
+	// No commands should have run — the healthy probe short-circuits.
+	if len(runner.ran) != 0 {
+		t.Errorf("expected 0 commands ran (healthy probe), got %d: %v", len(runner.ran), runner.ran)
+	}
+}
+
+// TestNetOrchestration_PresentUnhealthy verifies that when netns exists but interfaces
+// are missing, teardown runs first, then the full setup sequence.
+func TestNetOrchestration_PresentUnhealthy(t *testing.T) {
+	id := "vm-orch-003"
+
+	runner := newFakeRunner(nil)
+	hooks := privd.RealOpsTestHooks{
+		NetnsExists:  func(_ string) bool { return true },
+		ProbeHealthy: func(_ string) bool { return false }, // half-built remnant
+		RunCmd:       runner.run,
+	}
+
+	cfg := privd.RealOpsCfg{NftPath: "/usr/sbin/nft", IPPath: "/usr/sbin/ip"}
+	ops := privd.NewRealOpsWithHooks(cfg, hooks)
+
+	entry := privd.VMEntry{VMID: id, NetCIDR: "10.0.0.0/30"}
+	req := privd.AllocateNetworkReq{VMID: id, CIDR: entry.NetCIDR}
+	if err := ops.AllocateNetwork(entry, req); err != nil {
+		t.Fatalf("AllocateNetwork (present+unhealthy): %v", err)
+	}
+
+	// Teardown (2 cmds, best-effort) then full setup (8 cmds) = 10 total.
+	teardown := privd.NetTeardownCommands(id)
+	setup := privd.NetSetupCommands(id, entry.NetCIDR)
+	wantTotal := len(teardown) + len(setup)
+	if len(runner.ran) != wantTotal {
+		t.Fatalf("expected %d commands (teardown+setup), got %d\n  ran: %v", wantTotal, len(runner.ran), runner.ran)
+	}
+
+	// First two: teardown.
+	for i, argv := range teardown {
+		assertArgv(t, runner.ran[i], argv...)
+	}
+	// Next eight: setup.
+	offset := len(teardown)
+	for i, argv := range setup {
+		assertArgv(t, runner.ran[offset+i], argv...)
 	}
 }
 

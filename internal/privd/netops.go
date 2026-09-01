@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+
+	"github.com/2389-research/observatory-v2/internal/network"
 )
 
 // RealOpsCfg holds the configuration for RealOps.
@@ -23,11 +25,23 @@ type RealOpsCfg struct {
 	IPPath          string // absolute path to ip binary (e.g. /usr/sbin/ip)
 }
 
+// RealOpsTestHooks allows non-root tests to inject fake probes and a recording runner.
+// All fields are optional; a nil field falls back to the real implementation.
+type RealOpsTestHooks struct {
+	// NetnsExists reports whether the named netns is present (replaces ip-netns-list probe).
+	NetnsExists func(vmID string) bool
+	// ProbeHealthy reports whether all expected interfaces exist inside an existing netns.
+	ProbeHealthy func(vmID string) bool
+	// RunCmd replaces exec.CommandContext for setup/teardown/nft commands.
+	RunCmd func(argv []string) error
+}
+
 // RealOps implements OpsBackend with real host operations.
 // AllocateNetwork and ReleaseNetwork are real in this task.
 // StartVM, SignalVM, and ReleaseVM are stubbed until Task 4.
 type RealOps struct {
-	cfg RealOpsCfg
+	cfg   RealOpsCfg
+	hooks RealOpsTestHooks
 }
 
 // Compile-time check: RealOps must satisfy OpsBackend.
@@ -38,29 +52,53 @@ func NewRealOps(cfg RealOpsCfg) *RealOps {
 	return &RealOps{cfg: cfg}
 }
 
+// NewRealOpsWithHooks creates a RealOps with injectable hooks for non-root testing.
+func NewRealOpsWithHooks(cfg RealOpsCfg, hooks RealOpsTestHooks) *RealOps {
+	return &RealOps{cfg: cfg, hooks: hooks}
+}
+
 // AllocateNetwork creates the per-VM network namespace, TAP device, veth pair,
 // and an nftables default-deny forward chain — porting net-setup command for command.
-// Idempotent: if the namespace already exists, returns success.
+//
+// Idempotency (controller ruling R5):
+//   - netns absent: run full setup.
+//   - netns present + all interfaces healthy: return success, skip setup.
+//   - netns present + interfaces missing (half-built remnant): teardown then full setup.
 func (r *RealOps) AllocateNetwork(entry VMEntry, req AllocateNetworkReq) error {
 	ctx := context.Background()
 
-	// Idempotency check: if the netns already exists, treat as success.
 	if r.netnsExists(ctx, entry.VMID) {
-		return nil
+		if r.probeHealthy(ctx, entry.VMID) {
+			// Already fully configured — nothing to do.
+			return nil
+		}
+		// Half-built remnant: tear it down (best-effort) then fall through to full setup.
+		tearCmds := NetTeardownCommands(entry.VMID)
+		for _, argv := range tearCmds {
+			_ = r.runCmd(ctx, argv) // best-effort, errors ignored
+		}
 	}
 
 	cmds := NetSetupCommands(entry.VMID, req.CIDR)
-	// All commands except the nft one run normally via runAll.
+	// All commands except the last (nft) run via runAll.
+	// The nft command receives the table script on stdin.
 	normalCmds := cmds[:len(cmds)-1]
 	nftCmd := cmds[len(cmds)-1]
 
-	if err := runAll(ctx, normalCmds); err != nil {
+	if err := r.runAll(ctx, normalCmds); err != nil {
 		return err
 	}
 
-	// Run nft with the table script passed on stdin (matching `nft -f -` with a heredoc).
+	// Run nft with the table script passed on stdin (matching `ip netns exec <ns> nft -f -`).
 	nftScript := NetSetupNFTScript()
-	/* #nosec G204 — nftCmd is built from NetSetupCommands, which uses the literal "nft" command name. */
+	if r.hooks.RunCmd != nil {
+		// Test path: pass the nft argv through the fake runner (stdin not needed for argv tests).
+		if err := r.hooks.RunCmd(nftCmd); err != nil {
+			return fmt.Errorf("privd: exec %v: %w", nftCmd, err)
+		}
+		return nil
+	}
+	/* #nosec G204 — nftCmd is built from NetSetupCommands, literal command elements only. */
 	cmd := exec.CommandContext(ctx, nftCmd[0], nftCmd[1:]...) //nolint:gosec
 	cmd.Stdin = strings.NewReader(nftScript)
 	var stderr bytes.Buffer
@@ -79,9 +117,7 @@ func (r *RealOps) ReleaseNetwork(entry VMEntry) error {
 	cmds := NetTeardownCommands(entry.VMID)
 	// Best-effort: errors suppressed, matching the helper's "2>/dev/null || true" pattern.
 	for _, argv := range cmds {
-		/* #nosec G204 — argv built from NetTeardownCommands, literal "ip" command. */
-		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...) //nolint:gosec
-		_ = cmd.Run()
+		_ = r.runCmd(ctx, argv)
 	}
 	return nil
 }
@@ -101,10 +137,13 @@ func (r *RealOps) ReleaseVM(_ VMEntry) error {
 	return fmt.Errorf("privd: ReleaseVM not implemented until Task 4")
 }
 
-// netnsExists reports whether the network namespace for vmID is already present.
-// Parses `ip netns list` output: each line is "<name> (id: <n>)" or just "<name>".
+// netnsExists reports whether the network namespace for vmID is present.
+// Uses hooks.NetnsExists when injected (non-root tests); otherwise parses `ip netns list`.
 func (r *RealOps) netnsExists(ctx context.Context, vmID string) bool {
-	nsName := namespaceName(vmID)
+	if r.hooks.NetnsExists != nil {
+		return r.hooks.NetnsExists(vmID)
+	}
+	nsName := network.NamespaceName(vmID)
 	/* #nosec G204 — literal "ip" command, not user input. */
 	cmd := exec.CommandContext(ctx, "ip", "netns", "list") //nolint:gosec
 	out, err := cmd.Output()
@@ -121,14 +160,58 @@ func (r *RealOps) netnsExists(ctx context.Context, vmID string) bool {
 	return false
 }
 
+// probeHealthy reports whether all expected interfaces exist inside an existing netns.
+// Checks: tap0 inside the netns, eth-up inside the netns, veth-<id> on the host.
+// Uses hooks.ProbeHealthy when injected; otherwise runs the real exec probes.
+func (r *RealOps) probeHealthy(ctx context.Context, vmID string) bool {
+	if r.hooks.ProbeHealthy != nil {
+		return r.hooks.ProbeHealthy(vmID)
+	}
+	for _, argv := range NetProbeCommands(vmID) {
+		/* #nosec G204 — argv built from NetProbeCommands, literal command elements only. */
+		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...) //nolint:gosec
+		if err := cmd.Run(); err != nil {
+			// "does not exist" exits non-zero — a probe failure is a NO, not an error.
+			return false
+		}
+	}
+	return true
+}
+
+// runCmd executes a single argv array. Uses hooks.RunCmd when injected.
+func (r *RealOps) runCmd(ctx context.Context, argv []string) error {
+	if r.hooks.RunCmd != nil {
+		return r.hooks.RunCmd(argv)
+	}
+	/* #nosec G204 — argv arrays are assembled from literal string constants, never user input. */
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...) //nolint:gosec
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		stderrStr := truncateStderr(stderr.Bytes())
+		return fmt.Errorf("privd: exec %v: %w: %s", argv, err, stderrStr)
+	}
+	return nil
+}
+
+// runAll executes a slice of argv arrays in order via runCmd, stopping on first failure.
+func (r *RealOps) runAll(ctx context.Context, cmds [][]string) error {
+	for _, argv := range cmds {
+		if err := r.runCmd(ctx, argv); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // NetSetupCommands returns the argv slices for net-setup, in order.
-// The last element is ["nft", "-f", "-"]; its stdin must be NetSetupNFTScript().
-// Pure function with no side effects so non-root tests can verify the exact sequence.
+// The last element is ["ip", "netns", "exec", <ns>, "nft", "-f", "-"]; its stdin
+// must be NetSetupNFTScript(). Pure function — non-root tests assert the exact sequence.
 func NetSetupCommands(id, _ string) [][]string {
 	// CIDR parameter is accepted for future anti-spoof address assignment (M3 scope).
 	// The root helper's net-setup does not pass CIDR to any ip command either.
-	ns := namespaceName(id)
-	veth := vethName(id)
+	ns := network.NamespaceName(id)
+	veth := network.VethName(id)
 
 	return [][]string{
 		// ip netns add vmobs-<id>
@@ -145,8 +228,9 @@ func NetSetupCommands(id, _ string) [][]string {
 		{"ip", "link", "set", veth, "up"},
 		// ip netns exec vmobs-<id> ip link set eth-up up
 		{"ip", "netns", "exec", ns, "ip", "link", "set", "eth-up", "up"},
-		// nft -f -  (stdin: NetSetupNFTScript())
-		{"nft", "-f", "-"},
+		// ip netns exec vmobs-<id> nft -f -  (stdin: NetSetupNFTScript())
+		// Must run INSIDE the namespace — matches root helper line 47.
+		{"ip", "netns", "exec", ns, "nft", "-f", "-"},
 	}
 }
 
@@ -155,9 +239,25 @@ func NetSetupCommands(id, _ string) [][]string {
 func NetTeardownCommands(id string) [][]string {
 	return [][]string{
 		// ip link del veth-<id>  (best-effort; error ignored)
-		{"ip", "link", "del", vethName(id)},
+		{"ip", "link", "del", network.VethName(id)},
 		// ip netns del vmobs-<id>  (best-effort; error ignored)
-		{"ip", "netns", "del", namespaceName(id)},
+		{"ip", "netns", "del", network.NamespaceName(id)},
+	}
+}
+
+// NetProbeCommands returns argv slices that check whether a netns is fully configured.
+// A probe exec failing with non-zero exit means the interface does not exist (NO answer).
+// Three probes: tap0 inside netns, eth-up inside netns, veth-<id> on the host.
+func NetProbeCommands(id string) [][]string {
+	ns := network.NamespaceName(id)
+	veth := network.VethName(id)
+	return [][]string{
+		// ip netns exec vmobs-<id> ip link show tap0
+		{"ip", "netns", "exec", ns, "ip", "link", "show", "tap0"},
+		// ip netns exec vmobs-<id> ip link show eth-up
+		{"ip", "netns", "exec", ns, "ip", "link", "show", "eth-up"},
+		// ip link show veth-<id>
+		{"ip", "link", "show", veth},
 	}
 }
 
@@ -171,30 +271,6 @@ func NetSetupNFTScript() string {
   chain input   { type filter hook input   priority 0; policy accept; }
 }
 `
-}
-
-// namespaceName is the package-local derivation of the netns name from a VM id.
-// Matches network.NamespaceName: "vmobs-" + id.
-func namespaceName(id string) string { return "vmobs-" + id }
-
-// vethName is the package-local derivation of the host-side veth name from a VM id.
-// Matches network.VethName: "veth-" + id.
-func vethName(id string) string { return "veth-" + id }
-
-// runAll executes a slice of argv arrays in order, stopping on the first failure.
-// Each failure wraps the argv and bounded stderr (max 512 bytes) into the error.
-func runAll(ctx context.Context, cmds [][]string) error {
-	for _, argv := range cmds {
-		/* #nosec G204 — argv arrays are assembled from literal string constants, never user input. */
-		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...) //nolint:gosec
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
-			stderrStr := truncateStderr(stderr.Bytes())
-			return fmt.Errorf("privd: exec %v: %w: %s", argv, err, stderrStr)
-		}
-	}
-	return nil
 }
 
 // truncateStderr caps stderr to 512 bytes as required — never inhale unbounded command output.
