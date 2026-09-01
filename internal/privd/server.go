@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -34,6 +35,8 @@ type ServerCfg struct {
 	UIDMin     int    // start_vm: UID must be in [UIDMin, UIDMax)
 	UIDMax     int    // start_vm: UID must be in [UIDMin, UIDMax)
 	Ops        OpsBackend
+	// Log overrides the default logger (os.Stderr). Useful in tests to redirect to t.Logf.
+	Log *log.Logger
 }
 
 // Server is the privd root daemon server. Create with NewServer; run with Serve.
@@ -46,10 +49,14 @@ type Server struct {
 
 // NewServer creates a new Server. It loads any pre-existing ledger entries from LedgerDir.
 func NewServer(cfg ServerCfg) *Server {
+	logger := cfg.Log
+	if logger == nil {
+		logger = log.New(os.Stderr, "privd: ", log.LstdFlags)
+	}
 	s := &Server{
 		cfg:    cfg,
 		ledger: newLedger(cfg.LedgerDir),
-		log:    log.New(os.Stderr, "privd: ", log.LstdFlags),
+		log:    logger,
 	}
 	return s
 }
@@ -97,6 +104,11 @@ func (s *Server) handleConn(conn net.Conn) {
 
 	var req Request
 	if err := ReadMsg(conn, &req); err != nil {
+		// io.EOF on the first byte means the client closed after sending its request
+		// on a previous connection — clean disconnect, not an error worth logging.
+		if errors.Is(err, io.EOF) {
+			return
+		}
 		s.log.Printf("read request: %v", err)
 		return
 	}
@@ -223,17 +235,19 @@ func (s *Server) handleStartVM(raw json.RawMessage) Response {
 	}
 
 	// StageDir must resolve under StageRoot.
+	// Both sides get EvalSymlinks so a symlink StageRoot (e.g. /var/vmobs/stage →
+	// /mnt/storage/stage) doesn't produce a false containment failure.
 	resolved, err := filepath.EvalSymlinks(r.StageDir)
 	if err != nil {
 		return errResp("bad_request", fmt.Sprintf("stage_dir resolve: %v", err))
 	}
-	absRoot, err := filepath.Abs(s.cfg.StageRoot)
+	resolvedRoot, err := filepath.EvalSymlinks(s.cfg.StageRoot)
 	if err != nil {
-		return errResp("internal", "stage root path error")
+		return errResp("internal", "stage root resolve failed")
 	}
-	absRoot = filepath.Clean(absRoot) + string(filepath.Separator)
+	rootPrefix := filepath.Clean(resolvedRoot) + string(filepath.Separator)
 	resolvedClean := filepath.Clean(resolved) + string(filepath.Separator)
-	if len(resolvedClean) <= len(absRoot) || resolvedClean[:len(absRoot)] != absRoot {
+	if len(resolvedClean) <= len(rootPrefix) || resolvedClean[:len(rootPrefix)] != rootPrefix {
 		return errResp("bad_request", "stage_dir not under stage root")
 	}
 

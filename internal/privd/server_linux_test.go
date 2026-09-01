@@ -10,11 +10,13 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -108,10 +110,29 @@ func makeReq(t *testing.T, verb string, payload any) privd.Request {
 	return privd.Request{V: privd.ProtoVersion, Verb: verb, Payload: json.RawMessage(raw)}
 }
 
+// testLogger returns a *log.Logger that writes via t.Logf, so server output only
+// appears when the test fails or is run with -v.
+func testLogger(t *testing.T) *log.Logger {
+	t.Helper()
+	return log.New(testLogWriter{t}, "privd: ", 0)
+}
+
+// testLogWriter adapts t.Logf to io.Writer.
+type testLogWriter struct{ t *testing.T }
+
+func (w testLogWriter) Write(p []byte) (int, error) {
+	w.t.Helper()
+	w.t.Log(strings.TrimRight(string(p), "\n"))
+	return len(p), nil
+}
+
 // startServer launches a Server and waits until the socket is ready.
 // Returns the socket path. The server is cancelled when t.Cleanup runs.
 func startServer(t *testing.T, sockPath string, cfg privd.ServerCfg) {
 	t.Helper()
+	if cfg.Log == nil {
+		cfg.Log = testLogger(t)
+	}
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -561,5 +582,185 @@ func TestLedgerSurvivesRestart(t *testing.T) {
 	// Backend should not have been called since the conflict was caught pre-backend.
 	if len(backend2.allocateCalls) != 0 {
 		t.Errorf("backend2.allocateCalls = %d, want 0", len(backend2.allocateCalls))
+	}
+}
+
+// TestStageRootSymlink verifies that a configured StageRoot that is itself a symlink to a
+// real directory does not cause a false containment failure for stage dirs under it.
+// This is a regression test for Finding 1: StageRoot must be EvalSymlinks-resolved, not
+// just Abs-resolved, before the prefix containment check.
+func TestStageRootSymlink(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "privd.sock")
+
+	// Real stage root directory.
+	realStageRoot := filepath.Join(dir, "real-stage")
+	if err := os.MkdirAll(realStageRoot, 0o755); err != nil {
+		t.Fatalf("mkdir real stage root: %v", err)
+	}
+	// Symlink pointing at the real root — this is what the server is configured with.
+	symlinkRoot := filepath.Join(dir, "stage-link")
+	if err := os.Symlink(realStageRoot, symlinkRoot); err != nil {
+		t.Fatalf("symlink stage root: %v", err)
+	}
+	// Stage dir lives under the real root (and therefore under the symlink too).
+	stageDir := filepath.Join(realStageRoot, "vm-sym-001")
+	if err := os.MkdirAll(stageDir, 0o755); err != nil {
+		t.Fatalf("mkdir stage dir: %v", err)
+	}
+	ledgerDir := filepath.Join(dir, "ledger")
+	if err := os.MkdirAll(ledgerDir, 0o755); err != nil {
+		t.Fatalf("mkdir ledger: %v", err)
+	}
+
+	pid, starttime := spawnShortProcess(t)
+	backend := &recordingBackend{
+		startResp: privd.StartVMResp{PID: pid, StartTime: starttime},
+	}
+	cfg := privd.ServerCfg{
+		AllowedUID: os.Getuid(),
+		LedgerDir:  ledgerDir,
+		StageRoot:  symlinkRoot, // configured with the symlink path
+		JailBase:   filepath.Join(dir, "jail"),
+		UIDMin:     os.Getuid(),
+		UIDMax:     os.Getuid() + 100,
+		Ops:        backend,
+	}
+	startServer(t, sockPath, cfg)
+
+	vmID := "vm-sym-001"
+	cidr := "10.20.0.0/30"
+
+	conn := dialPrivd(t, sockPath)
+	resp := sendRecv(t, conn, makeReq(t, "allocate_network", privd.AllocateNetworkReq{VMID: vmID, CIDR: cidr}))
+	conn.Close()
+	if !resp.OK {
+		t.Fatalf("allocate_network: %+v", resp)
+	}
+
+	conn2 := dialPrivd(t, sockPath)
+	resp2 := sendRecv(t, conn2, makeReq(t, "start_vm", privd.StartVMReq{
+		VMID:     vmID,
+		UID:      os.Getuid(),
+		GID:      os.Getgid(),
+		CID:      5,
+		StageDir: stageDir, // real path — should still be accepted
+	}))
+	conn2.Close()
+
+	if !resp2.OK {
+		t.Fatalf("start_vm with symlink StageRoot: %+v (want OK; containment must not fail when StageRoot is a symlink)", resp2)
+	}
+	if len(backend.startCalls) != 1 {
+		t.Errorf("startCalls = %d, want 1", len(backend.startCalls))
+	}
+}
+
+// TestReleaseVMAliveProcess verifies that release_vm returns invalid_state when the recorded
+// process is still alive, and succeeds once the process is dead.
+// This covers the aliveness gate in handleReleaseVM (Finding 2 — previously untested).
+func TestReleaseVMAliveProcess(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "privd.sock")
+	stageRoot := filepath.Join(dir, "stage")
+	if err := os.MkdirAll(stageRoot, 0o755); err != nil {
+		t.Fatalf("mkdir stageroot: %v", err)
+	}
+	stageDir := filepath.Join(stageRoot, "vm-alive-001")
+	if err := os.MkdirAll(stageDir, 0o755); err != nil {
+		t.Fatalf("mkdir stagedir: %v", err)
+	}
+	ledgerDir := filepath.Join(dir, "ledger")
+	if err := os.MkdirAll(ledgerDir, 0o755); err != nil {
+		t.Fatalf("mkdir ledger: %v", err)
+	}
+
+	// Spawn a long-lived process we control.
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("spawn sleep: %v", err)
+	}
+	// Ensure the process is cleaned up on all exit paths.
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+
+	// Read starttime while the process is definitely alive.
+	statPath := privd.ProcStatPath(cmd.Process.Pid)
+	data, err := os.ReadFile(statPath)
+	if err != nil {
+		t.Fatalf("read /proc stat: %v", err)
+	}
+	starttime := privd.ParseStartTime(string(data))
+	if starttime == "" {
+		t.Fatalf("could not parse starttime from %q", string(data))
+	}
+	livePID := cmd.Process.Pid
+
+	backend := &recordingBackend{
+		startResp: privd.StartVMResp{PID: livePID, StartTime: starttime},
+	}
+	cfg := privd.ServerCfg{
+		AllowedUID: os.Getuid(),
+		LedgerDir:  ledgerDir,
+		StageRoot:  stageRoot,
+		JailBase:   filepath.Join(dir, "jail"),
+		UIDMin:     os.Getuid(),
+		UIDMax:     os.Getuid() + 100,
+		Ops:        backend,
+	}
+	startServer(t, sockPath, cfg)
+
+	vmID := "vm-alive-001"
+	cidr := "10.30.0.0/30"
+
+	// allocate_network → start_vm to get the VM into the ledger with the live PID.
+	conn := dialPrivd(t, sockPath)
+	resp := sendRecv(t, conn, makeReq(t, "allocate_network", privd.AllocateNetworkReq{VMID: vmID, CIDR: cidr}))
+	conn.Close()
+	if !resp.OK {
+		t.Fatalf("allocate_network: %+v", resp)
+	}
+
+	conn2 := dialPrivd(t, sockPath)
+	resp2 := sendRecv(t, conn2, makeReq(t, "start_vm", privd.StartVMReq{
+		VMID:     vmID,
+		UID:      os.Getuid(),
+		GID:      os.Getgid(),
+		CID:      6,
+		StageDir: stageDir,
+	}))
+	conn2.Close()
+	if !resp2.OK {
+		t.Fatalf("start_vm: %+v", resp2)
+	}
+
+	// release_vm while process is still alive → must return invalid_state.
+	conn3 := dialPrivd(t, sockPath)
+	resp3 := sendRecv(t, conn3, makeReq(t, "release_vm", privd.ReleaseVMReq{VMID: vmID}))
+	conn3.Close()
+	if resp3.OK {
+		t.Fatal("release_vm on live process: expected invalid_state, got OK")
+	}
+	if resp3.Cause != "invalid_state" {
+		t.Errorf("release_vm cause = %q, want invalid_state", resp3.Cause)
+	}
+
+	// Kill the process and wait for it to be reaped.
+	if err := cmd.Process.Signal(syscall.SIGKILL); err != nil {
+		t.Fatalf("kill sleep: %v", err)
+	}
+	_ = cmd.Wait() // reap the child; after this /proc/<pid> is gone
+
+	// release_vm after process is dead → must succeed.
+	conn4 := dialPrivd(t, sockPath)
+	resp4 := sendRecv(t, conn4, makeReq(t, "release_vm", privd.ReleaseVMReq{VMID: vmID}))
+	conn4.Close()
+	if !resp4.OK {
+		t.Fatalf("release_vm after kill: %+v", resp4)
+	}
+	if len(backend.releaseVMCalls) != 1 {
+		t.Errorf("releaseVMCalls = %d, want 1", len(backend.releaseVMCalls))
 	}
 }
