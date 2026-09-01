@@ -1,0 +1,17 @@
+{
+  "schema": "vmobs.runtime_lock.v1",
+  "firecracker": {
+    "version": "v1.16.1",
+    "release_url": "https://github.com/firecracker-microvm/firecracker/releases/download/v1.16.1/firecracker-v1.16.1-x86_64.tgz",
+    "sha256": "2fd0171309af7e24cf8dafc8a6f921c1434c49b5f9349bb996b7ed0a4deb8aa7",
+    "install_path": "/usr/local/bin/firecracker"
+  },
+  "jailer": {
+    "sha256": "1f3a0c1fe86212d0001819bfe0819071c01208b3ccc9398c3b3bc1b84cf21edd",
+    "install_path": "/usr/local/bin/jailer"
+  },
+  "host_support": { "arch": "x86_64", "min_kernel": "5.10" },
+  "guest_kernel": { "version": "", "source_url": "", "source_sha256": "", "config_sha256": "", "vmlinux_sha256": "", "vmlinux_path": "images/dist/vmlinux" },
+  "root_image": { "sha256": "", "path": "images/dist/rootfs.ext4", "base_image_ref": "", "apt_snapshot": "", "inventory": "images/dist/rootfs.inventory.txt" },
+  "guestd": { "protocol_version": 1 }
+}

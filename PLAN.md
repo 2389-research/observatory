@@ -103,3 +103,7 @@ None right now.
 ## P5 final-review follow-ups
 
 - 2026-09-01 (P5 final review) — A future batch list endpoint must owner-scope at the SQL query layer (`Query.Owner` pattern like VMs/Runs), never post-fetch filtering — noted by the P5 final review for P6.
+
+## L0 session log
+
+- 2026-09-01 (L0 Task 1, compactions: 0) — Remote exec bridge, aibox03 setup, root helper, and Firecracker pin. Resolved v1.16.1 from GitHub API; tarball + binaries verified on aibox03 against published SHASUMS. Binary SHA-256s recorded in runtime.lock.json (firecracker: 2fd017..., jailer: 1f3a0c...). min_kernel=5.10 per kernel-policy.md in the v1.16.1 tagged source. jail-stop corrected: pgrep pattern won't match (jailer passes --id=<id> with =, not space); now reads $JAIL_BASE/firecracker/<id>/root/firecracker.pid per jailer docs recommendation. All flags in jail-start verified against jailer --help — no other corrections. All gates green: sh -n, scripts/check (gofmt/vet/lint/test/docs), uv run docs/validation/check.py (46/46), scripts/linux 'go version && go build ./...' (go1.27.0 linux/amd64). Concerns: cgroup-version 2 needed for Ubuntu 24.04 (Task 8 scope); aibox03 kernel 6.8.0 is between Firecracker-validated v6.1 and v6.18 (deviation note at acceptance). Next: L0 Task 2.

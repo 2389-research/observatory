@@ -1,0 +1,11 @@
+#!/bin/sh
+# ABOUTME: Runs a command on the Linux KVM host (aibox03) against a rsynced
+# ABOUTME: copy of this working tree. Usage: scripts/linux 'go test ./...'
+set -eu
+HOST="${VMOBS_LINUX_HOST:-harper@100.64.0.100}"
+DEST="${VMOBS_LINUX_DIR:-vmobs-build}"
+[ $# -ge 1 ] || { echo "usage: scripts/linux '<command>'" >&2; exit 3; }
+cd "$(dirname "$0")/.."
+rsync -az --delete --exclude .git --exclude .superpowers \
+  --filter=':- .gitignore' ./ "$HOST:$DEST/"
+exec ssh "$HOST" "cd '$DEST' && $*"

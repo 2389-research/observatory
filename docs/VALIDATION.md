@@ -1,5 +1,18 @@
 # Specification Package Validation
 
+## Revision 7 (2026-09-01) — L0 Task 1: add docs/runbooks/aibox03.md
+
+Run after adding `docs/runbooks/aibox03.md` (aibox03 host runbook: host facts, setup.sh walkthrough, root-helper verbs, Firecracker re-pin procedure). The runbook is prose only; no schema, example, or check.py logic changed.
+
+### Results
+
+- 46 package checks passed (`uv run docs/validation/check.py`, exit 0).
+- All revision-6 results hold; only `docs/runbooks/aibox03.md` was added.
+
+### Check log
+
+- PASS — All 46 checks (identical list to revision 6; output elided for brevity).
+
 ## Revision 6 (2026-09-01) — update require_authentication comment in example config
 
 Run after rewording the `require_authentication` comment in `docs/examples/host-config.yaml` from a forward reference to a past-tense statement of truth (P5 Task 13 closed; smoke runs with auth on; the example shows the dev default).

@@ -1,0 +1,105 @@
+#!/bin/sh
+# ABOUTME: Narrow root helper for the M0 boot fixture on aibox03. Typed verbs
+# ABOUTME: with strict validation; installed root-owned; replaced by vmobs-privd in M1.
+set -eu
+
+JAIL_BASE=/srv/vmobs/jail
+STAGE_BASE=/srv/vmobs/fixture
+RUN_BASE=/run/vmobs-fixture
+FC_GROUP=vmobs-fixture
+
+die() { echo "vmobs-root-helper: $*" >&2; exit 1; }
+
+valid_id() {
+  case "$1" in
+    ''|*[!a-z0-9-]*) die "invalid id '$1' (want ^[a-z0-9-]{1,24}$)";;
+  esac
+  [ ${#1} -le 24 ] || die "id too long"
+}
+
+valid_uid() {
+  case "$1" in ''|*[!0-9]*) die "invalid uid/gid '$1'";; esac
+  [ "$1" -ge 10000 ] && [ "$1" -le 59999 ] || die "uid/gid out of range [10000,59999]"
+}
+
+valid_cid() {
+  case "$1" in ''|*[!0-9]*) die "invalid cid '$1'";; esac
+  [ "$1" -ge 3 ] && [ "$1" -le 65535 ] || die "cid out of range [3,65535]"
+}
+
+valid_cidr() {
+  echo "$1" | grep -Eq '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/30$' \
+    || die "invalid cidr '$1' (want a.b.c.d/30)"
+}
+
+cmd="${1:-}"; shift || true
+case "$cmd" in
+net-setup)
+  id="$1"; cidr="$2"; valid_id "$id"; valid_cidr "$cidr"
+  ns="vmobs-$id"
+  ip netns add "$ns"
+  ip netns exec "$ns" ip link set lo up
+  ip netns exec "$ns" ip tuntap add dev tap0 mode tap
+  ip netns exec "$ns" ip link set tap0 up
+  ip link add "veth-$id" type veth peer name eth-up netns "$ns"
+  ip link set "veth-$id" up
+  ip netns exec "$ns" ip link set eth-up up
+  # Default deny inside the namespace: no forwarding, drop all routed traffic.
+  ip netns exec "$ns" nft -f - <<EOF
+table inet vmobs {
+  chain forward { type filter hook forward priority 0; policy drop; }
+  chain output  { type filter hook output  priority 0; policy accept; }
+  chain input   { type filter hook input   priority 0; policy accept; }
+}
+EOF
+  ;;
+net-teardown)
+  id="$1"; valid_id "$id"
+  ip link del "veth-$id" 2>/dev/null || true
+  ip netns del "vmobs-$id" 2>/dev/null || true
+  ;;
+jail-start)
+  id="$1"; uid="$2"; gid="$3"; cid="$4"
+  valid_id "$id"; valid_uid "$uid"; valid_uid "$gid"; valid_cid "$cid"
+  stage="$STAGE_BASE/$id/staging"
+  [ -d "$stage" ] || die "no staging dir $stage"
+  [ -z "$(find "$stage" -type l)" ] || die "symlinks in staging refused"
+  for f in vmlinux rootfs.ext4 config.ext4 fc-config.json; do
+    [ -f "$stage/$f" ] || die "missing $stage/$f"
+  done
+  root="$JAIL_BASE/firecracker/$id/root"
+  mkdir -p "$root"
+  cp "$stage/vmlinux" "$stage/rootfs.ext4" "$stage/config.ext4" \
+     "$stage/fc-config.json" "$root/"
+  chown -R "$uid:$gid" "$JAIL_BASE/firecracker/$id"
+  mkdir -p "$RUN_BASE"
+  umask 0002
+  jailer --id "$id" --exec-file /usr/local/bin/firecracker \
+    --uid "$uid" --gid "$gid" \
+    --chroot-base-dir "$JAIL_BASE" \
+    --netns "/var/run/netns/vmobs-$id" \
+    --daemonize \
+    -- --config-file fc-config.json --api-sock api.sock
+  ;;
+jail-stop)
+  id="$1"; valid_id "$id"
+  # Jailer writes the child PID to <chroot-base>/firecracker/<id>/root/firecracker.pid.
+  # The process title is "firecracker --id=<id> ..." (= form, not space), so
+  # pgrep on the id string alone is not unambiguous; use the pid file instead.
+  pidfile="$JAIL_BASE/firecracker/$id/root/firecracker.pid"
+  if [ -f "$pidfile" ]; then
+    pid="$(cat "$pidfile" 2>/dev/null || true)"
+    if [ -n "$pid" ]; then
+      kill -TERM "$pid" 2>/dev/null || true
+      for _ in 1 2 3 4 5 6 7 8 9 10; do
+        kill -0 "$pid" 2>/dev/null || break; sleep 0.5
+      done
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+  fi
+  rm -rf "$JAIL_BASE/firecracker/$id"
+  ;;
+*)
+  die "unknown verb '$cmd' (net-setup|net-teardown|jail-start|jail-stop)"
+  ;;
+esac
