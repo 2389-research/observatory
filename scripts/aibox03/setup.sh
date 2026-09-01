@@ -37,8 +37,8 @@ install -o root -g root -m 0755 "$j" /usr/local/bin/jailer
 
 # 4. Root helper + narrow sudoers.
 install -o root -g root -m 0755 "$here/vmobs-root-helper" /usr/local/sbin/vmobs-root-helper
+visudo -cf "$here/sudoers-vmobs" >/dev/null || { echo "sudoers fragment invalid" >&2; exit 1; }
 install -o root -g root -m 0440 "$here/sudoers-vmobs" /etc/sudoers.d/vmobs-fixture
-visudo -c >/dev/null
 
 # 5. Fixture directories.
 install -d -o harper -g vmobs-fixture -m 0775 /srv/vmobs /srv/vmobs/fixture

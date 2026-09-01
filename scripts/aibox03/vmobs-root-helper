@@ -12,7 +12,7 @@ die() { echo "vmobs-root-helper: $*" >&2; exit 1; }
 
 valid_id() {
   case "$1" in
-    ''|*[!a-z0-9-]*) die "invalid id '$1' (want ^[a-z0-9-]{1,24}$)";;
+    ''|-*|*[!a-z0-9-]*) die "invalid id '$1' (want ^[a-z0-9][a-z0-9-]{0,23}$)";;
   esac
   [ ${#1} -le 24 ] || die "id too long"
 }
@@ -62,15 +62,28 @@ jail-start)
   id="$1"; uid="$2"; gid="$3"; cid="$4"
   valid_id "$id"; valid_uid "$uid"; valid_uid "$gid"; valid_cid "$cid"
   stage="$STAGE_BASE/$id/staging"
-  [ -d "$stage" ] || die "no staging dir $stage"
-  [ -z "$(find "$stage" -type l)" ] || die "symlinks in staging refused"
+  # Resolve and confine: staging may not be (or contain) a symlink escape.
+  # Residual TOCTOU between these checks and the copies is accepted at this
+  # trust level (single operator; see docs/runbooks/aibox03.md) — plain sh
+  # cannot pin an fd the way privd (M1) will.
+  resolved="$(readlink -f "$stage")" || die "cannot resolve $stage"
+  case "$resolved" in
+    "$STAGE_BASE"/*) ;;
+    *) die "staging resolves outside $STAGE_BASE";;
+  esac
+  [ -d "$resolved" ] || die "no staging dir $stage"
+  [ -z "$(find "$resolved" -type l)" ] || die "symlinks in staging refused"
   for f in vmlinux rootfs.ext4 config.ext4 fc-config.json; do
-    [ -f "$stage/$f" ] || die "missing $stage/$f"
+    p="$resolved/$f"
+    [ -f "$p" ] || die "missing $p"
+    links="$(stat -c %h "$p")" || die "cannot stat $p"
+    [ "$links" = 1 ] || die "$f has hardlink count $links; refused"
   done
   root="$JAIL_BASE/firecracker/$id/root"
   mkdir -p "$root"
-  cp "$stage/vmlinux" "$stage/rootfs.ext4" "$stage/config.ext4" \
-     "$stage/fc-config.json" "$root/"
+  for f in vmlinux rootfs.ext4 config.ext4 fc-config.json; do
+    cp -P "$resolved/$f" "$root/"
+  done
   chown -R "$uid:$gid" "$JAIL_BASE/firecracker/$id"
   mkdir -p "$RUN_BASE"
   umask 0002
@@ -78,6 +91,7 @@ jail-start)
     --uid "$uid" --gid "$gid" \
     --chroot-base-dir "$JAIL_BASE" \
     --netns "/var/run/netns/vmobs-$id" \
+    --cgroup-version 2 \
     --daemonize \
     -- --config-file fc-config.json --api-sock api.sock
   ;;
@@ -89,6 +103,7 @@ jail-stop)
   pidfile="$JAIL_BASE/firecracker/$id/root/firecracker.pid"
   if [ -f "$pidfile" ]; then
     pid="$(cat "$pidfile" 2>/dev/null || true)"
+    case "$pid" in ''|*[!0-9]*) [ -z "$pid" ] || die "malformed pid in pidfile";; esac
     if [ -n "$pid" ]; then
       kill -TERM "$pid" 2>/dev/null || true
       for _ in 1 2 3 4 5 6 7 8 9 10; do

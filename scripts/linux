@@ -1,6 +1,7 @@
 #!/bin/sh
 # ABOUTME: Runs a command on the Linux KVM host (aibox03) against a rsynced
 # ABOUTME: copy of this working tree. Usage: scripts/linux 'go test ./...'
+# VMOBS_LINUX_DIR must not contain quotes or shell metacharacters (interpolated into the remote command).
 set -eu
 HOST="${VMOBS_LINUX_HOST:-harper@100.64.0.100}"
 DEST="${VMOBS_LINUX_DIR:-vmobs-build}"
