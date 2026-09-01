@@ -169,6 +169,53 @@ var registry = []KindInfo{
 			"rejection is bounded and durable; the refused payload is not retained",
 		},
 	},
+	// auth.* family: operator session and token lifecycle events (P5, §15.1).
+	// All are host_observed — trusted ingress assigns provenance; no guest path exists.
+	{
+		Kind:          "auth.session_created",
+		Family:        "auth",
+		SchemaVersion: 1,
+		Provenance:    HostObserved,
+		Semantics:     "operator login established a browser session",
+	},
+	{
+		Kind:          "auth.session_ended",
+		Family:        "auth",
+		SchemaVersion: 1,
+		Provenance:    HostObserved,
+		Semantics:     "operator logout ended a session",
+		Caveats: []string{
+			"expiry is lazy and does not emit this event; only explicit logout fires session_ended",
+		},
+	},
+	{
+		Kind:          "auth.login_failed",
+		Family:        "auth",
+		SchemaVersion: 1,
+		Provenance:    HostObserved,
+		Semantics:     "a login attempt failed",
+		Caveats: []string{
+			"serialized and delayed at ingress so volume is bounded",
+			"username in data is bounded to 64 bytes",
+		},
+	},
+	{
+		Kind:          "auth.token_created",
+		Family:        "auth",
+		SchemaVersion: 1,
+		Provenance:    HostObserved,
+		Semantics:     "a CLI token was minted",
+		Caveats: []string{
+			"data carries token id and name, never the secret",
+		},
+	},
+	{
+		Kind:          "auth.token_revoked",
+		Family:        "auth",
+		SchemaVersion: 1,
+		Provenance:    HostObserved,
+		Semantics:     "a CLI token was revoked",
+	},
 	// net.flow, dns, and policy families: reserved for the network inspection
 	// subsystem (L1). Registered now so run-report reproduce_queries are valid
 	// today (zero counts are honest); actual ingress awaits the network emitter.

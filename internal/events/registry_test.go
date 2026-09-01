@@ -136,3 +136,27 @@ func TestRunKindsRegistered(t *testing.T) {
 		})
 	}
 }
+
+func TestAuthKindsRegistered(t *testing.T) {
+	// §15.1: auth.* family is host_observed — operator session and token events.
+	for _, k := range []string{
+		"auth.session_created", "auth.session_ended", "auth.login_failed",
+		"auth.token_created", "auth.token_revoked",
+	} {
+		t.Run(k, func(t *testing.T) {
+			def, ok := events.LookupKind(k)
+			if !ok {
+				t.Fatalf("%s not registered", k)
+			}
+			if def.Provenance != events.HostObserved {
+				t.Fatalf("%s provenance = %q, want host_observed", k, def.Provenance)
+			}
+			if def.Family != "auth" {
+				t.Fatalf("%s family = %q, want auth", k, def.Family)
+			}
+			if def.Semantics == "" {
+				t.Fatalf("%s has no semantics", k)
+			}
+		})
+	}
+}
