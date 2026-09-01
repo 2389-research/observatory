@@ -28,7 +28,8 @@ AT-001: TESTED_PASS (partial — M0 scope only; doctor-gated launch admission co
     pre-kvm-group, EACCES branch accepted; both branches covered, test does not skip).
   - Launch refusal names the failed preflight check per L0-R12: UnavailableError reason appends
     "; preflight: <overall> (<first failing check ID>)" when a non-pass report exists.
-    Test: internal/preflight/preflight_test.go:TestReportSummaryFail (unit).
+    Test: internal/runtime/manager_test.go:TestForHostPreflightSummaryAppended (unit; asserts the
+    UnavailableError reason carries the "preflight: fail (arch_kvm)"-style suffix).
   - internal/api integration: preflight block present in /host/status when runner wired.
   Doctor-gated launch admission (full AT-001 flow: doctor runs + refuses launch + names check) is M1.
 
