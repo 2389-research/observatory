@@ -1,0 +1,331 @@
+// ABOUTME: Linux tests for privd VM operations: digest verification, jailer argv, signal identity.
+// ABOUTME: Non-root: all tests run unprivileged; actual jailer exec is tested in Task 5 smoke.
+
+//go:build linux
+
+package privd_test
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/2389-research/observatory-v2/internal/network"
+	"github.com/2389-research/observatory-v2/internal/privd"
+)
+
+// ----- TestStagedFileVerification -----
+
+// TestStagedFileVerification checks the fd-pinned digest verification helper:
+//   - Correct digest → success (no error).
+//   - Wrong digest → BackendError with cause "digest_mismatch" naming the file.
+//   - Symlink in place of the file → error (O_NOFOLLOW).
+func TestStagedFileVerification(t *testing.T) {
+	dir := t.TempDir()
+
+	content := []byte("hello vm image data")
+	fname := "rootfs.ext4"
+	fpath := filepath.Join(dir, fname)
+	if err := os.WriteFile(fpath, content, 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	h := sha256.Sum256(content)
+	correctDigest := hex.EncodeToString(h[:])
+	wrongDigest := strings.Repeat("a", 64)
+
+	t.Run("correct_digest", func(t *testing.T) {
+		staged := privd.StagedFile{Name: fname, SHA256: correctDigest}
+		err := privd.VerifyStagedFile(dir, staged)
+		if err != nil {
+			t.Errorf("correct digest: unexpected error: %v", err)
+		}
+	})
+
+	t.Run("wrong_digest", func(t *testing.T) {
+		staged := privd.StagedFile{Name: fname, SHA256: wrongDigest}
+		err := privd.VerifyStagedFile(dir, staged)
+		if err == nil {
+			t.Fatal("wrong digest: expected error, got nil")
+		}
+		var be *privd.BackendError
+		if !privd.AsBackendError(err, &be) {
+			t.Fatalf("wrong digest: expected BackendError, got %T: %v", err, err)
+		}
+		if be.Cause != "digest_mismatch" {
+			t.Errorf("wrong digest: cause = %q, want digest_mismatch", be.Cause)
+		}
+		if !strings.Contains(be.Message, fname) {
+			t.Errorf("wrong digest: message %q does not name the file %q", be.Message, fname)
+		}
+		// §15.3: no secret material (contents) in the message.
+		if strings.Contains(be.Message, string(content)) {
+			t.Errorf("wrong digest: message must not contain file contents")
+		}
+	})
+
+	t.Run("symlink_rejected", func(t *testing.T) {
+		linkName := "symlink.ext4"
+		linkPath := filepath.Join(dir, linkName)
+		if err := os.Symlink(fpath, linkPath); err != nil {
+			t.Fatalf("symlink: %v", err)
+		}
+		staged := privd.StagedFile{Name: linkName, SHA256: correctDigest}
+		err := privd.VerifyStagedFile(dir, staged)
+		if err == nil {
+			t.Fatal("symlink: expected error from O_NOFOLLOW, got nil")
+		}
+	})
+}
+
+// ----- TestJailerArgv -----
+
+// TestJailerArgv verifies that JailerArgv builds the exact argv the brief specifies:
+//
+//	jailer --id <id> --exec-file <fc> --uid <uid> --gid <gid>
+//	       --chroot-base-dir <JailBase> --netns /var/run/netns/vmobs-<id>
+//	       --cgroup-version 2 --daemonize
+//	       -- --config-file fc-config.json --api-sock api.sock
+func TestJailerArgv(t *testing.T) {
+	cfg := privd.RealOpsCfg{
+		JailerPath:      "/usr/local/bin/jailer",
+		FirecrackerPath: "/usr/local/bin/firecracker",
+		JailBase:        "/srv/vmobs/jail",
+	}
+	entry := privd.VMEntry{
+		VMID: "vm-test-001",
+		UID:  20000,
+		GID:  20001,
+	}
+
+	argv := privd.JailerArgv(cfg, entry)
+
+	ns := network.NamespaceName(entry.VMID)
+	netnsPath := "/var/run/netns/" + ns
+
+	want := []string{
+		"/usr/local/bin/jailer",
+		"--id", "vm-test-001",
+		"--exec-file", "/usr/local/bin/firecracker",
+		"--uid", "20000",
+		"--gid", "20001",
+		"--chroot-base-dir", "/srv/vmobs/jail",
+		"--netns", netnsPath,
+		"--cgroup-version", "2",
+		"--daemonize",
+		"--",
+		"--config-file", "fc-config.json",
+		"--api-sock", "api.sock",
+	}
+
+	if len(argv) != len(want) {
+		t.Fatalf("argv len = %d, want %d\n  got:  %v\n  want: %v", len(argv), len(want), argv, want)
+	}
+	for i := range want {
+		if argv[i] != want[i] {
+			t.Errorf("argv[%d] = %q, want %q", i, argv[i], want[i])
+		}
+	}
+
+	// Netns path must use network.NamespaceName, not a hand-built string.
+	// Verified above: /var/run/netns/ + network.NamespaceName(id).
+	if !strings.HasPrefix(argv[12], "/var/run/netns/") {
+		t.Errorf("netns arg must start with /var/run/netns/; got %q", argv[12])
+	}
+	if !strings.Contains(argv[12], ns) {
+		t.Errorf("netns arg %q must contain the namespace name %q", argv[12], ns)
+	}
+}
+
+// ----- TestSignalIdentityGate -----
+
+// TestSignalIdentityGate verifies the host-level PID identity check:
+//   - Reading our own process starttime succeeds and matches ProcStatPath output.
+//   - The identity gate refuses to signal when the ledger starttime differs from /proc.
+func TestSignalIdentityGate(t *testing.T) {
+	selfPID := os.Getpid()
+
+	// Read our own starttime via the exported helper.
+	data, err := os.ReadFile(privd.ProcStatPath(selfPID))
+	if err != nil {
+		t.Fatalf("read /proc/%d/stat: %v", selfPID, err)
+	}
+	selfStartTime := privd.ParseStartTime(string(data))
+	if selfStartTime == "" {
+		t.Fatalf("could not parse starttime from own /proc stat")
+	}
+
+	t.Run("matching_starttime_is_alive", func(t *testing.T) {
+		// PIDAlive with the correct starttime must return true for our own PID.
+		if !privd.PIDAlive(selfPID, selfStartTime) {
+			t.Error("PIDAlive(selfPID, correct starttime) = false, want true")
+		}
+	})
+
+	t.Run("wrong_starttime_not_alive", func(t *testing.T) {
+		// PIDAlive with a deliberately wrong starttime must return false.
+		wrongTime := "99999999"
+		if privd.PIDAlive(selfPID, wrongTime) {
+			t.Error("PIDAlive(selfPID, wrong starttime) = true, want false")
+		}
+	})
+
+	t.Run("identity_gate_refuses_on_mismatch", func(t *testing.T) {
+		// CheckSignalIdentity with a wrong ledger starttime must return BackendError
+		// with cause "invalid_state" and message containing "pid recycled".
+		ledgerEntry := privd.VMEntry{
+			VMID:      "vm-ident-001",
+			PID:       selfPID,
+			StartTime: "99999999", // deliberate mismatch
+		}
+		err := privd.CheckSignalIdentity(ledgerEntry)
+		if err == nil {
+			t.Fatal("expected error for mismatched identity, got nil")
+		}
+		var be *privd.BackendError
+		if !privd.AsBackendError(err, &be) {
+			t.Fatalf("expected BackendError, got %T: %v", err, err)
+		}
+		if be.Cause != "invalid_state" {
+			t.Errorf("cause = %q, want invalid_state", be.Cause)
+		}
+		if !strings.Contains(be.Message, "pid recycled") {
+			t.Errorf("message %q must contain 'pid recycled'", be.Message)
+		}
+	})
+
+	t.Run("identity_gate_passes_on_match", func(t *testing.T) {
+		// CheckSignalIdentity with the correct starttime must return nil.
+		ledgerEntry := privd.VMEntry{
+			VMID:      "vm-ident-002",
+			PID:       selfPID,
+			StartTime: selfStartTime,
+		}
+		err := privd.CheckSignalIdentity(ledgerEntry)
+		if err != nil {
+			t.Errorf("CheckSignalIdentity with correct starttime: unexpected error: %v", err)
+		}
+	})
+}
+
+// ----- TestWireBackendErrorCause -----
+
+// TestWireBackendErrorCause checks that typed BackendErrors from the backend surface
+// as the correct wire cause in the server response (not blanket "exec_failed").
+func TestWireBackendErrorCause(t *testing.T) {
+	tests := []struct {
+		name      string
+		backendFn func(b *recordingBackend)
+		verb      string
+		payload   any
+		wantCause string
+	}{
+		{
+			name: "start_vm_digest_mismatch",
+			backendFn: func(b *recordingBackend) {
+				b.startErr = &privd.BackendError{Cause: "digest_mismatch", Message: "file rootfs.ext4: digest mismatch"}
+			},
+			verb: "start_vm",
+			// payload wired below in the test loop
+			wantCause: "digest_mismatch",
+		},
+		{
+			name: "signal_vm_invalid_state",
+			backendFn: func(b *recordingBackend) {
+				b.signalErr = &privd.BackendError{Cause: "invalid_state", Message: "pid recycled"}
+			},
+			verb:      "signal_vm",
+			wantCause: "invalid_state",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			sockPath := filepath.Join(dir, "privd.sock")
+			stageRoot := filepath.Join(dir, "stage")
+			if err := os.MkdirAll(stageRoot, 0o755); err != nil {
+				t.Fatalf("mkdir stageroot: %v", err)
+			}
+			stageDir := filepath.Join(stageRoot, "vm-wire-001")
+			if err := os.MkdirAll(stageDir, 0o755); err != nil {
+				t.Fatalf("mkdir stagedir: %v", err)
+			}
+			ledgerDir := filepath.Join(dir, "ledger")
+			if err := os.MkdirAll(ledgerDir, 0o755); err != nil {
+				t.Fatalf("mkdir ledger: %v", err)
+			}
+
+			backend := &recordingBackend{}
+			tc.backendFn(backend)
+
+			pid, starttime := spawnShortProcess(t)
+			backend.startResp = privd.StartVMResp{PID: pid, StartTime: starttime}
+
+			cfg := privd.ServerCfg{
+				AllowedUID: os.Getuid(),
+				LedgerDir:  ledgerDir,
+				StageRoot:  stageRoot,
+				JailBase:   filepath.Join(dir, "jail"),
+				UIDMin:     os.Getuid(),
+				UIDMax:     os.Getuid() + 100,
+				Ops:        backend,
+			}
+			startServer(t, sockPath, cfg)
+
+			vmID := "vm-wire-001"
+			cidr := "10.50.0.0/30"
+
+			// allocate_network first.
+			conn := dialPrivd(t, sockPath)
+			resp := sendRecv(t, conn, makeReq(t, "allocate_network", privd.AllocateNetworkReq{VMID: vmID, CIDR: cidr}))
+			conn.Close()
+			if !resp.OK {
+				t.Fatalf("allocate_network: %+v", resp)
+			}
+
+			var payload any
+			switch tc.verb {
+			case "start_vm":
+				payload = privd.StartVMReq{
+					VMID:     vmID,
+					UID:      os.Getuid(),
+					GID:      os.Getgid(),
+					CID:      7,
+					StageDir: stageDir,
+				}
+			case "signal_vm":
+				// Need to start_vm with a different (non-error) backend first so the
+				// ledger has the entry; then the signal call can hit the signalErr.
+				// The start backend has no error set here; only signalErr is set.
+				conn2 := dialPrivd(t, sockPath)
+				resp2 := sendRecv(t, conn2, makeReq(t, "start_vm", privd.StartVMReq{
+					VMID:     vmID,
+					UID:      os.Getuid(),
+					GID:      os.Getgid(),
+					CID:      7,
+					StageDir: stageDir,
+				}))
+				conn2.Close()
+				if !resp2.OK {
+					t.Fatalf("start_vm (setup for signal): %+v", resp2)
+				}
+				payload = privd.SignalVMReq{VMID: vmID, Kind: "term"}
+			}
+
+			conn3 := dialPrivd(t, sockPath)
+			resp3 := sendRecv(t, conn3, makeReq(t, tc.verb, payload))
+			conn3.Close()
+
+			if resp3.OK {
+				t.Fatalf("%s: expected failure with cause %q, got OK", tc.verb, tc.wantCause)
+			}
+			if resp3.Cause != tc.wantCause {
+				t.Errorf("%s: cause = %q, want %q", tc.verb, resp3.Cause, tc.wantCause)
+			}
+		})
+	}
+}

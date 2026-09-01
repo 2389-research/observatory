@@ -9,6 +9,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -37,11 +39,10 @@ type RealOpsTestHooks struct {
 }
 
 // RealOps implements OpsBackend with real host operations.
-// AllocateNetwork and ReleaseNetwork are real in this task.
-// StartVM, SignalVM, and ReleaseVM are stubbed until Task 4.
 type RealOps struct {
 	cfg   RealOpsCfg
 	hooks RealOpsTestHooks
+	log   *log.Logger
 }
 
 // Compile-time check: RealOps must satisfy OpsBackend.
@@ -49,12 +50,12 @@ var _ OpsBackend = (*RealOps)(nil)
 
 // NewRealOps creates a RealOps using the given configuration.
 func NewRealOps(cfg RealOpsCfg) *RealOps {
-	return &RealOps{cfg: cfg}
+	return &RealOps{cfg: cfg, log: log.New(os.Stderr, "privd: ", log.LstdFlags)}
 }
 
 // NewRealOpsWithHooks creates a RealOps with injectable hooks for non-root testing.
 func NewRealOpsWithHooks(cfg RealOpsCfg, hooks RealOpsTestHooks) *RealOps {
-	return &RealOps{cfg: cfg, hooks: hooks}
+	return &RealOps{cfg: cfg, hooks: hooks, log: log.New(os.Stderr, "privd: ", log.LstdFlags)}
 }
 
 // AllocateNetwork creates the per-VM network namespace, TAP device, veth pair,
@@ -120,21 +121,6 @@ func (r *RealOps) ReleaseNetwork(entry VMEntry) error {
 		_ = r.runCmd(ctx, argv)
 	}
 	return nil
-}
-
-// StartVM is not implemented until Task 4.
-func (r *RealOps) StartVM(_ *VMEntry, _ StartVMReq) (StartVMResp, error) {
-	return StartVMResp{}, fmt.Errorf("privd: StartVM not implemented until Task 4")
-}
-
-// SignalVM is not implemented until Task 4.
-func (r *RealOps) SignalVM(_ VMEntry, _ string) error {
-	return fmt.Errorf("privd: SignalVM not implemented until Task 4")
-}
-
-// ReleaseVM is not implemented until Task 4.
-func (r *RealOps) ReleaseVM(_ VMEntry) error {
-	return fmt.Errorf("privd: ReleaseVM not implemented until Task 4")
 }
 
 // netnsExists reports whether the network namespace for vmID is present.

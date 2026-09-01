@@ -31,9 +31,10 @@ type recordingBackend struct {
 	signalCalls    []recordedSignal
 	releaseVMCalls []string // vm_ids
 
-	// Injected response for StartVM.
+	// Injected responses.
 	startResp privd.StartVMResp
 	startErr  error
+	signalErr error
 }
 
 type recordedAllocate struct {
@@ -68,7 +69,7 @@ func (b *recordingBackend) StartVM(entry *privd.VMEntry, req privd.StartVMReq) (
 
 func (b *recordingBackend) SignalVM(entry privd.VMEntry, signal string) error {
 	b.signalCalls = append(b.signalCalls, recordedSignal{entry, signal})
-	return nil
+	return b.signalErr
 }
 
 func (b *recordingBackend) ReleaseVM(entry privd.VMEntry) error {

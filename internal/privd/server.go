@@ -16,6 +16,16 @@ import (
 	"time"
 )
 
+// backendErrResp converts a backend error to a Response.
+// If err is a *BackendError, its Cause is used; otherwise "exec_failed" is the cause.
+func backendErrResp(err error) Response {
+	var be *BackendError
+	if errors.As(err, &be) {
+		return errResp(be.Cause, be.Message)
+	}
+	return errResp("exec_failed", err.Error())
+}
+
 // OpsBackend is the interface the server calls after validating a request.
 // The real implementation (wired in Task 3/4) requires root; linux tests use a recording backend.
 type OpsBackend interface {
@@ -274,7 +284,7 @@ func (s *Server) handleStartVM(raw json.RawMessage) Response {
 
 	startResp, err := s.cfg.Ops.StartVM(&entry, r)
 	if err != nil {
-		return errResp("exec_failed", err.Error())
+		return backendErrResp(err)
 	}
 
 	// Update entry with process identity.
@@ -313,7 +323,7 @@ func (s *Server) handleSignalVM(raw json.RawMessage) Response {
 	}
 
 	if err := s.cfg.Ops.SignalVM(entry, r.Kind); err != nil {
-		return errResp("exec_failed", err.Error())
+		return backendErrResp(err)
 	}
 	return okResp(nil)
 }
@@ -345,7 +355,7 @@ func (s *Server) handleReleaseVM(raw json.RawMessage) Response {
 	}
 
 	if err := s.cfg.Ops.ReleaseVM(entry); err != nil {
-		return errResp("exec_failed", err.Error())
+		return backendErrResp(err)
 	}
 	// Clear the VM half only. The network half (NetCIDR) is released separately via
 	// release_network, so the manager can restart the VM without losing the netns.
