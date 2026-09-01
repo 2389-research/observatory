@@ -1,5 +1,18 @@
 # Specification Package Validation
 
+## Revision 5 (2026-09-01) — auth and https-mode fields in example config
+
+Run after adding `session_ttl_minutes: 720`, `tls_cert_file: ""`, and `tls_key_file: ""` to `docs/examples/host-config.yaml` to match the new struct fields introduced by the P5 auth validation matrix.
+
+### Results
+
+- 46 package checks passed (`uv run docs/validation/check.py`, exit 0).
+- All revision-4 results hold; only `docs/examples/host-config.yaml` changed.
+
+### Check log
+
+- PASS — All 46 checks (identical list to revision 4; output elided for brevity).
+
 These checks validate the handoff documents and synthetic interface examples. **They are not tests of a running Firecracker Observatory implementation.** No VMM, guest sensor, proxy, terminal, isolation, crash-recovery or performance acceptance test was executed as part of preparing this package.
 
 The canonical check is `validation/check.py`, run as `uv run docs/validation/check.py`. Re-run it after changing any file in `docs/` and append a dated revision below. Earlier revisions are the historical record; never rewrite them.

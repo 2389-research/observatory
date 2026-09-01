@@ -8,6 +8,9 @@ server:
   mode: loopback_only
   # Non-loopback use must require HTTPS/WSS and exact-origin enforcement.
   trust_forwarded_identity: false
+  # Required in mode: https; must be empty (or absent) in loopback_only.
+  tls_cert_file: ""
+  tls_key_file: ""
 
 auth:
   mode: local_operator
@@ -18,6 +21,8 @@ auth:
   session_cookie_same_site: strict
   # Secure cookies are mandatory in HTTPS mode; HTTP is loopback-only.
   session_cookie_secure: false
+  # Absolute browser-session lifetime in minutes; restart also ends sessions.
+  session_ttl_minutes: 720
 
 paths:
   state: "/var/lib/vmobs"

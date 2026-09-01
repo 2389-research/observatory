@@ -35,6 +35,9 @@ type Server struct {
 	PublicOrigin           string `yaml:"public_origin"`
 	Mode                   string `yaml:"mode"`
 	TrustForwardedIdentity bool   `yaml:"trust_forwarded_identity"`
+	// TLSCertFile and TLSKeyFile are required in mode: https; must be empty in loopback_only.
+	TLSCertFile string `yaml:"tls_cert_file"`
+	TLSKeyFile  string `yaml:"tls_key_file"`
 }
 
 type Auth struct {
@@ -45,6 +48,9 @@ type Auth struct {
 	SessionCookieHTTPOnly bool   `yaml:"session_cookie_http_only"`
 	SessionCookieSameSite string `yaml:"session_cookie_same_site"`
 	SessionCookieSecure   bool   `yaml:"session_cookie_secure"`
+	// SessionTTLMinutes is the absolute browser-session lifetime in minutes.
+	// 0 in YAML → default 720 applied in Load.
+	SessionTTLMinutes int `yaml:"session_ttl_minutes"`
 }
 
 type Paths struct {
@@ -179,10 +185,18 @@ func Load(path string) (*Config, error) {
 	if err := dec.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
+	if cfg.Auth.SessionTTLMinutes == 0 {
+		cfg.Auth.SessionTTLMinutes = 720
+	}
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return &cfg, nil
+}
+
+// AuthEnabled reports whether caller authentication is required.
+func (c *Config) AuthEnabled() bool {
+	return c.Auth.RequireAuthentication
 }
 
 // Validate enforces the constraints phase 1 acts on. Fields the build ignores
@@ -197,11 +211,57 @@ func (c *Config) Validate() error {
 	if c.ConfigVersion != 1 {
 		add("config_version must be 1, got %d", c.ConfigVersion)
 	}
-	if c.Server.Mode != "loopback_only" {
-		add("server.mode %q is not supported: only loopback_only until the authentication boundary is built", c.Server.Mode)
+	switch c.Server.Mode {
+	case "loopback_only":
+		if err := requireLoopback(c.Server.Listen); err != nil {
+			add("server.listen: %v", err)
+		}
+		if c.Server.TLSCertFile != "" || c.Server.TLSKeyFile != "" {
+			add("tls_cert_file/tls_key_file are set but server.mode is loopback_only; a cert nothing serves is a config lie")
+		}
+		// require_authentication: false is legal here and only here —
+		// loopback + host ACLs, the P1–P4 trust model, kept for dev.
+	case "https":
+		if c.Server.TLSCertFile == "" {
+			add("server.mode https requires tls_cert_file")
+		}
+		if c.Server.TLSKeyFile == "" {
+			add("server.mode https requires tls_key_file")
+		}
+		if !c.Auth.RequireAuthentication {
+			add("server.mode https requires auth.require_authentication: true")
+		}
+		if !c.Auth.SessionCookieSecure {
+			add("server.mode https requires auth.session_cookie_secure: true")
+		}
+		if !strings.HasPrefix(c.Server.PublicOrigin, "https://") {
+			add("server.mode https requires an https:// public_origin, got %q", c.Server.PublicOrigin)
+		}
+	default:
+		add("server.mode %q is not supported: loopback_only or https", c.Server.Mode)
 	}
-	if err := requireLoopback(c.Server.Listen); err != nil {
-		add("server.listen: %v", err)
+	if c.Server.TrustForwardedIdentity {
+		add("server.trust_forwarded_identity is not built in this version; only direct local_operator auth exists")
+	}
+	if c.Auth.RequireAuthentication {
+		if c.Auth.Mode != "local_operator" {
+			add("auth.mode %q is not built: only local_operator", c.Auth.Mode)
+		}
+		if c.Auth.CredentialStore == "" {
+			add("auth.credential_store is required when require_authentication is true")
+		}
+		if !c.Auth.CSRFProtection {
+			add("auth.csrf_protection cannot be disabled while authentication is enabled")
+		}
+		if !c.Auth.SessionCookieHTTPOnly {
+			add("auth.session_cookie_http_only cannot be disabled while authentication is enabled")
+		}
+		if ss := c.Auth.SessionCookieSameSite; ss != "strict" && ss != "lax" {
+			add("auth.session_cookie_same_site must be strict or lax, got %q", ss)
+		}
+	}
+	if c.Auth.SessionTTLMinutes < 0 {
+		add("auth.session_ttl_minutes must be >= 0, got %d", c.Auth.SessionTTLMinutes)
 	}
 	if c.Storage.Database == "" {
 		add("storage.database is required")

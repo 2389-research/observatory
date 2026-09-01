@@ -70,6 +70,102 @@ func TestUnknownFieldRejected(t *testing.T) {
 	}
 }
 
+func TestAuthAndModeValidation(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(c *config.Config)
+		wantErr string // substring; "" = valid
+	}{
+		{"example is valid", func(c *config.Config) {}, ""},
+		{"trust_forwarded_identity refused", func(c *config.Config) { c.Server.TrustForwardedIdentity = true }, "trust_forwarded_identity"},
+		{"auth mode must be local_operator", func(c *config.Config) { c.Auth.Mode = "reverse_proxy" }, "auth.mode"},
+		{"auth on requires credential store", func(c *config.Config) { c.Auth.CredentialStore = "" }, "credential_store"},
+		{"auth on requires csrf", func(c *config.Config) { c.Auth.CSRFProtection = false }, "csrf_protection"},
+		{"auth on requires httponly", func(c *config.Config) { c.Auth.SessionCookieHTTPOnly = false }, "session_cookie_http_only"},
+		{"samesite none refused", func(c *config.Config) { c.Auth.SessionCookieSameSite = "none" }, "session_cookie_same_site"},
+		{"negative ttl refused", func(c *config.Config) { c.Auth.SessionTTLMinutes = -1 }, "session_ttl_minutes"},
+		{"https mode needs cert", func(c *config.Config) { c.Server.Mode = "https"; c.Server.TLSKeyFile = "k.pem" }, "tls_cert_file"},
+		{"https mode needs key", func(c *config.Config) { c.Server.Mode = "https"; c.Server.TLSCertFile = "c.pem" }, "tls_key_file"},
+		{"https forces auth", func(c *config.Config) {
+			c.Server.Mode = "https"
+			c.Server.TLSCertFile, c.Server.TLSKeyFile = "c.pem", "k.pem"
+			c.Server.PublicOrigin = "https://vmobs.example:8787"
+			c.Auth.SessionCookieSecure = true
+			c.Auth.RequireAuthentication = false
+		}, "require_authentication"},
+		{"https forces secure cookies", func(c *config.Config) {
+			c.Server.Mode = "https"
+			c.Server.TLSCertFile, c.Server.TLSKeyFile = "c.pem", "k.pem"
+			c.Server.PublicOrigin = "https://vmobs.example:8787"
+			c.Auth.SessionCookieSecure = false
+		}, "session_cookie_secure"},
+		{"https needs https origin", func(c *config.Config) {
+			c.Server.Mode = "https"
+			c.Server.TLSCertFile, c.Server.TLSKeyFile = "c.pem", "k.pem"
+			c.Auth.SessionCookieSecure = true
+			// PublicOrigin stays http://...
+		}, "public_origin"},
+		{"https allows non-loopback listen", func(c *config.Config) {
+			c.Server.Mode = "https"
+			c.Server.TLSCertFile, c.Server.TLSKeyFile = "c.pem", "k.pem"
+			c.Server.PublicOrigin = "https://vmobs.example:8787"
+			c.Auth.SessionCookieSecure = true
+			c.Server.Listen = "0.0.0.0:8787"
+		}, ""},
+		{"loopback mode refuses tls files", func(c *config.Config) { c.Server.TLSCertFile = "c.pem" }, "tls_cert_file"},
+		{"unknown mode refused", func(c *config.Config) { c.Server.Mode = "tailscale" }, "server.mode"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := config.Load("../../docs/examples/host-config.yaml")
+			if err != nil {
+				t.Fatalf("loading example config: %v", err)
+			}
+			tc.mutate(cfg)
+			err = cfg.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Errorf("expected valid, got error: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error should contain %q, got: %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestSessionTTLDefault(t *testing.T) {
+	const minimalWithAuth = `config_version: 1
+server:
+  listen: "127.0.0.1:0"
+  mode: loopback_only
+auth:
+  mode: local_operator
+  require_authentication: true
+  credential_store: "/tmp/auth"
+  csrf_protection: true
+  session_cookie_http_only: true
+  session_cookie_same_site: strict
+storage:
+  database: "/tmp/vmobs-test/events.sqlite"
+  sqlite_journal_mode: WAL
+  sqlite_synchronous: FULL
+  logical_writers: 1
+`
+	cfg, err := load(t, minimalWithAuth)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Auth.SessionTTLMinutes != 720 {
+		t.Errorf("expected SessionTTLMinutes=720 when omitted, got %d", cfg.Auth.SessionTTLMinutes)
+	}
+}
+
 func TestValidationTeaches(t *testing.T) {
 	cases := []struct {
 		name    string
