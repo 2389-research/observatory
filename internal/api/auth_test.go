@@ -908,7 +908,7 @@ func TestTokenEndpointsDisabled(t *testing.T) {
 	}{
 		{http.MethodPost, "/api/v1/auth/tokens", `{"name":"x"}`},
 		{http.MethodGet, "/api/v1/auth/tokens", ""},
-		{http.MethodDelete, "/api/v1/auth/tokens/tok-00000000", ""},
+		{http.MethodDelete, "/api/v1/auth/tokens/tok-0000000000000000", ""},
 	}
 	for _, p := range probes {
 		var bodyReader io.Reader

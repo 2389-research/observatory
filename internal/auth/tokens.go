@@ -5,6 +5,7 @@ package auth
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -103,8 +104,8 @@ func (s *Store) CreateToken(name, owner string, ttl time.Duration) (secret strin
 	}
 	secret = "vmobs_" + base64.RawURLEncoding.EncodeToString(rawSecret)
 
-	// Generate token ID: 4 random bytes, hex-encoded.
-	idBytes := make([]byte, 4)
+	// Generate token ID: 8 random bytes, hex-encoded.
+	idBytes := make([]byte, 8)
 	if _, err := rand.Read(idBytes); err != nil {
 		return "", TokenRecord{}, fmt.Errorf("generate token id: %w", err)
 	}
@@ -166,7 +167,7 @@ func (s *Store) VerifyToken(secret string) (TokenRecord, error) {
 	}
 
 	for _, entry := range ts.Tokens {
-		if entry.SHA256Hex != candidateHex {
+		if subtle.ConstantTimeCompare([]byte(entry.SHA256Hex), []byte(candidateHex)) != 1 {
 			continue
 		}
 		// Hash matched — check revocation.
