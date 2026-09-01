@@ -3,16 +3,19 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -25,6 +28,42 @@ import (
 )
 
 func main() {
+	// Subcommand dispatch before global flag parsing so init-auth gets its own
+	// FlagSet and does not pollute the serve flag set.
+	if len(os.Args) > 1 && os.Args[1] == "init-auth" {
+		fs := flag.NewFlagSet("init-auth", flag.ExitOnError)
+		cfgPath := fs.String("config", "", "path to host config YAML (required)")
+		username := fs.String("username", "local_operator", "operator username")
+		tokenName := fs.String("token-name", "initial", "name for the minted token")
+		useStdin := fs.Bool("password-stdin", false, "read password from stdin (first line)")
+		fs.Usage = func() {
+			fmt.Fprintln(os.Stderr, "usage: vmobsd init-auth -config PATH [-username local_operator] [-token-name initial] [-password-stdin]")
+			fs.PrintDefaults()
+		}
+		if err := fs.Parse(os.Args[2:]); err != nil {
+			// ExitOnError handles this.
+			os.Exit(3)
+		}
+		if *cfgPath == "" {
+			fs.Usage()
+			os.Exit(3)
+		}
+		cfg, err := config.Load(*cfgPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "config rejected: %v\n", err)
+			os.Exit(1)
+		}
+		var passwordSrc io.Reader
+		if *useStdin {
+			passwordSrc = os.Stdin
+		}
+		if err := runInitAuth(cfg, *username, *tokenName, passwordSrc, os.Stdout, os.Stderr); err != nil {
+			fmt.Fprintf(os.Stderr, "init-auth: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	configPath := flag.String("config", "", "path to host config YAML (required)")
 	flag.Parse()
 
@@ -48,6 +87,59 @@ func main() {
 		logger.Error("daemon failed", "error", err)
 		os.Exit(1)
 	}
+}
+
+// runInitAuth creates the credential store at cfg.Auth.CredentialStore, mints
+// one token, and prints two lines to stdout: "operator: <username>" and
+// "token: <secret>". All other output goes to stderr. It is extracted for
+// testability — no exec required.
+//
+// Password resolution: passwordSrc non-nil means the caller passed
+// -password-stdin; read the first line and trim one trailing newline (LF or
+// CRLF). When passwordSrc is nil, fall back to the VMOBSD_OPERATOR_PASSWORD
+// environment variable. Both absent → error naming both sources. Minimum
+// password length is 8 bytes.
+func runInitAuth(cfg *config.Config, username, tokenName string, passwordSrc io.Reader, stdout, stderr io.Writer) error {
+	// Resolve password.
+	var password string
+	if passwordSrc != nil {
+		scanner := bufio.NewScanner(passwordSrc)
+		if scanner.Scan() {
+			password = scanner.Text() // Text() already strips the trailing newline.
+		}
+		if err := scanner.Err(); err != nil {
+			return fmt.Errorf("read password from stdin: %w", err)
+		}
+	} else {
+		password = os.Getenv("VMOBSD_OPERATOR_PASSWORD")
+		if password == "" {
+			return fmt.Errorf("no password supplied: provide -password-stdin or set VMOBSD_OPERATOR_PASSWORD")
+		}
+	}
+
+	if len(password) < 8 {
+		return fmt.Errorf("password must be at least 8 bytes (got %d)", len(password))
+	}
+
+	credDir := cfg.Auth.CredentialStore
+	fmt.Fprintf(stderr, "initializing credential store at %s\n", credDir)
+
+	st, err := auth.InitStore(credDir, username, password)
+	if err != nil {
+		if errors.Is(err, auth.ErrAlreadyInitialized) || strings.Contains(err.Error(), "already initialized") {
+			return fmt.Errorf("credential store already initialized at %s: %w", credDir, err)
+		}
+		return fmt.Errorf("init credential store: %w", err)
+	}
+
+	secret, _, err := st.CreateToken(tokenName, username, 0)
+	if err != nil {
+		return fmt.Errorf("create initial token: %w", err)
+	}
+
+	fmt.Fprintf(stdout, "operator: %s\n", username)
+	fmt.Fprintf(stdout, "token: %s\n", secret)
+	return nil
 }
 
 // serve runs the daemon until ctx is canceled. ready is called once with the
