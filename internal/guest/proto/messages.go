@@ -20,7 +20,15 @@ const (
 	KindPing            = "ping"
 	KindPong            = "pong"
 	KindError           = "error"
+	KindShutdown        = "shutdown"
+	KindShutdownAck     = "shutdown_ack"
 )
+
+// Shutdown is sent by the host runner to request guest shutdown.
+// DeadlineS is the number of seconds the guest has to shut down gracefully.
+type Shutdown struct {
+	DeadlineS int `json:"deadline_s"`
+}
 
 // Envelope wraps every control-plane message. V is the protocol version, Kind
 // is the message kind, and Data holds the kind-specific payload.
