@@ -148,14 +148,17 @@ func TestAuthKindsRegistered(t *testing.T) {
 			if !ok {
 				t.Fatalf("%s not registered", k)
 			}
-			if def.Provenance != events.HostObserved {
-				t.Fatalf("%s provenance = %q, want host_observed", k, def.Provenance)
-			}
 			if def.Family != "auth" {
-				t.Fatalf("%s family = %q, want auth", k, def.Family)
+				t.Errorf("family = %q, want \"auth\"", def.Family)
+			}
+			if def.SchemaVersion != 1 {
+				t.Errorf("schema_version = %d, want 1", def.SchemaVersion)
+			}
+			if def.Provenance != events.HostObserved {
+				t.Errorf("provenance = %q, want %q", def.Provenance, events.HostObserved)
 			}
 			if def.Semantics == "" {
-				t.Fatalf("%s has no semantics", k)
+				t.Error("semantics must not be empty")
 			}
 		})
 	}

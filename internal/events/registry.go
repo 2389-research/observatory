@@ -176,14 +176,14 @@ var registry = []KindInfo{
 		Family:        "auth",
 		SchemaVersion: 1,
 		Provenance:    HostObserved,
-		Semantics:     "operator login established a browser session",
+		Semantics:     "Operator login established a browser session",
 	},
 	{
 		Kind:          "auth.session_ended",
 		Family:        "auth",
 		SchemaVersion: 1,
 		Provenance:    HostObserved,
-		Semantics:     "operator logout ended a session",
+		Semantics:     "Operator logout ended a session",
 		Caveats: []string{
 			"expiry is lazy and does not emit this event; only explicit logout fires session_ended",
 		},
@@ -193,7 +193,7 @@ var registry = []KindInfo{
 		Family:        "auth",
 		SchemaVersion: 1,
 		Provenance:    HostObserved,
-		Semantics:     "a login attempt failed",
+		Semantics:     "A login attempt failed",
 		Caveats: []string{
 			"serialized and delayed at ingress so volume is bounded",
 			"username in data is bounded to 64 bytes",
@@ -204,7 +204,7 @@ var registry = []KindInfo{
 		Family:        "auth",
 		SchemaVersion: 1,
 		Provenance:    HostObserved,
-		Semantics:     "a CLI token was minted",
+		Semantics:     "A CLI token was minted",
 		Caveats: []string{
 			"data carries token id and name, never the secret",
 		},
@@ -214,7 +214,7 @@ var registry = []KindInfo{
 		Family:        "auth",
 		SchemaVersion: 1,
 		Provenance:    HostObserved,
-		Semantics:     "a CLI token was revoked",
+		Semantics:     "A CLI token was revoked",
 	},
 	// net.flow, dns, and policy families: reserved for the network inspection
 	// subsystem (L1). Registered now so run-report reproduce_queries are valid
