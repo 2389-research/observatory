@@ -11,10 +11,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -82,7 +85,17 @@ func PrepareVM(t *testing.T, repoRoot, id string, n int, alloc *network.Allocato
 	t.Helper()
 
 	uid := 20000 + n
-	gid := 20000 + n // Start overrides this from the vmobs-fixture group gid if available
+	// GID is the shared vmobs-fixture group (gid 36000, created by scripts/aibox03/setup.sh).
+	// The root helper sets umask 0002 so sockets come out group-writable by this gid;
+	// harper's shell session must be in this group to connect to VM sockets.
+	grp, err := user.LookupGroup("vmobs-fixture")
+	if err != nil {
+		t.Fatalf("PrepareVM %s: vmobs-fixture group not found (run scripts/aibox03/setup.sh): %v", id, err)
+	}
+	gid, err := strconv.Atoi(grp.Gid)
+	if err != nil {
+		t.Fatalf("PrepareVM %s: parse vmobs-fixture gid %q: %v", id, grp.Gid, err)
+	}
 	cid := uint32(3 + n)
 
 	subnet, err := alloc.Next()
@@ -136,15 +149,16 @@ func (v *VM) Start(t *testing.T) {
 	// Register cleanup before jail-start so teardown always runs even on failure.
 	t.Cleanup(func() { v.Stop(t) })
 
-	// Stage the four required files into /srv/vmobs/fixture/<id>/staging/ via sudo.
+	// Stage the four required files into /srv/vmobs/fixture/<id>/staging/.
+	// /srv/vmobs/fixture is harper:vmobs-fixture 0775 (setup.sh:44) — no sudo needed.
 	// Staging sources: vmlinux + rootfs.ext4 from images/dist/; others from buildDir.
 	stageSources := map[string]string{
-		"vmlinux":       filepath.Join(v.repoRoot, "images", "dist", "vmlinux"),
-		"rootfs.ext4":   filepath.Join(v.repoRoot, "images", "dist", "rootfs.ext4"),
-		"config.ext4":   filepath.Join(v.buildDir, "config.ext4"),
+		"vmlinux":        filepath.Join(v.repoRoot, "images", "dist", "vmlinux"),
+		"rootfs.ext4":    filepath.Join(v.repoRoot, "images", "dist", "rootfs.ext4"),
+		"config.ext4":    filepath.Join(v.buildDir, "config.ext4"),
 		"fc-config.json": filepath.Join(v.buildDir, "fc-config.json"),
 	}
-	if err := sudoStage(v.Stage, stageSources); err != nil {
+	if err := stageFiles(v.Stage, stageSources); err != nil {
 		t.Fatalf("Start %s: stage files: %v", v.ID, err)
 	}
 
@@ -372,28 +386,45 @@ func BuildVMConfig(repoRoot, id string, cid uint32, outDir string) (*guest.BootC
 // Private helpers
 // ------------------------------------------------------------------
 
-// sudoStage creates stagingDir via sudo and copies each named file into it.
-// sources maps filename → absolute source path.
-func sudoStage(stagingDir string, sources map[string]string) error {
-	mkdirCmd := exec.Command("sudo", "mkdir", "-p", stagingDir)
-	if out, err := mkdirCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("mkdir %s: %w\n%s", stagingDir, err, out)
+// stageFiles creates stagingDir (harper owns /srv/vmobs/fixture per setup.sh) and
+// copies each named file into it. Real copies only — the root helper refuses staging
+// files with hardlink count >1 or any symlink anywhere in staging.
+func stageFiles(stagingDir string, sources map[string]string) error {
+	if err := os.MkdirAll(stagingDir, 0775); err != nil {
+		return fmt.Errorf("mkdir %s: %w", stagingDir, err)
 	}
 	for name, src := range sources {
 		dst := filepath.Join(stagingDir, name)
-		// --no-preserve=all: don't copy ownership/perms from source;
-		// jail-start does chown -R <uid>:<gid> over the chroot.
-		cpCmd := exec.Command("sudo", "cp", "--no-preserve=all", src, dst)
-		if out, err := cpCmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("cp %s → %s: %w\n%s", src, dst, err, out)
+		if err := copyFile(src, dst); err != nil {
+			return fmt.Errorf("copy %s → %s: %w", src, dst, err)
 		}
 	}
 	return nil
 }
 
+// copyFile copies src to dst as a new file (no hardlinks, no symlinks).
+// The root helper refuses staging files with link count >1; os.Link is forbidden here.
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
+}
+
 // waitForVsock retries DialHostVsock until the socket answers or ctx expires.
 func waitForVsock(ctx context.Context, udsPath string) error {
 	var lastErr error
+	start := time.Now()
 	for {
 		dialCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		conn, err := proto.DialHostVsock(dialCtx, udsPath, vsockPort)
@@ -405,7 +436,7 @@ func waitForVsock(ctx context.Context, udsPath string) error {
 		lastErr = err
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("vsock %s not ready after %s: %w", udsPath, readyTimeout, lastErr)
+			return fmt.Errorf("vsock %s not ready after %s: %w", udsPath, time.Since(start).Round(time.Millisecond), lastErr)
 		default:
 		}
 		time.Sleep(readyBackoff)

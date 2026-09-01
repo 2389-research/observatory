@@ -201,13 +201,13 @@ func TestM0Boot(t *testing.T) {
 	// Stop B (cleanup also runs at test end; double-stop is idempotent).
 	vmB.Stop(t)
 
-	// After both VMs are stopped: no m0-* entries in jail or netns.
-	checkNoLeaks(t)
+	// After both VMs are stopped: no test VM entries remain in jail or netns.
+	checkNoLeaks(t, m0IDA, m0IDB)
 
 	// --- Step 4: Write evidence file (only when the gate actually runs) ---
 
 	hostname, _ := os.Hostname()
-	writeEvidenceFile(t, repoRoot, hostname, lk, vmA, vmB, manifestA, manifestB)
+	writeEvidenceFile(t, repoRoot, hostname, lk, vmA, vmB, ackA, ackB, ackCross, manifestA, manifestB)
 }
 
 // ------------------------------------------------------------------
@@ -296,10 +296,15 @@ func sendPing(ctx context.Context, conn net.Conn) error {
 	if env.Kind != proto.KindPong {
 		return fmt.Errorf("expected pong, got %q", env.Kind)
 	}
+	// Clear the deadline so the connection remains usable for subsequent operations.
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		return fmt.Errorf("clear deadline: %w", err)
+	}
 	return nil
 }
 
-// statHostFiles checks disk ownership, isolation, and write permissions from the host.
+// statHostFiles checks disk and socket ownership, isolation, and write permissions from the host.
+// Sockets (api.sock, v.sock) must already exist — call this after the vsock readiness wait.
 func statHostFiles(t *testing.T, vmA, vmB *fixture.VM) {
 	t.Helper()
 	const jailBase = "/srv/vmobs/jail"
@@ -342,11 +347,38 @@ func statHostFiles(t *testing.T, vmA, vmB *fixture.VM) {
 	if statB.Mode&0002 != 0 {
 		t.Errorf("%s: world-writable (mode %04o)", pathB, statB.Mode&0777)
 	}
+
+	// Brief assertion 3: api.sock and v.sock in each VM's chroot root must be owned
+	// by that VM's own uid. The jailer creates them with chown -R uid:gid.
+	for _, vm := range []*fixture.VM{vmA, vmB} {
+		root := filepath.Join(jailBase, "firecracker", vm.ID, "root")
+		for _, sockName := range []string{"api.sock", "v.sock"} {
+			sockPath := filepath.Join(root, sockName)
+			var st syscall.Stat_t
+			if err := syscall.Stat(sockPath, &st); err != nil {
+				t.Errorf("stat %s: %v", sockPath, err)
+				continue
+			}
+			if int(st.Uid) != vm.UID {
+				t.Errorf("%s: uid=%d, want %d (vm uid)", sockPath, st.Uid, vm.UID)
+			}
+		}
+	}
 }
 
-// checkNoLeaks asserts no m0-* entries remain in the jail or netns directories.
-func checkNoLeaks(t *testing.T) {
+// checkNoLeaks asserts that none of the test VM ids remain in the jail or netns
+// directories after teardown. Expected names are derived from the actual ids via
+// the exported network package functions so a helper rename can't silently miss this.
+func checkNoLeaks(t *testing.T, ids ...string) {
 	t.Helper()
+
+	// Build sets of expected jail dir names and netns names from the actual ids.
+	wantJail := make(map[string]bool, len(ids))
+	wantNS := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		wantJail[id] = true
+		wantNS[network.NamespaceName(id)] = true
+	}
 
 	const jailFirecracker = "/srv/vmobs/jail/firecracker"
 	entries, err := os.ReadDir(jailFirecracker)
@@ -354,7 +386,7 @@ func checkNoLeaks(t *testing.T) {
 		t.Logf("readdir %s: %v", jailFirecracker, err)
 	}
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), "m0-") {
+		if wantJail[e.Name()] {
 			t.Errorf("jail leak: %s/%s still exists after both VMs stopped", jailFirecracker, e.Name())
 		}
 	}
@@ -365,7 +397,7 @@ func checkNoLeaks(t *testing.T) {
 		t.Logf("readdir %s: %v", netnsDir, err)
 	}
 	for _, e := range nsEntries {
-		if strings.HasPrefix(e.Name(), "vmobs-m0-") {
+		if wantNS[e.Name()] {
 			t.Errorf("netns leak: %s/%s still exists after both VMs stopped", netnsDir, e.Name())
 		}
 	}
@@ -378,6 +410,7 @@ func writeEvidenceFile(
 	repoRoot, hostname string,
 	lk *lock.Lock,
 	vmA, vmB *fixture.VM,
+	ackA, ackB, ackCross proto.HelloAck,
 	manifestA, manifestB proto.CapabilityManifest,
 ) {
 	t.Helper()
@@ -419,11 +452,11 @@ func writeEvidenceFile(
 	}
 	fmt.Fprintln(w)
 
-	// Handshake transcript: kinds only, never the token.
+	// Handshake transcript: kinds only, never the token. Values are the real ack results.
 	fmt.Fprintln(w, "## Handshake transcript (message kinds only; tokens omitted)")
-	fmt.Fprintf(w, "  vmA: %s → %s (accepted=true)\n", proto.KindHello, proto.KindHelloAck)
-	fmt.Fprintf(w, "  vmB: %s → %s (accepted=true)\n", proto.KindHello, proto.KindHelloAck)
-	fmt.Fprintf(w, "  cross-auth: vmA token on vmB socket → %s (accepted=false)\n", proto.KindHelloAck)
+	fmt.Fprintf(w, "  vmA: %s → %s (accepted=%v reason=%q)\n", proto.KindHello, proto.KindHelloAck, ackA.Accepted, ackA.Reason)
+	fmt.Fprintf(w, "  vmB: %s → %s (accepted=%v reason=%q)\n", proto.KindHello, proto.KindHelloAck, ackB.Accepted, ackB.Reason)
+	fmt.Fprintf(w, "  cross-auth: vmA token on vmB socket → %s (accepted=%v reason=%q)\n", proto.KindHelloAck, ackCross.Accepted, ackCross.Reason)
 	fmt.Fprintln(w)
 
 	fmt.Fprintln(w, "## Capability manifests")
@@ -435,39 +468,45 @@ func writeEvidenceFile(
 	}
 	fmt.Fprintln(w)
 
-	fmt.Fprintln(w, "## Disk ownership (host stat)")
+	fmt.Fprintln(w, "## Disk and socket ownership (host stat)")
 	const jailBase = "/srv/vmobs/jail"
 	for _, vm := range []*fixture.VM{vmA, vmB} {
-		p := filepath.Join(jailBase, "firecracker", vm.ID, "root", "rootfs.ext4")
-		var st syscall.Stat_t
-		if err := syscall.Stat(p, &st); err == nil {
-			fmt.Fprintf(w, "  %s: uid=%d mode=%04o inode=%d\n", p, st.Uid, st.Mode&0777, st.Ino)
-		} else {
-			fmt.Fprintf(w, "  %s: stat error: %v\n", p, err)
+		root := filepath.Join(jailBase, "firecracker", vm.ID, "root")
+		for _, name := range []string{"rootfs.ext4", "api.sock", "v.sock"} {
+			p := filepath.Join(root, name)
+			var st syscall.Stat_t
+			if err := syscall.Stat(p, &st); err == nil {
+				fmt.Fprintf(w, "  %s: uid=%d mode=%04o inode=%d\n", p, st.Uid, st.Mode&0777, st.Ino)
+			} else {
+				fmt.Fprintf(w, "  %s: stat error: %v\n", p, err)
+			}
 		}
 	}
 	fmt.Fprintln(w)
 
 	fmt.Fprintln(w, "## Teardown proof")
+	// Build expected jail and netns names from the actual ids to stay in sync with the helper.
+	expectedJail := map[string]bool{vmA.ID: true, vmB.ID: true}
+	expectedNS := map[string]bool{network.NamespaceName(vmA.ID): true, network.NamespaceName(vmB.ID): true}
 	jailEntries, _ := os.ReadDir(filepath.Join(jailBase, "firecracker"))
-	m0InJail := []string{}
+	leakedJail := []string{}
 	for _, e := range jailEntries {
-		if strings.HasPrefix(e.Name(), "m0-") {
-			m0InJail = append(m0InJail, e.Name())
+		if expectedJail[e.Name()] {
+			leakedJail = append(leakedJail, e.Name())
 		}
 	}
 	nsEntries, _ := os.ReadDir("/var/run/netns")
-	m0InNS := []string{}
+	leakedNS := []string{}
 	for _, e := range nsEntries {
-		if strings.HasPrefix(e.Name(), "vmobs-m0-") {
-			m0InNS = append(m0InNS, e.Name())
+		if expectedNS[e.Name()] {
+			leakedNS = append(leakedNS, e.Name())
 		}
 	}
-	if len(m0InJail) == 0 && len(m0InNS) == 0 {
-		fmt.Fprintln(w, "  no m0-* entries remain in jail or netns (clean teardown)")
+	if len(leakedJail) == 0 && len(leakedNS) == 0 {
+		fmt.Fprintln(w, "  no test VM entries remain in jail or netns (clean teardown)")
 	} else {
-		fmt.Fprintf(w, "  jail residue: %v\n", m0InJail)
-		fmt.Fprintf(w, "  netns residue: %v\n", m0InNS)
+		fmt.Fprintf(w, "  jail residue: %v\n", leakedJail)
+		fmt.Fprintf(w, "  netns residue: %v\n", leakedNS)
 	}
 
 	w.Flush()
