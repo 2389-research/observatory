@@ -152,6 +152,10 @@ func (m *Manager) SetReportGen(fn func(runID string)) {
 	m.reportGen = fn
 }
 
+// Owner returns the configured owner string used when creating runs and other
+// resources on behalf of the operator.
+func (m *Manager) Owner() string { return m.cfg.Owner }
+
 // Capacity returns the current usable/reserved/free view of host resources.
 func (m *Manager) Capacity(ctx context.Context) (CapacitySnapshot, error) {
 	totals, err := m.st.ReservationTotals(ctx)

@@ -500,6 +500,9 @@ type createVMBody struct {
 	RootDiskMiB      int64             `json:"root_disk_mib"`
 	WorkspaceDiskMiB int64             `json:"workspace_disk_mib"`
 	Labels           map[string]string `json:"labels"`
+	// Run is an optional launch-attached run block. R2 validation is applied
+	// before the request reaches the store.
+	Run *runBlockBody `json:"run"`
 }
 
 func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
@@ -517,7 +520,14 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	vm, op, replayed, err := s.manager.CreateVM(r.Context(), runtime.CreateRequest{
+	// R2: validate the run block before persisting anything.
+	if body.Run != nil {
+		if !validateRunBlockHTTP(w, body.Run) {
+			return
+		}
+	}
+
+	req := runtime.CreateRequest{
 		Name:             body.Name,
 		TemplateID:       body.TemplateID,
 		IdempotencyKey:   body.IdempotencyKey,
@@ -526,7 +536,16 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 		RootDiskMiB:      body.RootDiskMiB,
 		WorkspaceDiskMiB: body.WorkspaceDiskMiB,
 		Labels:           body.Labels,
-	})
+	}
+	if body.Run != nil {
+		req.Run = &store.RunAttachment{
+			Goal:           body.Run.Goal,
+			CriteriaType:   body.Run.SuccessCriteria.Type,
+			OnCompletion:   body.Run.OnCompletion,
+			ProgressEvents: body.Run.ProgressEvents,
+		}
+	}
+	vm, op, replayed, err := s.manager.CreateVM(r.Context(), req)
 	if err != nil {
 		writeVMError(w, err)
 		return

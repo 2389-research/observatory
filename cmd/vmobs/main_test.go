@@ -208,7 +208,8 @@ func TestRawAPIEscapeHatch(t *testing.T) {
 	}
 
 	// A specced-but-unbuilt endpoint is a structured failure, not transport.
-	code, _, stderr := runCLI(t, "--api", srv.URL, "api", "GET", "/api/v1/runs")
+	// /runs is now built; probe a different unbuilt endpoint.
+	code, _, stderr := runCLI(t, "--api", srv.URL, "api", "GET", "/api/v1/events/stream")
 	if code != exitAPIError {
 		t.Fatalf("501 probe: exit %d, stderr: %s", code, stderr)
 	}

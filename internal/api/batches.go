@@ -140,6 +140,9 @@ type createBatchMember struct {
 	RootDiskMiB      int64             `json:"root_disk_mib"`
 	WorkspaceDiskMiB int64             `json:"workspace_disk_mib"`
 	Labels           map[string]string `json:"labels"`
+	// Run is an optional launch-attached run block. R2 validation is applied
+	// per-member; a bad member is reported as a refusal, not a batch-level error.
+	Run *runBlockBody `json:"run"`
 }
 
 func (s *Server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
@@ -177,9 +180,38 @@ func (s *Server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	members := make([]runtime.BatchMemberRequest, len(body.Members))
+	// Per-member R2 validation: stop_and_finalize is refused as a per-member
+	// refusal (same shape as admission refusals), not a batch-level error.
+	// Members that pass validation are forwarded to CreateBatch; refused members
+	// are injected back into the result at their original positions.
+	type r2Refusal struct {
+		position int
+		name     string
+		cause    string
+		message  string
+	}
+	var r2Refusals []r2Refusal
+	members := make([]runtime.BatchMemberRequest, 0, len(body.Members))
 	for i, bm := range body.Members {
-		members[i] = runtime.BatchMemberRequest{
+		var runAttach *store.RunAttachment
+		if bm.Run != nil {
+			if verr := validateRunBlock(bm.Run); verr != nil {
+				r2Refusals = append(r2Refusals, r2Refusal{
+					position: i,
+					name:     bm.Name,
+					cause:    verr.Cause,
+					message:  verr.Message,
+				})
+				continue
+			}
+			runAttach = &store.RunAttachment{
+				Goal:           bm.Run.Goal,
+				CriteriaType:   bm.Run.SuccessCriteria.Type,
+				OnCompletion:   bm.Run.OnCompletion,
+				ProgressEvents: bm.Run.ProgressEvents,
+			}
+		}
+		members = append(members, runtime.BatchMemberRequest{
 			Name:             bm.Name,
 			TemplateID:       bm.TemplateID,
 			VCPUCount:        bm.VCPUCount,
@@ -187,7 +219,8 @@ func (s *Server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 			RootDiskMiB:      bm.RootDiskMiB,
 			WorkspaceDiskMiB: bm.WorkspaceDiskMiB,
 			Labels:           bm.Labels,
-		}
+			Run:              runAttach,
+		})
 	}
 
 	result, err := s.manager.CreateBatch(r.Context(), runtime.CreateBatchRequest{
@@ -202,6 +235,35 @@ func (s *Server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 		writeVMError(w, err)
 		return
 	}
+
+	// Merge R2 refusals back into the result at the original positions. We
+	// re-build the member list with the refused members inserted at their
+	// original offsets so position numbers are correct for the caller.
+	if len(r2Refusals) > 0 {
+		cause := r2Refusals[0].cause
+		msg := r2Refusals[0].message
+		all := make([]*store.BatchMemberResult, 0, len(body.Members))
+		ri := 0 // index into r2Refusals
+		ki := 0 // index into result.Members (from CreateBatch)
+		for i, bm := range body.Members {
+			if ri < len(r2Refusals) && r2Refusals[ri].position == i {
+				all = append(all, &store.BatchMemberResult{
+					Position:       i,
+					Name:           bm.Name,
+					RefusalCause:   &cause,
+					RefusalMessage: &msg,
+				})
+				ri++
+			} else {
+				if ki < len(result.Members) {
+					all = append(all, result.Members[ki])
+					ki++
+				}
+			}
+		}
+		result.Members = all
+	}
+
 	// Replays return the same 201 as the original request (retry-transparent
 	// status); is_replay in the body marks the truth of what happened.
 	writeJSON(w, http.StatusCreated, renderBatchResult(result))

@@ -28,6 +28,9 @@ type BatchMemberRequest struct {
 	RootDiskMiB      int64
 	WorkspaceDiskMiB int64
 	Labels           map[string]string
+	// Run is an optional launch-attached run. When non-nil the member's run
+	// is created in the same tx as the VM. Same validation as CreateRequest.Run.
+	Run *store.RunAttachment
 }
 
 // CreateBatchRequest is the top-level batch create input.
@@ -277,6 +280,7 @@ func (m *Manager) resolveMember(mr BatchMemberRequest) (store.BatchMemberInput, 
 		NetworkProfile:   m.cfg.VMDefaults.NetworkProfile,
 		NetworkPolicyID:  m.cfg.VMDefaults.NetworkPolicyID,
 		Labels:           mr.Labels,
+		Run:              mr.Run,
 	}, nil
 }
 

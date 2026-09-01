@@ -4,6 +4,8 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -136,4 +138,24 @@ func (s *Store) HasRunningReportOp(ctx context.Context, runID string) (bool, err
 		return false, fmt.Errorf("check running report op: %w", err)
 	}
 	return count > 0, nil
+}
+
+// GetLatestReportOperation returns the most recent run.report_generate operation
+// for runID (request_hash = runID), ordered by operation_id DESC. Returns
+// ErrOperationUnknown when none exists.
+func (s *Store) GetLatestReportOperation(ctx context.Context, runID string) (*Operation, error) {
+	row := s.readers.QueryRowContext(ctx,
+		operationColumns+` FROM operations
+		 WHERE kind = 'run.report_generate'
+		   AND request_hash = ?
+		 ORDER BY operation_id DESC LIMIT 1`,
+		runID)
+	op, err := scanOperation(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrOperationUnknown
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get latest report op: %w", err)
+	}
+	return op, nil
 }

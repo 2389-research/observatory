@@ -370,6 +370,28 @@ func (m *Manager) postConclude(run *store.Run) {
 	}
 }
 
+// EnqueueReport triggers report generation for a terminal run that lacks a
+// stored report. It goes through the same guard (HasRunningReportOp) used by
+// reconcileRuns, so concurrent calls and the reconcile sweep never produce
+// duplicate ops. Returns false if the guard prevented enqueue (op already in
+// flight). Callers should treat false as "pending" and report accordingly.
+func (m *Manager) EnqueueReport(runID string) bool {
+	if m.reportGen == nil {
+		return false
+	}
+	hasOp, err := m.st.HasRunningReportOp(m.ctx, runID)
+	if err != nil || hasOp {
+		return false
+	}
+	gen := m.reportGen
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		gen(runID)
+	}()
+	return true
+}
+
 // stopVMAfterRun issues a stop action on the VM as a system-initiated stop.
 // If the VM is already stopping or stopped, this is a no-op.
 //
