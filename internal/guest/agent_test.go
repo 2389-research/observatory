@@ -453,24 +453,23 @@ func TestShutdownBeforeHello(t *testing.T) {
 		t.Fatalf("WriteControl shutdown: %v", err)
 	}
 
-	// Server should respond with an error envelope and close the connection.
+	// Server sends an error envelope then closes the conn (sendError + deferred Close).
+	// The sequence is deterministic: first frame is always the error kind.
 	if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
 		t.Fatalf("SetReadDeadline: %v", err)
 	}
 	env, err := proto.ReadControl(conn)
-	if err == nil {
-		// We might get an error envelope before connection close.
-		if env.Kind != proto.KindError {
-			t.Errorf("want error kind, got %q", env.Kind)
-		}
-		// Next read must fail (server closes the conn).
-		_, err = proto.ReadControl(conn)
-		if err == nil {
-			t.Error("want error after error envelope (conn should be closed)")
-		}
+	if err != nil {
+		t.Fatalf("expected error envelope, got read error: %v", err)
 	}
-	// If the first read already errored (server closed without sending an envelope),
-	// that is also acceptable — the connection is closed, which is the contract.
+	if env.Kind != proto.KindError {
+		t.Errorf("want kind %q, got %q", proto.KindError, env.Kind)
+	}
+	// After the error envelope, the deferred conn.Close fires — next read must fail.
+	_, err = proto.ReadControl(conn)
+	if err == nil {
+		t.Error("want EOF or closed-conn error after error envelope, got nil")
+	}
 
 	// Poweroff must NOT have been called.
 	select {

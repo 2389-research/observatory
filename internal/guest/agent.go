@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
 	"time"
 
@@ -36,7 +37,9 @@ type Agent struct {
 
 // defaultPoweroff is the production implementation: exec systemctl poweroff.
 func defaultPoweroff() {
-	_ = exec.Command("systemctl", "poweroff").Run()
+	if err := exec.Command("systemctl", "poweroff").Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "guestd: poweroff exec failed: %v\n", err)
+	}
 }
 
 // NewAgent constructs an Agent from a validated BootConfig and a capability manifest.
@@ -172,8 +175,11 @@ func (a *Agent) serveRequests(conn net.Conn) {
 			}
 		case proto.KindShutdown:
 			// Reply ack first, then invoke poweroff — the host runner waits for
-			// the ack before its own grace deadline expires.
-			_ = a.writeControl(conn, proto.KindShutdownAck, struct{}{})
+			// the ack before its own grace deadline expires. Log a lost ack but
+			// do NOT gate poweroff on delivery: the host escalates if the VM stays up.
+			if err := a.writeControl(conn, proto.KindShutdownAck, struct{}{}); err != nil {
+				fmt.Fprintf(os.Stderr, "guestd: shutdown_ack write failed: %v\n", err)
+			}
 			a.PoweroffFunc()
 			return
 		default:
