@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/2389-research/observatory-v2/internal/events"
@@ -42,7 +43,7 @@ func ReadSegment(path string) (*SegmentIter, error) {
 	}
 
 	var hdr segmentHeader
-	if err := json.Unmarshal([]byte(hdrLine[:len(hdrLine)-1]), &hdr); err != nil {
+	if err := json.Unmarshal([]byte(strings.TrimSuffix(hdrLine, "\n")), &hdr); err != nil {
 		_ = f.Close()
 		return nil, fmt.Errorf("spool: parse segment header in %s: %w", path, err)
 	}
@@ -225,7 +226,7 @@ func recoverSegment(path string) (truncated bool, corruptCount int, err error) {
 	}
 
 	var hdr segmentHeader
-	if err := json.Unmarshal([]byte(hdrLine[:len(hdrLine)-1]), &hdr); err != nil {
+	if err := json.Unmarshal([]byte(strings.TrimSuffix(hdrLine, "\n")), &hdr); err != nil {
 		return false, 0, fmt.Errorf("parse header: %w", err)
 	}
 	if hdr.Magic != segmentMagic {
@@ -247,9 +248,15 @@ func recoverSegment(path string) (truncated bool, corruptCount int, err error) {
 		if readErr != nil {
 			if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
 				// Truncated before length — truncate file to lastGoodPos.
+				// Sync after truncation: recovery emits a gap record for what it
+				// removed; if the truncation itself isn't durable, a crash can
+				// resurrect the garbage tail and a second recovery re-emits the gap.
 				if pos > lastGoodPos {
 					if terr := f.Truncate(lastGoodPos); terr != nil {
 						return false, corruptCount, terr
+					}
+					if serr := f.Sync(); serr != nil {
+						return false, corruptCount, serr
 					}
 					return true, corruptCount, nil
 				}
@@ -283,6 +290,9 @@ func recoverSegment(path string) (truncated bool, corruptCount int, err error) {
 				if err := f.Truncate(lastGoodPos); err != nil {
 					return false, corruptCount, err
 				}
+				if err := f.Sync(); err != nil {
+					return false, corruptCount, err
+				}
 				return true, corruptCount, nil
 			}
 			return false, corruptCount, readErr
@@ -296,6 +306,9 @@ func recoverSegment(path string) (truncated bool, corruptCount int, err error) {
 		if readErr != nil {
 			if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
 				if err := f.Truncate(lastGoodPos); err != nil {
+					return false, corruptCount, err
+				}
+				if err := f.Sync(); err != nil {
 					return false, corruptCount, err
 				}
 				return true, corruptCount, nil

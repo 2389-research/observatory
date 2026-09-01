@@ -49,6 +49,14 @@ type Writer struct {
 	segIdx   uint64
 	f        *os.File
 	segBytes int64 // bytes written to current segment (header + records)
+	// poison is set on the first write or fsync failure that touches record
+	// bytes. Once set, every subsequent Append returns it immediately.
+	// Rationale: after a failed fsync the kernel may drop dirty pages and
+	// clear the error flag, so a later fsync can succeed while earlier bytes
+	// were lost — retrying turns a loud failure into silent evidence loss.
+	// ErrSpoolFull and oversize-record errors do NOT poison: they reject the
+	// record before any bytes reach the file.
+	poison error
 }
 
 // OpenWriter opens (or creates) a spool writer in dir with the given configuration.
@@ -83,16 +91,24 @@ func OpenWriter(dir string, cfg WriterCfg) (*Writer, error) {
 // Append marshals env as JSON and appends it as a record to the current segment.
 // It returns ErrSpoolFull if the record would exceed MaxSpoolBytes.
 // It fsyncs the segment file before returning (ack barrier, SPEC §12.4).
+// If a previous Append poisoned the writer (see Writer.poison), it returns
+// the poison error immediately without attempting any write.
 func (w *Writer) Append(env *events.Envelope) error {
+	// Poison check: return the sticky error immediately, no write attempt.
+	if w.poison != nil {
+		return w.poison
+	}
+
 	body, err := json.Marshal(env)
 	if err != nil {
 		return fmt.Errorf("spool: marshal envelope: %w", err)
 	}
+	// Reject oversized records before any bytes reach the file — does NOT poison.
 	if len(body) > maxRecordBytes {
 		return fmt.Errorf("spool: record body %d bytes exceeds 256 KiB frame limit", len(body))
 	}
 
-	// Spool total-bytes guard (SPEC §12.5).
+	// Spool total-bytes guard (SPEC §12.5) — does NOT poison; no bytes written yet.
 	totalNow, err := w.spoolTotalBytes()
 	if err != nil {
 		return fmt.Errorf("spool: measure spool size: %w", err)
@@ -117,20 +133,35 @@ func (w *Writer) Append(env *events.Envelope) error {
 	binary.BigEndian.PutUint32(rec[4:8], checksum)
 	copy(rec[8:], body)
 
+	// Bytes are about to hit the file. Any failure from here poisons the writer.
 	if _, err := w.f.Write(rec); err != nil {
-		return fmt.Errorf("spool: write record: %w", err)
+		w.poison = fmt.Errorf("spool: write record: %w", err)
+		return w.poison
 	}
 	if err := w.f.Sync(); err != nil {
-		return fmt.Errorf("spool: fsync after record: %w", err)
+		w.poison = fmt.Errorf("spool: fsync after record: %w", err)
+		return w.poison
 	}
+	// segBytes is updated only after successful Sync. With poisoning, a stale
+	// segBytes after a failed sync is unreachable (writer never appends again).
 	w.segBytes += needed
 	return nil
 }
 
 // Close writes the end marker, fsyncs, and closes the current segment.
+// If the writer is poisoned, Close skips the end marker and just closes the fd,
+// returning the poison error (or the close error if the fd is already closed).
+// The end marker means "cleanly closed, tail trustworthy" — a poisoned segment
+// is neither, so omitting it lets recovery treat it as crashed and verify it.
 func (w *Writer) Close() error {
 	if w.f == nil {
 		return nil
+	}
+	if w.poison != nil {
+		// Poisoned: skip end marker. Just close the fd (may already be closed).
+		_ = w.f.Close()
+		w.f = nil
+		return w.poison
 	}
 	// Write end marker: len == 0xFFFFFFFF.
 	var marker [4]byte

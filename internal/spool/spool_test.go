@@ -122,7 +122,7 @@ func TestCrashSimulation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open seg for garbage append: %v", err)
 	}
-	_, _ = f.Write([]byte{0x00, 0x00, 0x00, 0x05, 0xDE, 0xAD, 0xBE, 0xEF, 0xCA}) // 9 garbage bytes — not a valid record
+	_, _ = f.Write([]byte{0x00, 0x00, 0x00, 0x05, 0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE}) // 10 garbage bytes — not a valid record
 	_ = f.Sync()
 	_ = f.Close()
 	// Also skip w.Close() to leave file "crashed".
