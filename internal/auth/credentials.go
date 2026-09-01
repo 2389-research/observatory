@@ -24,11 +24,11 @@ var (
 
 const operatorFile = "operator.json"
 
-// Store holds the path to the credential directory. mu serializes file
-// writes so that tokens.go read-modify-write is safe under concurrent calls.
+// Store holds the path to the credential directory. mu serializes all
+// read-modify-write operations on tokens.json across concurrent calls.
 type Store struct {
 	dir string
-	mu  sync.Mutex //nolint:unused // Task 3 (tokens.go) uses this for read-modify-write on tokens.json
+	mu  sync.Mutex
 }
 
 type passwordHash struct {
