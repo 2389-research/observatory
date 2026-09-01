@@ -141,3 +141,69 @@ func TestWriteFrameRejectsOversizeControl(t *testing.T) {
 		t.Fatalf("want frame length error, got %v", err)
 	}
 }
+
+func TestFrameRoundTripAtMaxControlFrameSize(t *testing.T) {
+	// Round-trip a FrameControl payload of exactly MaxControlFrame bytes.
+	// The one-over case is already covered; this proves the boundary itself is accepted.
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+
+	payload := make([]byte, MaxControlFrame)
+	for i := range payload {
+		payload[i] = byte(i & 0xFF)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- WriteFrame(c1, FrameControl, payload)
+		c1.Close()
+	}()
+
+	typ, got, err := ReadFrame(c2)
+	if err != nil {
+		t.Fatalf("ReadFrame: %v", err)
+	}
+	if typ != FrameControl {
+		t.Errorf("type: got 0x%02X, want 0x%02X", typ, FrameControl)
+	}
+	if len(got) != MaxControlFrame {
+		t.Errorf("payload len: got %d, want %d", len(got), MaxControlFrame)
+	}
+	if err := <-done; err != nil {
+		t.Errorf("WriteFrame: %v", err)
+	}
+}
+
+func TestFrameRoundTripAtMaxBinaryFrameSize(t *testing.T) {
+	// Round-trip a FramePTY payload of exactly MaxBinaryFrame bytes.
+	// The one-over case is already covered; this proves the boundary itself is accepted.
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+
+	payload := make([]byte, MaxBinaryFrame)
+	for i := range payload {
+		payload[i] = byte(i & 0xFF)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- WriteFrame(c1, FramePTY, payload)
+		c1.Close()
+	}()
+
+	typ, got, err := ReadFrame(c2)
+	if err != nil {
+		t.Fatalf("ReadFrame: %v", err)
+	}
+	if typ != FramePTY {
+		t.Errorf("type: got 0x%02X, want 0x%02X", typ, FramePTY)
+	}
+	if len(got) != MaxBinaryFrame {
+		t.Errorf("payload len: got %d, want %d", len(got), MaxBinaryFrame)
+	}
+	if err := <-done; err != nil {
+		t.Errorf("WriteFrame: %v", err)
+	}
+}

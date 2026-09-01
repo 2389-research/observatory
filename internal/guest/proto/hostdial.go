@@ -33,10 +33,26 @@ func DialHostVsock(ctx context.Context, udsPath string, port uint32) (net.Conn, 
 		}
 	}
 
+	// Watcher: for cancel-only contexts (no deadline), unblock handshake I/O
+	// when ctx is cancelled by forcing an immediate deadline on the conn.
+	// watchDone is closed when the handshake section exits (success or error).
+	watchDone := make(chan struct{})
+	defer close(watchDone)
+	go func() {
+		select {
+		case <-ctx.Done():
+			conn.SetDeadline(time.Now()) //nolint:errcheck
+		case <-watchDone:
+		}
+	}()
+
 	// Write the CONNECT line.
 	req := fmt.Sprintf("CONNECT %d\n", port)
 	if _, err := conn.Write([]byte(req)); err != nil {
 		conn.Close()
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("write CONNECT: %w", ctx.Err())
+		}
 		return nil, fmt.Errorf("write CONNECT: %w", err)
 	}
 
@@ -44,18 +60,24 @@ func DialHostVsock(ctx context.Context, udsPath string, port uint32) (net.Conn, 
 	line, err := readLineByByte(conn, 64)
 	if err != nil {
 		conn.Close()
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("read handshake response: %w", ctx.Err())
+		}
 		return nil, fmt.Errorf("read handshake response: %w", err)
 	}
 
-	// Clear any handshake deadline; application code sets its own.
-	if err := conn.SetDeadline(zeroTime); err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("clear deadline: %w", err)
-	}
-
+	// Validate the response before clearing the deadline: only on success do
+	// we clear it. Error paths just close the conn and return.
 	if !strings.HasPrefix(line, "OK ") {
 		conn.Close()
 		return nil, fmt.Errorf("vsock handshake failed: got %q, want OK <port>", line)
+	}
+
+	// Success path: clear the handshake deadline so application I/O is
+	// undeadlined. The deferred close(watchDone) unblocks the watcher goroutine.
+	if err := conn.SetDeadline(zeroTime); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("clear deadline: %w", err)
 	}
 
 	return conn, nil

@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // newTestUnixServer starts a test server on a unix socket. It returns the socket
@@ -139,6 +140,40 @@ func TestDialHostVsockContextCancelled(t *testing.T) {
 	_, err := DialHostVsock(ctx, socketPath, 10000)
 	if err == nil {
 		t.Fatal("want error on cancelled context, got nil")
+	}
+}
+
+func TestDialHostVsockContextCancelledAfterDial(t *testing.T) {
+	// Server accepts, reads the CONNECT line, then deliberately never replies.
+	// Client cancels ~50ms after dialing; DialHostVsock must return promptly
+	// (within 2s) with an error mentioning context canceled.
+	socketPath := newTestUnixServer(t, func(conn net.Conn) {
+		defer conn.Close()
+		buf := make([]byte, 64)
+		_, _ = conn.Read(buf) // consume the CONNECT line, then stall forever
+		// Never write OK — block until the client closes the conn.
+		buf2 := make([]byte, 1)
+		_, _ = conn.Read(buf2)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-time.After(50 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, err := DialHostVsock(ctx, socketPath, 10000)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("want error when context is cancelled after dial, got nil")
+	}
+	if !strings.Contains(err.Error(), "context canceled") {
+		t.Errorf("want error mentioning 'context canceled', got: %v", err)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("DialHostVsock took %v; want < 2s after context cancellation", elapsed)
 	}
 }
 
