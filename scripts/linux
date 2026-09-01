@@ -7,6 +7,7 @@ HOST="${VMOBS_LINUX_HOST:-harper@100.64.0.100}"
 DEST="${VMOBS_LINUX_DIR:-vmobs-build}"
 [ $# -ge 1 ] || { echo "usage: scripts/linux '<command>'" >&2; exit 3; }
 cd "$(dirname "$0")/.."
+# P-rule: macOS openrsync does not honor ':- .gitignore' for --delete protection; protect remote build artifacts explicitly.
 rsync -az --delete --exclude .git --exclude .superpowers \
   --filter=':- .gitignore' --filter='P images/dist/' ./ "$HOST:$DEST/"
 exec ssh "$HOST" "cd '$DEST' && $*"

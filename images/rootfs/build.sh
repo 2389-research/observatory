@@ -81,7 +81,7 @@ echo '[rootfs] installing ca-certificates (live apt — needed for snapshot TLS)
 apt-get update -qq
 apt-get install -y --no-install-recommends ca-certificates 2>&1 | tail -3
 
-echo '[rootfs] updating package index from snapshot ${APT_SNAPSHOT} ...'
+echo "[rootfs] updating package index from snapshot ${APT_SNAPSHOT} ..."
 apt-get -S ${APT_SNAPSHOT} update -qq
 
 echo '[rootfs] installing packages from snapshot...'

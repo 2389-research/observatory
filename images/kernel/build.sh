@@ -30,6 +30,7 @@ KERNEL_SHA256="eeedc32bbf2448205aff50ee2760a4d87172cf8f8279c1e5930069ad36f6236e"
 
 # Firecracker x86_64 6.1 guest base config (v1.16.1 tag)
 FC_CONFIG_URL="https://raw.githubusercontent.com/firecracker-microvm/firecracker/v1.16.1/resources/guest_configs/microvm-kernel-ci-x86_64-6.1.config"
+BASE_CONFIG_SHA256="adbc70ab5e89213ba00594b12d25e09bdf8bb1ed3c252d7449326bb14c22963b"
 
 # Pinned Ubuntu 24.04 docker image — digest resolved once at implementation time
 # (docker pull ubuntu:24.04 && docker inspect --format '{{index .RepoDigests 0}}' ubuntu:24.04)
@@ -84,20 +85,26 @@ fi
 FC_CONFIG_PATH="$SRCDIR/microvm-kernel-ci-x86_64-6.1.config"
 echo "[kernel/build.sh] downloading Firecracker base config..."
 curl -fsSL -o "$FC_CONFIG_PATH" "$FC_CONFIG_URL"
-FC_CONFIG_SHA256=$(sha256sum "$FC_CONFIG_PATH" | awk '{print $1}')
-echo "[kernel/build.sh] base config sha256: $FC_CONFIG_SHA256"
+ACTUAL_CONFIG_SHA=$(sha256sum "$FC_CONFIG_PATH" | awk '{print $1}')
+echo "[kernel/build.sh] base config sha256: $ACTUAL_CONFIG_SHA"
+if [ "$ACTUAL_CONFIG_SHA" != "$BASE_CONFIG_SHA256" ]; then
+    echo "[kernel/build.sh] ERROR: base config sha256 mismatch!" >&2
+    echo "  expected: $BASE_CONFIG_SHA256" >&2
+    echo "  got:      $ACTUAL_CONFIG_SHA" >&2
+    rm -f "$FC_CONFIG_PATH"
+    exit 1
+fi
+echo "[kernel/build.sh] base config sha256 verified OK"
 
 # ---------------------------------------------------------------------------
 # Extract source (idempotent — skip if already extracted)
 # ---------------------------------------------------------------------------
 KDIR="$SRCDIR/linux-${KERNEL_VERSION}"
-if [ -d "$KDIR" ]; then
-    echo "[kernel/build.sh] source dir exists, skipping extract"
-else
-    echo "[kernel/build.sh] extracting tarball (this takes a minute)..."
-    tar -xJf "$TARBALL_PATH" -C "$SRCDIR"
-    echo "[kernel/build.sh] extracted to $KDIR"
-fi
+echo "[kernel/build.sh] removing any prior extraction (prevents silent reuse of partial tree)..."
+rm -rf "$KDIR"
+echo "[kernel/build.sh] extracting tarball (this takes a minute)..."
+tar -xJf "$TARBALL_PATH" -C "$SRCDIR"
+echo "[kernel/build.sh] extracted to $KDIR"
 
 # ---------------------------------------------------------------------------
 # Build inside pinned docker container
