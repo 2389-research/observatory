@@ -330,6 +330,13 @@ func writeCursor(vmDir string, cur cursor) error {
 
 // countSegmentRecords counts records in a segment to know if cursor is at the end.
 // Returns -1 on error.
+//
+// Any iterator error that is not a clean io.EOF (including ErrCorruptRecord)
+// returns -1, making the PAST-branch prune guard (n >= 0 && hasEndMarker)
+// false. This preserves corrupt segments as evidence on disk across all cycles
+// (controller ruling R8). Accepted consequence: a corrupt PAST segment
+// contributes nothing to the per-cycle Deduped stat — stats are observability,
+// not evidence; retention is what matters.
 func countSegmentRecords(segPath string) int {
 	iter, err := ReadSegment(segPath)
 	if err != nil {
@@ -343,7 +350,8 @@ func countSegmentRecords(segPath string) int {
 			return count
 		}
 		if err != nil {
-			return count
+			// Non-EOF error (including ErrCorruptRecord): signal error to caller.
+			return -1
 		}
 		count++
 	}

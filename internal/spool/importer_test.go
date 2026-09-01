@@ -669,7 +669,13 @@ func TestTwoCorruptSegmentsTwoGaps(t *testing.T) {
 
 // TestCorruptSegmentWithEndMarkerNotPruned — a corrupt interior segment that
 // carries a clean end marker must NOT be pruned by ImportOnce when the cursor
-// is past it. Evidence must survive on disk.
+// is past it. Evidence must survive on disk across multiple import cycles.
+//
+// The key RED: with the old countSegmentRecords bug (returns partial count
+// instead of -1 on iterator error), the PAST-branch prune guard
+// (n >= 0 && segmentHasEndMarker) fires on the SECOND cycle — destroying the
+// corrupt segment. After the fix (return -1 on any non-EOF iterator error),
+// n == -1 makes the guard false and the segment survives.
 func TestCorruptSegmentWithEndMarkerNotPruned(t *testing.T) {
 	st := openTestStore(t)
 	root := t.TempDir()
@@ -722,16 +728,90 @@ func TestCorruptSegmentWithEndMarkerNotPruned(t *testing.T) {
 		t.Fatalf("Close seg1: %v", err)
 	}
 
-	// Run ImportOnce. The cursor should advance into/past seg1.
 	imp := spool.NewImporter(st, root, time.Second)
+
+	// Cycle 1: cursor advances past seg1. seg0 is FUTURE (cursor empty) here —
+	// the bug does not fire yet.
 	_, err = imp.ImportOnce(context.Background())
 	if err != nil {
-		t.Fatalf("ImportOnce: %v", err)
+		t.Fatalf("ImportOnce cycle 1: %v", err)
 	}
 
-	// seg0 must still exist — it is corrupt evidence, never pruned.
+	// seg0 must survive cycle 1.
 	if _, err := os.Stat(seg0Path); os.IsNotExist(err) {
-		t.Error("corrupt segment with end marker was pruned — must survive as evidence")
+		t.Error("corrupt segment with end marker was pruned on cycle 1 — must survive as evidence")
+	}
+
+	// Cycle 2: seg0 is now PAST (cursor points into seg1). This is where the
+	// prune bug fires — countSegmentRecords returns n>=0 (partial count before
+	// error) instead of -1, so the n>=0 && hasEndMarker guard is satisfied and
+	// the segment gets deleted. After fix, n==-1, guard is false, file survives.
+	_, err = imp.ImportOnce(context.Background())
+	if err != nil {
+		t.Fatalf("ImportOnce cycle 2: %v", err)
+	}
+
+	// seg0 must survive cycle 2 — corrupt evidence is never pruned (R8).
+	if _, err := os.Stat(seg0Path); os.IsNotExist(err) {
+		t.Error("corrupt segment with end marker was pruned on cycle 2 — violates R8 evidence-retention invariant")
+	}
+}
+
+// TestImportOnceSwallowsPerVMErrors — ImportOnce returns nil when one VM dir
+// is broken and another is healthy. Healthy records must land in the store;
+// stats must reflect only the healthy dir.
+//
+// We make one dir unreadable by planting a cursor.json that is itself a
+// directory (not a file): loadCursor handles the read error gracefully, but
+// any subsequent segment open fails because the dir itself is chmod 000.
+// Using a 000-mode dir is portable and deterministic across Linux/macOS.
+func TestImportOnceSwallowsPerVMErrors(t *testing.T) {
+	st := openTestStore(t)
+	root := t.TempDir()
+
+	// Healthy VM: one closed segment with two records.
+	healthyVMID := "aaaabbbb-cccc-dddd-eeee-ffffffff0001"
+	healthyInstance := "11112222-3333-4444-5555-666677778888"
+	envs := []*events.Envelope{
+		makeSpoolEnvelope(healthyVMID, healthyInstance, "0"),
+		makeSpoolEnvelope(healthyVMID, healthyInstance, "1"),
+	}
+	writeSegment(t, root, healthyVMID, envs, true /* closed */)
+
+	// Broken VM: a directory that is chmod 000 so Recover / ReadDir fail.
+	brokenVMID := "bbbbcccc-dddd-eeee-ffff-000011112222"
+	brokenDir := filepath.Join(root, brokenVMID)
+	if err := os.MkdirAll(brokenDir, 0o700); err != nil {
+		t.Fatalf("mkdir broken dir: %v", err)
+	}
+	// Plant a segment file first so there's something to fail on, then lock the dir.
+	// Actually, chmod 000 on the dir itself makes ReadDir inside Recover fail,
+	// which causes importVM to return an error — exactly the swallow path.
+	if err := os.Chmod(brokenDir, 0o000); err != nil {
+		t.Fatalf("chmod broken dir: %v", err)
+	}
+	// Restore permissions at test end so t.TempDir cleanup works.
+	t.Cleanup(func() { _ = os.Chmod(brokenDir, 0o700) })
+
+	imp := spool.NewImporter(st, root, time.Second)
+	stats, err := imp.ImportOnce(context.Background())
+
+	// Must return nil — per-VM errors are swallowed.
+	if err != nil {
+		t.Fatalf("ImportOnce: want nil error, got: %v", err)
+	}
+
+	// Healthy records must have landed.
+	if stats.Appended != 2 {
+		t.Errorf("Appended: want 2 (from healthy dir), got %d", stats.Appended)
+	}
+	if stats.Deduped != 0 {
+		t.Errorf("Deduped: want 0, got %d", stats.Deduped)
+	}
+
+	// Store must contain exactly the two healthy records.
+	if got := countEvents(t, st, healthyInstance); got != 2 {
+		t.Errorf("store: want 2 events from healthy instance, got %d", got)
 	}
 }
 
