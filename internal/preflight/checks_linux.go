@@ -23,6 +23,8 @@ const (
 	kvmSetUserMemoryRegion = 0x4020ae46
 	kvmSetRegs             = 0x4090ae82
 	kvmGetRegs             = 0x8090ae81
+	kvmGetSregs            = 0x8138ae83
+	kvmSetSregs            = 0x4138ae84
 
 	kvmExitHLT = 5
 )
@@ -43,6 +45,40 @@ type kvmRegs struct {
 	R8, R9, R10, R11   uint64
 	R12, R13, R14, R15 uint64
 	RIP, RFLAGS        uint64
+}
+
+// kvmSegment mirrors struct kvm_segment (one segment descriptor).
+type kvmSegment struct {
+	Base     uint64
+	Limit    uint32
+	Selector uint16
+	Type     uint8
+	Present  uint8
+	DPL      uint8
+	DB       uint8
+	S        uint8
+	L        uint8
+	G        uint8
+	AVL      uint8
+	Unusable uint8
+	Padding  uint8
+}
+
+// kvmDtable mirrors struct kvm_dtable (GDT/IDT descriptor).
+type kvmDtable struct {
+	Base    uint64
+	Limit   uint16
+	Padding [3]uint16
+}
+
+// kvmSregs mirrors struct kvm_sregs (x86_64 special/segment registers).
+type kvmSregs struct {
+	CS, DS, ES, FS, GS, SS  kvmSegment
+	TR, LDT                 kvmSegment
+	GDT, IDT                kvmDtable
+	CR0, CR2, CR3, CR4, CR8 uint64
+	EFER, ApicBase          uint64
+	InterruptBitmap         [4]uint64
 }
 
 // checkArchKVM opens /dev/kvm, checks API version 12, creates a VM + vCPU,
@@ -189,7 +225,7 @@ func (r *Runner) checkArchKVM() Check {
 	}
 	defer unix.Munmap(runMem)
 
-	// Set RIP=0 (real-mode: CS base=0, IP=0) and RFLAGS=2 (reserved bit 1 always set).
+	// Set RIP=0 and RFLAGS=2 (reserved bit 1 always set).
 	var regs kvmRegs
 	_, _, errno = syscall.Syscall(syscall.SYS_IOCTL, vcpuFd, kvmGetRegs,
 		uintptr(unsafe.Pointer(&regs)))
@@ -210,6 +246,32 @@ func (r *Runner) checkArchKVM() Check {
 			ID:       id,
 			Status:   StatusFail,
 			Summary:  fmt.Sprintf("KVM_SET_REGS failed: %v", errno),
+			Evidence: evidence,
+		}
+	}
+
+	// Zero CS base and selector so the vCPU executes at physical address 0
+	// (where we loaded hlt), not the reset-vector default 0xffff0000.
+	var sregs kvmSregs
+	_, _, errno = syscall.Syscall(syscall.SYS_IOCTL, vcpuFd, kvmGetSregs,
+		uintptr(unsafe.Pointer(&sregs)))
+	if errno != 0 {
+		return Check{
+			ID:       id,
+			Status:   StatusFail,
+			Summary:  fmt.Sprintf("KVM_GET_SREGS failed: %v", errno),
+			Evidence: evidence,
+		}
+	}
+	sregs.CS.Base = 0
+	sregs.CS.Selector = 0
+	_, _, errno = syscall.Syscall(syscall.SYS_IOCTL, vcpuFd, kvmSetSregs,
+		uintptr(unsafe.Pointer(&sregs)))
+	if errno != 0 {
+		return Check{
+			ID:       id,
+			Status:   StatusFail,
+			Summary:  fmt.Sprintf("KVM_SET_SREGS failed: %v", errno),
 			Evidence: evidence,
 		}
 	}
