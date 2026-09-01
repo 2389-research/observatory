@@ -432,7 +432,7 @@ func writeVMError(w http.ResponseWriter, err error) {
 //
 // This deliberately produces the same response as ErrVMUnknown / ErrRunNotFound
 // so a cross-owner request is indistinguishable from a missing resource (AT-079).
-func (s *Server) resourceOwner(w http.ResponseWriter, r *http.Request, resourceOwner string) bool {
+func (s *Server) resourceOwner(w http.ResponseWriter, r *http.Request, fetchedOwner string) bool {
 	ident, ok := auth.IdentityFrom(r.Context())
 	if !ok {
 		writeError(w, http.StatusInternalServerError, Error{
@@ -443,7 +443,7 @@ func (s *Server) resourceOwner(w http.ResponseWriter, r *http.Request, resourceO
 		})
 		return false
 	}
-	if ident.Owner != resourceOwner {
+	if ident.Owner != fetchedOwner {
 		// Deliberately indistinguishable from "not found": AT-079.
 		writeError(w, http.StatusNotFound, Error{
 			Code:      "not_found",
