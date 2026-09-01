@@ -202,6 +202,32 @@ storage:
 	}
 }
 
+// TestRuntimeLockFileDefault verifies that omitting the runtime: section
+// results in LockFile defaulting to "runtime.lock.json".
+func TestRuntimeLockFileDefault(t *testing.T) {
+	cfg, err := load(t, minimalConfig)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Runtime.LockFile != "runtime.lock.json" {
+		t.Errorf("expected default LockFile=%q, got %q", "runtime.lock.json", cfg.Runtime.LockFile)
+	}
+}
+
+// TestRuntimeLockFileExplicit verifies that an explicit lock_file path is preserved.
+func TestRuntimeLockFileExplicit(t *testing.T) {
+	const withRuntime = minimalConfig + `runtime:
+  lock_file: "/etc/vmobs/runtime.lock.json"
+`
+	cfg, err := load(t, withRuntime)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Runtime.LockFile != "/etc/vmobs/runtime.lock.json" {
+		t.Errorf("expected LockFile=%q, got %q", "/etc/vmobs/runtime.lock.json", cfg.Runtime.LockFile)
+	}
+}
+
 func TestValidationTeaches(t *testing.T) {
 	cases := []struct {
 		name    string

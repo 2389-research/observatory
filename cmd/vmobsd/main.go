@@ -23,6 +23,7 @@ import (
 	"github.com/2389-research/observatory-v2/internal/api"
 	"github.com/2389-research/observatory-v2/internal/auth"
 	"github.com/2389-research/observatory-v2/internal/config"
+	"github.com/2389-research/observatory-v2/internal/lock"
 	"github.com/2389-research/observatory-v2/internal/runtime"
 	"github.com/2389-research/observatory-v2/internal/situation"
 	"github.com/2389-research/observatory-v2/internal/store"
@@ -143,10 +144,40 @@ func runInitAuth(cfg *config.Config, username, tokenName string, passwordSrc io.
 	return nil
 }
 
+// verifyRuntimeLock loads and verifies binary hashes from the runtime lock file.
+// When the lock file is absent, it logs one line and returns nil (launches will
+// be refused by the preflight step). When present but invalid, it returns an
+// error listing every mismatch. Empty lockPath skips verification entirely.
+func verifyRuntimeLock(lockPath string, logger *slog.Logger) error {
+	if lockPath == "" {
+		return nil
+	}
+	if _, err := os.Stat(lockPath); os.IsNotExist(err) {
+		logger.Warn("runtime lock absent; launches will be refused by preflight")
+		return nil
+	}
+	l, err := lock.Load(lockPath)
+	if err != nil {
+		return fmt.Errorf("runtime lock: %w", err)
+	}
+	mismatches := l.VerifyBinaries()
+	if len(mismatches) == 0 {
+		return nil
+	}
+	var msgs []string
+	for _, m := range mismatches {
+		msgs = append(msgs, fmt.Sprintf("%s: want %s got %s", m.Subject, m.Want, m.Got))
+	}
+	return fmt.Errorf("runtime lock verification failed: %s", strings.Join(msgs, "; "))
+}
+
 // serve runs the daemon until ctx is canceled. ready is called once with the
 // bound address. The loopback check runs against the address actually bound,
 // not just the configured string: config validation is not the last line.
 func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready func(addr string)) error {
+	if err := verifyRuntimeLock(cfg.Runtime.LockFile, logger); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(cfg.Storage.Database), 0o755); err != nil {
 		return fmt.Errorf("create state directory: %w", err)
 	}

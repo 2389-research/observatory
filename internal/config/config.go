@@ -19,6 +19,7 @@ type Config struct {
 	Server             Server             `yaml:"server"`
 	Auth               Auth               `yaml:"auth"`
 	Paths              Paths              `yaml:"paths"`
+	Runtime            Runtime            `yaml:"runtime"`
 	Admission          Admission          `yaml:"admission"`
 	VMDefaults         VMDefaults         `yaml:"vm_defaults"`
 	Network            Network            `yaml:"network"`
@@ -28,6 +29,15 @@ type Config struct {
 	AgentInterface     AgentInterface     `yaml:"agent_interface"`
 	Storage            Storage            `yaml:"storage"`
 	PerformanceTargets PerformanceTargets `yaml:"performance_targets"`
+}
+
+// Runtime holds runtime verification settings. The zero value (no runtime:
+// section in YAML) applies defaults in Load.
+type Runtime struct {
+	// LockFile is the path to runtime.lock.json. Default: "runtime.lock.json"
+	// (relative to wherever the daemon is invoked). Empty string disables lock
+	// verification entirely (useful for integration environments).
+	LockFile string `yaml:"lock_file"`
 }
 
 type Server struct {
@@ -187,6 +197,9 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Auth.SessionTTLMinutes == 0 {
 		cfg.Auth.SessionTTLMinutes = 720
+	}
+	if cfg.Runtime.LockFile == "" {
+		cfg.Runtime.LockFile = "runtime.lock.json"
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
