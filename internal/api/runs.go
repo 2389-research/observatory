@@ -17,6 +17,20 @@ import (
 // the launch-request.schema.json maxLength for the goal field.
 const RunGoalMaxBytes = 2048
 
+// validRunPhases is the complete set of phases a run can be in. Used to
+// validate the ?phase filter on GET /runs — an unknown phase always returns
+// an empty list silently, which is confusing; 400 is more honest (matches
+// the family_unknown pattern in GET /events).
+var validRunPhases = map[string]bool{
+	"pending":      true,
+	"running":      true,
+	"concluding":   true,
+	"succeeded":    true,
+	"failed":       true,
+	"inconclusive": true,
+	"aborted":      true,
+}
+
 // validCriteriaTypes is the closed set accepted at all run ingress points.
 var validCriteriaTypes = map[string]bool{
 	"exec_exit_zero":   true,
@@ -120,6 +134,7 @@ func renderRun(r *store.Run) wireRun {
 		wr := &wireRunResult{
 			Provenance: "guest_reported", // R3: fixed by trusted ingress, never from input
 			Status:     r.ResultStatus,
+			ReceivedAt: r.ResultReceivedAt,
 		}
 		// Parse the stored JSON to extract detail/data. If the parse fails we
 		// still serve provenance+status — the raw JSON stays in the store.
@@ -385,6 +400,20 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 		q.VMID = raw
 	}
 	if raw := params.Get("phase"); raw != "" {
+		if !validRunPhases[raw] {
+			writeError(w, http.StatusBadRequest, Error{
+				Code:      "malformed_request",
+				Message:   fmt.Sprintf("phase %q is not a valid run phase", raw),
+				Retryable: false,
+				Cause:     "phase_unknown",
+				Remediation: []Remediation{{
+					Action:    "get",
+					Params:    map[string]any{"path": basePath + "/runs"},
+					Rationale: "valid phases: pending, running, concluding, succeeded, failed, inconclusive, aborted",
+				}},
+			})
+			return
+		}
 		q.Phase = raw
 	}
 	if raw := params.Get("after"); raw != "" {
@@ -546,8 +575,20 @@ func (s *Server) handleGetRunReport(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	// Verify the run exists before checking the report.
-	if _, err := s.store.GetRun(ctx, runID); err != nil {
+	run, err := s.store.GetRun(ctx, runID)
+	if err != nil {
 		writeRunError(w, err)
+		return
+	}
+
+	// Non-terminal runs never have a report. Return pending without enqueueing —
+	// enqueueing a non-terminal run produces a spurious failed op (Generate returns
+	// ErrNotTerminal, op is marked failed, pollutes the operations table).
+	if !terminalRunPhases[run.Phase] {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":    "pending",
+			"retryable": true,
+		})
 		return
 	}
 

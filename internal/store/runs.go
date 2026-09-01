@@ -93,6 +93,7 @@ type Run struct {
 	Reason           string // outcome/interruption reason, "" until set
 	ResultJSON       string // "" until a result is recorded
 	ResultStatus     string // "" | succeeded | failed
+	ResultReceivedAt string // "" until a result is recorded; RFC3339 UTC
 	ProgressSeq      int64  // monotonic counter of accepted progress submissions
 	IdempotencyKey   *string
 	RequestHash      string
@@ -540,8 +541,8 @@ func (s *Store) ListRunsInPhases(ctx context.Context, phases ...string) ([]*Run,
 // --- scanner helpers ---
 
 const runColumns = `SELECT row_id, run_id, vm_id, owner, goal, criteria_type, on_completion,
-	progress_events, phase, evaluated_by, reason, result_json, result_status, progress_seq,
-	idempotency_key, request_hash, created_event_id, concluded_event_id,
+	progress_events, phase, evaluated_by, reason, result_json, result_status, result_received_at,
+	progress_seq, idempotency_key, request_hash, created_event_id, concluded_event_id,
 	created_at, started_at, concluded_at, updated_at`
 
 // runScanDest returns the ordered destination list for runColumns.
@@ -550,7 +551,7 @@ func runScanDest(r *Run, progressEventsInt *int) []any {
 	return []any{
 		&r.RowID, &r.RunID, &r.VMID, &r.Owner, &r.Goal, &r.CriteriaType, &r.OnCompletion,
 		progressEventsInt, &r.Phase, &r.EvaluatedBy, &r.Reason, &r.ResultJSON, &r.ResultStatus,
-		&r.ProgressSeq,
+		&r.ResultReceivedAt, &r.ProgressSeq,
 		&r.IdempotencyKey, &r.RequestHash, &r.CreatedEventID, &r.ConcludedEventID,
 		&r.CreatedAt, &r.StartedAt, &r.ConcludedAt, &r.UpdatedAt,
 	}
@@ -855,7 +856,9 @@ func (s *Store) SubmitRunResult(ctx context.Context, in SubmitResultInput) (*Run
 	}
 
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE runs SET result_json = ?, result_status = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE run_id = ?`,
+		`UPDATE runs SET result_json = ?, result_status = ?,
+		 result_received_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+		 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE run_id = ?`,
 		string(in.Result), status, in.RunID); err != nil {
 		return nil, fmt.Errorf("store result: %w", err)
 	}

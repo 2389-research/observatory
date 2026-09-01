@@ -240,13 +240,14 @@ func (s *Server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 	// re-build the member list with the refused members inserted at their
 	// original offsets so position numbers are correct for the caller.
 	if len(r2Refusals) > 0 {
-		cause := r2Refusals[0].cause
-		msg := r2Refusals[0].message
 		all := make([]*store.BatchMemberResult, 0, len(body.Members))
 		ri := 0 // index into r2Refusals
 		ki := 0 // index into result.Members (from CreateBatch)
 		for i, bm := range body.Members {
 			if ri < len(r2Refusals) && r2Refusals[ri].position == i {
+				// Use this member's own cause and message, not the first member's.
+				cause := r2Refusals[ri].cause
+				msg := r2Refusals[ri].message
 				all = append(all, &store.BatchMemberResult{
 					Position:       i,
 					Name:           bm.Name,

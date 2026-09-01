@@ -835,6 +835,155 @@ func TestCreateVMWithRunThreads(t *testing.T) {
 	}
 }
 
+// --- Fix round 1 tests ---
+
+// newRunServerWithReportGen builds a VM-capable server whose manager has a wired
+// reportGen stub so EnqueueReport can actually proceed past the nil guard.
+// Returns the server URL, the store, the fake runtime, and a channel that
+// receives every runID passed to the stub generator.
+func newRunServerWithReportGen(t *testing.T) (string, *store.Store, *runtimetest.Fake, <-chan string) {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "events.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	eng := situation.New(st, situation.Config{
+		Triggers:                  map[string]bool{"lifecycle_failed": true, "run_concluded": true},
+		QueueMaxItems:             500,
+		CollapseDuplicates:        true,
+		SituationMaxResponseBytes: 65536,
+	})
+	fake := runtimetest.NewFake()
+	generated := make(chan string, 64)
+	mgr, err := runtime.NewManagerWithReportGen(st, fake, runtime.ManagerConfig{
+		Admission: config.Admission{
+			CPUOvercommitRatio:    4.0,
+			MaxParallelProvisions: 2,
+		},
+		VMDefaults: config.VMDefaults{
+			MemoryMiB:        512,
+			VCPUCount:        1,
+			RootDiskMiB:      4096,
+			WorkspaceDiskMiB: 8192,
+		},
+		Owner:     "local_operator",
+		Templates: map[string]runtime.Template{testTemplateDef.TemplateID: testTemplateDef},
+		Host:      runtime.HostResources{TotalMemoryMiB: 8192, CPUCores: 8, StateDiskFreeMiB: 100 * 1024},
+	}, func(runID string) {
+		generated <- runID
+	})
+	if err != nil {
+		t.Fatalf("create manager: %v", err)
+	}
+	t.Cleanup(func() { mgr.Close() })
+	srv := httptest.NewServer(api.New(st, eng, mgr))
+	t.Cleanup(srv.Close)
+	return srv.URL, st, fake, generated
+}
+
+// F1: GET /runs/{id}/report on a non-terminal run must return pending without enqueueing.
+// Uses a server with reportGen wired so the bug (spurious enqueue) would show up.
+func TestGetReportNonTerminalRunNoPollution(t *testing.T) {
+	srvURL, st, fake, generated := newRunServerWithReportGen(t)
+	vmID := createRunningVM(t, srvURL, fake)
+
+	var createResp map[string]any
+	doRequest(t, http.MethodPost, srvURL+"/api/v1/vms/"+vmID+"/runs", map[string]any{
+		"goal":             "non-terminal report guard",
+		"success_criteria": map[string]any{"type": "operator_verdict"},
+		"on_completion":    "keep_running",
+	}, http.StatusCreated, &createResp)
+	runID, _ := createResp["run"].(map[string]any)["run_id"].(string)
+
+	// Run is now in "running" phase (non-terminal). GET /report must return pending.
+	var report map[string]any
+	getJSON(t, srvURL+"/api/v1/runs/"+runID+"/report", http.StatusOK, &report)
+	if status, _ := report["status"].(string); status != "pending" {
+		t.Errorf("non-terminal report status = %q, want pending", status)
+	}
+	if report["operation_id"] != nil {
+		t.Error("non-terminal report must not carry operation_id")
+	}
+
+	// Allow any goroutine that might have been enqueued to settle.
+	time.Sleep(80 * time.Millisecond)
+
+	// The stub generator must NOT have been called for a non-terminal run.
+	// In production, the generator creates the op; the stub doesn't, so we
+	// check the channel directly — any entry means EnqueueReport fired.
+	select {
+	case gotRunID := <-generated:
+		t.Errorf("non-terminal GET /report must not enqueue report generation; got enqueue for run %s", gotRunID)
+	default:
+		// Correct: nothing enqueued.
+	}
+
+	// Also verify no operation was created (defensive: stub doesn't create ops,
+	// but belt-and-suspenders check for production-like callers).
+	ctx := context.Background()
+	op, err := st.GetLatestReportOperation(ctx, runID)
+	if err == nil {
+		t.Errorf("non-terminal GET /report must not create a report operation; got op state=%s", op.State)
+	}
+}
+
+// F2: GET /runs/{id} after SubmitRunResult must carry result.received_at.
+func TestGetRunResultReceivedAtDirect(t *testing.T) {
+	srvURL, st, fake := newRunServer(t)
+	vmID := createRunningVM(t, srvURL, fake)
+
+	var createResp map[string]any
+	doRequest(t, http.MethodPost, srvURL+"/api/v1/vms/"+vmID+"/runs", map[string]any{
+		"goal":             "guest-result received_at",
+		"success_criteria": map[string]any{"type": "guest_result"},
+		"on_completion":    "keep_running",
+		"progress_events":  true,
+	}, http.StatusCreated, &createResp)
+	runID, _ := createResp["run"].(map[string]any)["run_id"].(string)
+
+	// Submit result directly via store (R10: not HTTP).
+	ctx := context.Background()
+	_, err := st.SubmitRunResult(ctx, store.SubmitResultInput{
+		RunID:    runID,
+		Result:   json.RawMessage(`{"status":"succeeded"}`),
+		MaxBytes: 1 << 20,
+	})
+	if err != nil {
+		t.Fatalf("SubmitRunResult: %v", err)
+	}
+
+	// GET /runs/{id} must carry result with received_at.
+	var run map[string]any
+	getJSON(t, srvURL+"/api/v1/runs/"+runID, http.StatusOK, &run)
+	result, _ := run["result"].(map[string]any)
+	if result == nil {
+		t.Fatalf("run.result is nil after SubmitRunResult")
+	}
+	receivedAt, _ := result["received_at"].(string)
+	if receivedAt == "" {
+		t.Errorf("result.received_at is empty; want non-empty RFC3339 timestamp")
+	}
+	// Basic RFC3339 sanity: must parse.
+	if _, err := time.Parse(time.RFC3339, receivedAt); err != nil {
+		t.Errorf("result.received_at %q is not RFC3339: %v", receivedAt, err)
+	}
+}
+
+// F3: GET /runs?phase=<unknown> must return 400 with cause phase_unknown.
+func TestListRunsUnknownPhase400(t *testing.T) {
+	srvURL, _, _ := newRunServer(t)
+	var e api.Error
+	getJSON(t, srvURL+"/api/v1/runs?phase=nonexistent_phase", http.StatusBadRequest, &e)
+	requireTeaching(t, e, "malformed_request")
+	if e.Cause != "phase_unknown" {
+		t.Errorf("cause = %q, want phase_unknown", e.Cause)
+	}
+	if len(e.Remediation) == 0 {
+		t.Error("phase_unknown must carry remediation naming valid phases")
+	}
+}
+
 // --- TestUnbuiltEndpointsTeachCapability: runs must NOT appear as unbuilt after implementation ---
 
 func TestRunsEndpointsAreBuilt(t *testing.T) {
