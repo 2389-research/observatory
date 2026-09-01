@@ -216,6 +216,51 @@ var registry = []KindInfo{
 		Provenance:    HostObserved,
 		Semantics:     "A CLI token was revoked",
 	},
+	// guest.* family: events about the vsock control channel between the host
+	// runner and the guest agent (L1a, §7.4). All are host_observed — the host
+	// is the authoritative observer of the channel state.
+	{
+		Kind:          "guest.channel_established",
+		Family:        "guest",
+		SchemaVersion: 1,
+		Provenance:    HostObserved,
+		Semantics:     "Runner completed the authenticated vsock handshake with the guest agent.",
+		Caveats: []string{
+			"established does not imply the guest workload is running; it only proves the channel is ready",
+		},
+	},
+	{
+		Kind:          "guest.channel_lost",
+		Family:        "guest",
+		SchemaVersion: 1,
+		Provenance:    HostObserved,
+		Semantics:     "The vsock control channel closed or a ping window expired.",
+		Caveats: []string{
+			"channel loss does not imply guest crash; the VMM may still be running",
+		},
+	},
+	// vm.vmm_exited: host runner observed the supervised VMM process exit (L1a).
+	{
+		Kind:          "vm.vmm_exited",
+		Family:        "vm",
+		SchemaVersion: 1,
+		Provenance:    HostObserved,
+		Semantics:     "The supervised VMM process is gone as observed by the runner.",
+		Caveats: []string{
+			"exit does not distinguish clean shutdown from crash; the graceful field reports the runner's assessment",
+		},
+	},
+	// spool.recovery_gap: importer detected unreadable spool records (L1a, §12.5).
+	{
+		Kind:          "spool.recovery_gap",
+		Family:        "spool",
+		SchemaVersion: 1,
+		Provenance:    HostObserved,
+		Semantics:     "Importer or reader detected unreadable spool records; an unknown interval is reported, not an invented count.",
+		Caveats: []string{
+			"count of lost records is not claimed — an unknown interval is reported, not invented",
+		},
+	},
 	// net.flow, dns, and policy families: reserved for the network inspection
 	// subsystem (L1). Registered now so run-report reproduce_queries are valid
 	// today (zero counts are honest); actual ingress awaits the network emitter.

@@ -1,0 +1,533 @@
+// ABOUTME: Tests for the spool importer: at-least-once delivery, dedup, cursor
+// ABOUTME: durability, prune protocol, and recovery-gap ingress. TDD — all RED first.
+package spool_test
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/2389-research/observatory-v2/internal/events"
+	"github.com/2389-research/observatory-v2/internal/spool"
+	"github.com/2389-research/observatory-v2/internal/store"
+)
+
+// openTestStore creates a real SQLite store in a temp file, returning it and a
+// cleanup function. The store is backed by a fresh database every call.
+func openTestStore(t *testing.T) *store.Store {
+	t.Helper()
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	return st
+}
+
+// makeSpoolEnvelope builds a minimal valid envelope for spool tests.
+// Unlike makeEnvelope, it uses host_observed provenance so it can be
+// appended through the trusted importer path without a kind mismatch.
+// The kind "vm.state_changed" is pre-registered, host_observed.
+func makeSpoolEnvelope(vmID, instanceID, seq string) *events.Envelope {
+	vid := vmID
+	return &events.Envelope{
+		SchemaVersion:    1,
+		VMID:             &vid,
+		SourceInstanceID: instanceID,
+		SourceSeq:        seq,
+		Kind:             "vm.state_changed",
+		Provenance:       events.HostObserved,
+		Sensor:           "runner",
+		HostReceivedAt:   events.Timestamp{Time: time.Now().UTC()},
+		Quality: events.Quality{
+			PathResolution: events.PathNotApplicable,
+			Attribution:    events.AttributionNotApplicable,
+		},
+		Data: map[string]any{
+			"vm_id": vmID,
+			"from":  "stopped",
+			"to":    "starting",
+		},
+	}
+}
+
+// writeSegment writes a slice of envelopes into a new spool dir under root/<vmID>/,
+// returning the spool dir path.
+func writeSegment(t *testing.T, root, vmID string, envs []*events.Envelope, closed bool) string {
+	t.Helper()
+	spoolDir := filepath.Join(root, vmID)
+	if err := os.MkdirAll(spoolDir, 0o700); err != nil {
+		t.Fatalf("mkdir spool dir: %v", err)
+	}
+	w, err := spool.OpenWriter(spoolDir, spool.WriterCfg{
+		VMID:            vmID,
+		InstanceID:      "inst-1",
+		MaxSegmentBytes: 4 * 1024 * 1024,
+		MaxSpoolBytes:   64 * 1024 * 1024,
+	})
+	if err != nil {
+		t.Fatalf("OpenWriter: %v", err)
+	}
+	for _, env := range envs {
+		if err := w.Append(env); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+	if closed {
+		if err := w.Close(); err != nil {
+			t.Fatalf("Writer.Close: %v", err)
+		}
+	}
+	return spoolDir
+}
+
+// countEvents returns the number of events in the store matching a given
+// source_instance_id by fetching from the store's query API.
+func countEvents(t *testing.T, st *store.Store, instanceID string) int {
+	t.Helper()
+	ctx := context.Background()
+	result, err := st.Query(ctx, store.Query{
+		Limit: 1000,
+	})
+	if err != nil {
+		t.Fatalf("store.Query: %v", err)
+	}
+	count := 0
+	for _, env := range result.Events {
+		if env.SourceInstanceID == instanceID {
+			count++
+		}
+	}
+	return count
+}
+
+// TestImportTwoSegments — §12.4 at-least-once transport, deduplicated storage.
+// Write 2 segments with 3 envelopes each, import once, assert all 6 land.
+func TestImportTwoSegments(t *testing.T) {
+	st := openTestStore(t)
+	root := t.TempDir()
+
+	vmID := "11111111-1111-1111-1111-111111111111"
+	instanceID := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+
+	spoolDir := filepath.Join(root, vmID)
+	if err := os.MkdirAll(spoolDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	// Write segment 0: 3 envelopes, closed.
+	w0, err := spool.OpenWriter(spoolDir, spool.WriterCfg{
+		VMID: vmID, InstanceID: instanceID,
+		MaxSegmentBytes: 512, MaxSpoolBytes: 64 * 1024 * 1024,
+	})
+	if err != nil {
+		t.Fatalf("OpenWriter seg0: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := w0.Append(makeSpoolEnvelope(vmID, instanceID, fmt.Sprintf("%d", i))); err != nil {
+			t.Fatalf("Append seg0[%d]: %v", i, err)
+		}
+	}
+	if err := w0.Close(); err != nil {
+		t.Fatalf("Close seg0: %v", err)
+	}
+
+	// Write segment 1: 3 more envelopes, closed.
+	w1, err := spool.OpenWriter(spoolDir, spool.WriterCfg{
+		VMID: vmID, InstanceID: instanceID,
+		MaxSegmentBytes: 512, MaxSpoolBytes: 64 * 1024 * 1024,
+	})
+	if err != nil {
+		t.Fatalf("OpenWriter seg1: %v", err)
+	}
+	for i := 3; i < 6; i++ {
+		if err := w1.Append(makeSpoolEnvelope(vmID, instanceID, fmt.Sprintf("%d", i))); err != nil {
+			t.Fatalf("Append seg1[%d]: %v", i, err)
+		}
+	}
+	if err := w1.Close(); err != nil {
+		t.Fatalf("Close seg1: %v", err)
+	}
+
+	imp := spool.NewImporter(st, root, time.Second)
+	stats, err := imp.ImportOnce(context.Background())
+	if err != nil {
+		t.Fatalf("ImportOnce: %v", err)
+	}
+	if stats.Appended != 6 {
+		t.Errorf("Appended: want 6, got %d", stats.Appended)
+	}
+	if stats.Deduped != 0 {
+		t.Errorf("Deduped: want 0, got %d", stats.Deduped)
+	}
+	if countEvents(t, st, instanceID) != 6 {
+		t.Errorf("store: want 6 events from instanceID, got %d", countEvents(t, st, instanceID))
+	}
+}
+
+// TestImportDedup — §12.4 at-least-once transport, deduplicated storage.
+// Re-run ImportOnce on an already-imported spool; Deduped should equal Appended
+// from the first run, Appended should be 0.
+// We use an open (non-closed) segment so the segment is not pruned after the first
+// import, allowing the second import to see the same records and deduplicate them.
+func TestImportDedup(t *testing.T) {
+	st := openTestStore(t)
+	root := t.TempDir()
+
+	vmID := "22222222-2222-2222-2222-222222222222"
+	instanceID := "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+	envs := make([]*events.Envelope, 4)
+	for i := range envs {
+		envs[i] = makeSpoolEnvelope(vmID, instanceID, fmt.Sprintf("%d", i))
+	}
+	// open=false would prune the segment after first import; use open=true (no end-marker)
+	// so the segment persists for the second import to iterate and deduplicate.
+	writeSegment(t, root, vmID, envs, false /* open — no end-marker, not prunable */)
+
+	imp := spool.NewImporter(st, root, time.Second)
+
+	// First import.
+	stats1, err := imp.ImportOnce(context.Background())
+	if err != nil {
+		t.Fatalf("ImportOnce (first): %v", err)
+	}
+	if stats1.Appended != 4 {
+		t.Errorf("first import Appended: want 4, got %d", stats1.Appended)
+	}
+	if stats1.Pruned != 0 {
+		t.Errorf("first import Pruned: want 0 (open segment), got %d", stats1.Pruned)
+	}
+
+	// Second import: must be all dedup, zero new appended.
+	// The cursor points to record 3 (0-based); re-reading the same 4 records
+	// counts them as Deduped (cursor-skipped = already committed).
+	stats2, err := imp.ImportOnce(context.Background())
+	if err != nil {
+		t.Fatalf("ImportOnce (second): %v", err)
+	}
+	if stats2.Appended != 0 {
+		t.Errorf("second import Appended: want 0, got %d", stats2.Appended)
+	}
+	if stats2.Deduped != 4 {
+		t.Errorf("second import Deduped: want 4, got %d", stats2.Deduped)
+	}
+}
+
+// TestCrashBetweenBatchAndCursor — kill between batch commit and cursor write.
+// The test deletes cursor.json after a completed import, simulating a crash
+// between the store commit and the cursor fsync. Re-importing must deduplicate
+// all records without double-counting.
+// We use an open segment (no end-marker) so the segment file persists after the
+// first import and is available for re-import when cursor.json is removed.
+func TestCrashBetweenBatchAndCursor(t *testing.T) {
+	st := openTestStore(t)
+	root := t.TempDir()
+
+	vmID := "33333333-3333-3333-3333-333333333333"
+	instanceID := "cccccccc-cccc-cccc-cccc-cccccccccccc"
+
+	envs := make([]*events.Envelope, 5)
+	for i := range envs {
+		envs[i] = makeSpoolEnvelope(vmID, instanceID, fmt.Sprintf("%d", i))
+	}
+	// Open (no end-marker) so the segment is not pruned after the first import.
+	writeSegment(t, root, vmID, envs, false)
+
+	imp := spool.NewImporter(st, root, time.Second)
+
+	// First import: succeeds; all 5 records land in the store.
+	stats1, err := imp.ImportOnce(context.Background())
+	if err != nil {
+		t.Fatalf("ImportOnce (first): %v", err)
+	}
+	if stats1.Appended != 5 {
+		t.Errorf("first import Appended: want 5, got %d", stats1.Appended)
+	}
+	if stats1.Pruned != 0 {
+		t.Errorf("first import Pruned: want 0, got %d", stats1.Pruned)
+	}
+
+	// Simulate crash: delete cursor.json. Store still has all 5 events.
+	cursorPath := filepath.Join(root, vmID, "cursor.json")
+	if err := os.Remove(cursorPath); err != nil {
+		t.Fatalf("remove cursor.json: %v", err)
+	}
+
+	// Re-import without cursor: the store's dedup keyed on (source_instance_id,
+	// source_seq) absorbs all 5 re-appended records. Nothing new is added.
+	stats2, err := imp.ImportOnce(context.Background())
+	if err != nil {
+		t.Fatalf("ImportOnce (after cursor delete): %v", err)
+	}
+	if stats2.Appended != 0 {
+		t.Errorf("replay Appended: want 0, got %d", stats2.Appended)
+	}
+	if stats2.Deduped != 5 {
+		t.Errorf("replay Deduped: want 5, got %d", stats2.Deduped)
+	}
+	// Total events in store must remain 5 (no duplicates).
+	if countEvents(t, st, instanceID) != 5 {
+		t.Errorf("store: want 5 events, got %d", countEvents(t, st, instanceID))
+	}
+}
+
+// TestPruneAfterEndMarkerAndCursor — prune only after end marker + cursor past.
+// Write a closed segment, import it, assert it is pruned.
+// Write an open (no end-marker) segment; it must NOT be pruned even when cursor-past.
+func TestPruneAfterEndMarkerAndCursor(t *testing.T) {
+	st := openTestStore(t)
+	root := t.TempDir()
+
+	vmID := "44444444-4444-4444-4444-444444444444"
+	instanceID := "dddddddd-dddd-dddd-dddd-dddddddddddd"
+
+	// Closed segment: should be pruned after import.
+	envs := make([]*events.Envelope, 3)
+	for i := range envs {
+		envs[i] = makeSpoolEnvelope(vmID, instanceID, fmt.Sprintf("%d", i))
+	}
+	writeSegment(t, root, vmID, envs, true)
+
+	imp := spool.NewImporter(st, root, time.Second)
+	stats, err := imp.ImportOnce(context.Background())
+	if err != nil {
+		t.Fatalf("ImportOnce: %v", err)
+	}
+	if stats.Pruned != 1 {
+		t.Errorf("Pruned: want 1, got %d", stats.Pruned)
+	}
+
+	// The closed segment file must be gone.
+	segs, _ := filepath.Glob(filepath.Join(root, vmID, "seg-*.vmsp"))
+	if len(segs) != 0 {
+		t.Errorf("expected 0 segments after prune, found %d: %v", len(segs), segs)
+	}
+
+	// Now write an open segment (crash simulation — no end marker).
+	instanceID2 := "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+	vmID2 := "55555555-5555-5555-5555-555555555555"
+	envs2 := []*events.Envelope{makeSpoolEnvelope(vmID2, instanceID2, "0")}
+	writeSegment(t, root, vmID2, envs2, false /* not closed */)
+
+	imp2 := spool.NewImporter(st, root, time.Second)
+	stats2, err := imp2.ImportOnce(context.Background())
+	if err != nil {
+		t.Fatalf("ImportOnce (open seg): %v", err)
+	}
+	// Open segment: Recover truncates the tail if needed, but no end-marker → not prunable.
+	if stats2.Pruned != 0 {
+		t.Errorf("open segment: Pruned want 0, got %d", stats2.Pruned)
+	}
+	segs2, _ := filepath.Glob(filepath.Join(root, vmID2, "seg-*.vmsp"))
+	if len(segs2) == 0 {
+		t.Error("open segment was pruned but should not have been")
+	}
+}
+
+// TestRegistryKinds — all four new kinds are in the registry with correct
+// provenance, family, sensor, and schema_version.
+func TestRegistryKinds(t *testing.T) {
+	cases := []struct {
+		kind       string
+		family     string
+		provenance events.Provenance
+	}{
+		{"guest.channel_established", "guest", events.HostObserved},
+		{"guest.channel_lost", "guest", events.HostObserved},
+		{"vm.vmm_exited", "vm", events.HostObserved},
+		{"spool.recovery_gap", "spool", events.HostObserved},
+	}
+	for _, tc := range cases {
+		t.Run(tc.kind, func(t *testing.T) {
+			info, ok := events.LookupKind(tc.kind)
+			if !ok {
+				t.Fatalf("kind %q not registered", tc.kind)
+			}
+			if info.Family != tc.family {
+				t.Errorf("family: want %q, got %q", tc.family, info.Family)
+			}
+			if info.Provenance != tc.provenance {
+				t.Errorf("provenance: want %q, got %q", tc.provenance, info.Provenance)
+			}
+			if info.SchemaVersion != 1 {
+				t.Errorf("schema_version: want 1, got %d", info.SchemaVersion)
+			}
+			if info.Semantics == "" {
+				t.Error("semantics must not be empty")
+			}
+		})
+	}
+}
+
+// TestEmptyRoot — ImportOnce on a root with no VM dirs returns zero stats without error.
+func TestEmptyRoot(t *testing.T) {
+	st := openTestStore(t)
+	root := t.TempDir()
+
+	imp := spool.NewImporter(st, root, time.Second)
+	stats, err := imp.ImportOnce(context.Background())
+	if err != nil {
+		t.Fatalf("ImportOnce on empty root: %v", err)
+	}
+	if stats.Appended != 0 || stats.Deduped != 0 || stats.Pruned != 0 {
+		t.Errorf("want zero stats on empty root, got %+v", stats)
+	}
+}
+
+// TestRunLoopCancellation — Run(ctx) returns when context is cancelled,
+// and the return value satisfies errors.Is(err, context.Canceled).
+func TestRunLoopCancellation(t *testing.T) {
+	st := openTestStore(t)
+	root := t.TempDir()
+
+	imp := spool.NewImporter(st, root, 10*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- imp.Run(ctx) }()
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Errorf("Run returned non-cancel error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("Run did not return after ctx cancel")
+	}
+}
+
+// TestGapEnvelopeIngress — when Recover emits a GapEmitted envelope (interior
+// corruption), the importer appends it to the store as a spool.recovery_gap event.
+func TestGapEnvelopeIngress(t *testing.T) {
+	st := openTestStore(t)
+	root := t.TempDir()
+
+	vmID := "66666666-6666-6666-6666-666666666666"
+
+	// Build a segment with interior corruption: write header + valid record +
+	// corrupt bytes to simulate an interior bad record.
+	spoolDir := filepath.Join(root, vmID)
+	if err := os.MkdirAll(spoolDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	// Write one valid record so the segment is non-empty.
+	instanceID := "ffffffff-ffff-ffff-ffff-ffffffffffff"
+	w, err := spool.OpenWriter(spoolDir, spool.WriterCfg{
+		VMID: vmID, InstanceID: instanceID,
+		MaxSegmentBytes: 4 * 1024 * 1024, MaxSpoolBytes: 64 * 1024 * 1024,
+	})
+	if err != nil {
+		t.Fatalf("OpenWriter: %v", err)
+	}
+	_ = w.Append(makeSpoolEnvelope(vmID, instanceID, "0"))
+	// Do NOT call Close — leave open (Recover will handle the tail).
+
+	// Manually inject a bad record to simulate interior corruption.
+	// Find the segment file and flip bytes to create a corrupt interior record.
+	segs, _ := filepath.Glob(filepath.Join(spoolDir, "seg-*.vmsp"))
+	if len(segs) == 0 {
+		t.Fatal("no segment found")
+	}
+
+	// Read raw, find first record body, flip it to corrupt the CRC.
+	raw, err := os.ReadFile(segs[0])
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+
+	// Find header end.
+	headerEnd := -1
+	for i, b := range raw {
+		if b == '\n' {
+			headerEnd = i
+			break
+		}
+	}
+	if headerEnd < 0 {
+		t.Fatal("no newline in segment")
+	}
+	// Flip a byte inside the body (past len+crc = 8 bytes).
+	flipAt := headerEnd + 1 + 8
+	if flipAt < len(raw) {
+		raw[flipAt] ^= 0xFF
+		if err := os.WriteFile(segs[0], raw, 0o600); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+	}
+
+	imp := spool.NewImporter(st, root, time.Second)
+	stats, err := imp.ImportOnce(context.Background())
+	if err != nil {
+		t.Fatalf("ImportOnce with corrupt segment: %v", err)
+	}
+	// The gap envelope must have been appended.
+	_ = stats
+
+	// Query all events and find a spool.recovery_gap.
+	ctx := context.Background()
+	result, err := st.Query(ctx, store.Query{Limit: 100})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	found := false
+	for _, env := range result.Events {
+		if env.Kind == "spool.recovery_gap" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		// Unmarshal each envelope's raw JSON to confirm the kind.
+		var kinds []string
+		for _, env := range result.Events {
+			kinds = append(kinds, env.Kind)
+		}
+		t.Errorf("spool.recovery_gap not found in store; found kinds: %v", kinds)
+	}
+}
+
+// TestCursorIsWrittenAtomically — cursor.json must be a valid JSON file
+// after ImportOnce returns (tempfile+rename guarantees this).
+func TestCursorIsWrittenAtomically(t *testing.T) {
+	st := openTestStore(t)
+	root := t.TempDir()
+
+	vmID := "77777777-7777-7777-7777-777777777777"
+	instanceID := "aaaabbbb-cccc-dddd-eeee-ffffffffffff"
+
+	envs := []*events.Envelope{makeSpoolEnvelope(vmID, instanceID, "0")}
+	writeSegment(t, root, vmID, envs, true)
+
+	imp := spool.NewImporter(st, root, time.Second)
+	if _, err := imp.ImportOnce(context.Background()); err != nil {
+		t.Fatalf("ImportOnce: %v", err)
+	}
+
+	cursorPath := filepath.Join(root, vmID, "cursor.json")
+	data, err := os.ReadFile(cursorPath)
+	if err != nil {
+		t.Fatalf("read cursor.json: %v", err)
+	}
+
+	var cursor struct {
+		Segment string `json:"segment"`
+		Record  int    `json:"record"`
+	}
+	if err := json.Unmarshal(data, &cursor); err != nil {
+		t.Fatalf("cursor.json is not valid JSON: %v\ncontent: %s", err, data)
+	}
+	if cursor.Segment == "" {
+		t.Error("cursor.json segment field is empty")
+	}
+	if cursor.Record < 0 {
+		t.Errorf("cursor.json record field is negative: %d", cursor.Record)
+	}
+}
