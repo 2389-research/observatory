@@ -250,20 +250,21 @@ func (c *client) vmCreate(args []string) int {
 	}
 	name := rest[0]
 
-	// All-or-none validation for run flags: providing any strict subset is a
-	// usage error. The API is the authority for value validation (criteria type,
-	// on-completion value, R2 refusal). We only enforce presence here.
-	runFlagCount := 0
+	// Run-flag group validation: if any of the four run flags is used the trio
+	// (--run-goal, --run-criteria, --run-on-completion) must be complete.
+	// --run-progress-events is optional when the trio is present; providing it
+	// alone (or with only part of the trio) is a usage error.
+	trioCount := 0
 	if *runGoal != "" {
-		runFlagCount++
+		trioCount++
 	}
 	if *runCriteria != "" {
-		runFlagCount++
+		trioCount++
 	}
 	if *runOnCompletion != "" {
-		runFlagCount++
+		trioCount++
 	}
-	if runFlagCount > 0 && runFlagCount < 3 {
+	if (trioCount > 0 || *runProgressEvents) && trioCount < 3 {
 		fmt.Fprintln(c.stderr, "vmobs: --run-goal, --run-criteria, and --run-on-completion must all be set together")
 		return exitUsage
 	}
@@ -287,7 +288,7 @@ func (c *client) vmCreate(args []string) int {
 	if *wsMiB != 0 {
 		reqBody["workspace_disk_mib"] = *wsMiB
 	}
-	if runFlagCount == 3 {
+	if trioCount == 3 {
 		reqBody["run"] = map[string]any{
 			"goal": *runGoal,
 			"success_criteria": map[string]any{

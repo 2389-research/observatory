@@ -30,8 +30,9 @@ var runCLITestTemplate = runtime.Template{
 }
 
 // newRunCLIServer builds a server suitable for run CLI tests: one template, 8 GiB
-// host, fake runtime. Returns the server and the fake so tests can interact with it.
-func newRunCLIServer(t *testing.T) (*httptest.Server, *runtimetest.Fake) {
+// host, fake runtime. Returns the server, the fake, and the backing store so
+// tests can seed reports and operations directly.
+func newRunCLIServer(t *testing.T) (*httptest.Server, *runtimetest.Fake, *store.Store) {
 	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "events.sqlite"))
 	if err != nil {
@@ -66,7 +67,7 @@ func newRunCLIServer(t *testing.T) (*httptest.Server, *runtimetest.Fake) {
 	t.Cleanup(func() { mgr.Close() })
 	srv := httptest.NewServer(api.New(st, eng, mgr))
 	t.Cleanup(srv.Close)
-	return srv, fake
+	return srv, fake, st
 }
 
 // createCLIRunningVM creates a VM via the API and polls until observed_state=running.
@@ -123,7 +124,7 @@ func createCLIRunningVM(t *testing.T, srvURL string) string {
 // --- run submit ---
 
 func TestRunSubmitJSON(t *testing.T) {
-	srv, _ := newRunCLIServer(t)
+	srv, _, _ := newRunCLIServer(t)
 	vmID := createCLIRunningVM(t, srv.URL)
 
 	code, stdout, stderr := runCLI(t, "--api", srv.URL, "--json", "run", "submit",
@@ -149,7 +150,7 @@ func TestRunSubmitJSON(t *testing.T) {
 }
 
 func TestRunSubmitHuman(t *testing.T) {
-	srv, _ := newRunCLIServer(t)
+	srv, _, _ := newRunCLIServer(t)
 	vmID := createCLIRunningVM(t, srv.URL)
 
 	code, stdout, stderr := runCLI(t, "--api", srv.URL, "run", "submit",
@@ -167,7 +168,7 @@ func TestRunSubmitHuman(t *testing.T) {
 }
 
 func TestRunSubmitIdempotencyKey(t *testing.T) {
-	srv, _ := newRunCLIServer(t)
+	srv, _, _ := newRunCLIServer(t)
 	vmID := createCLIRunningVM(t, srv.URL)
 
 	// First submit with a key.
@@ -200,6 +201,27 @@ func TestRunSubmitIdempotencyKey(t *testing.T) {
 		"--on-completion", "keep_running", "--idempotency-key", "my-key-2")
 	if code2 != exitOK {
 		t.Fatalf("second submit exit %d, stderr: %s, out: %s", code2, stderr2, out2)
+	}
+}
+
+// F2: run submit --on-completion stop_and_finalize surfaces the API's 501 as exit 1.
+// This is a coverage gap — the code path (fail() on non-201) is believed correct.
+func TestRunSubmitStopAndFinalizeExitsOne(t *testing.T) {
+	srv, _, _ := newRunCLIServer(t)
+	vmID := createCLIRunningVM(t, srv.URL)
+
+	code, stdout, stderr := runCLI(t, "--api", srv.URL, "run", "submit",
+		"--vm", vmID,
+		"--goal", "stop and finalize",
+		"--criteria", "operator_verdict",
+		"--on-completion", "stop_and_finalize")
+	if code != exitAPIError {
+		t.Fatalf("stop_and_finalize: exit %d, want %d\nstdout: %s\nstderr: %s",
+			code, exitAPIError, stdout, stderr)
+	}
+	// Human mode: the 501 error code or cause must appear on stderr.
+	if !strings.Contains(stderr, "missing_capability") && !strings.Contains(stderr, "capability_not_built") {
+		t.Errorf("expected missing_capability or capability_not_built in stderr:\n%s", stderr)
 	}
 }
 
@@ -297,7 +319,7 @@ func TestRunListEmptyJSON(t *testing.T) {
 }
 
 func TestRunListHuman(t *testing.T) {
-	srv, _ := newRunCLIServer(t)
+	srv, _, _ := newRunCLIServer(t)
 	vmID := createCLIRunningVM(t, srv.URL)
 
 	// Submit a run.
@@ -315,7 +337,7 @@ func TestRunListHuman(t *testing.T) {
 }
 
 func TestRunListFilterByPhase(t *testing.T) {
-	srv, _ := newRunCLIServer(t)
+	srv, _, _ := newRunCLIServer(t)
 	vmID := createCLIRunningVM(t, srv.URL)
 	runCLI(t, "--api", srv.URL, "run", "submit",
 		"--vm", vmID, "--goal", "phase filter test", "--criteria", "operator_verdict",
@@ -361,7 +383,7 @@ func TestRunListBogusPhaseJSONExitsOne(t *testing.T) {
 // --- run get ---
 
 func TestRunGetJSON(t *testing.T) {
-	srv, _ := newRunCLIServer(t)
+	srv, _, _ := newRunCLIServer(t)
 	vmID := createCLIRunningVM(t, srv.URL)
 
 	code1, out1, _ := runCLI(t, "--api", srv.URL, "--json", "run", "submit",
@@ -390,7 +412,7 @@ func TestRunGetJSON(t *testing.T) {
 }
 
 func TestRunGetHuman(t *testing.T) {
-	srv, _ := newRunCLIServer(t)
+	srv, _, _ := newRunCLIServer(t)
 	vmID := createCLIRunningVM(t, srv.URL)
 
 	code1, out1, _ := runCLI(t, "--api", srv.URL, "--json", "run", "submit",
@@ -437,7 +459,7 @@ func TestRunGetMissingArg(t *testing.T) {
 // --- run conclude ---
 
 func TestRunConcludeVerdictJSON(t *testing.T) {
-	srv, _ := newRunCLIServer(t)
+	srv, _, _ := newRunCLIServer(t)
 	vmID := createCLIRunningVM(t, srv.URL)
 
 	code1, out1, _ := runCLI(t, "--api", srv.URL, "--json", "run", "submit",
@@ -467,7 +489,7 @@ func TestRunConcludeVerdictJSON(t *testing.T) {
 }
 
 func TestRunConcludeVerdictHuman(t *testing.T) {
-	srv, _ := newRunCLIServer(t)
+	srv, _, _ := newRunCLIServer(t)
 	vmID := createCLIRunningVM(t, srv.URL)
 
 	code1, out1, _ := runCLI(t, "--api", srv.URL, "--json", "run", "submit",
@@ -492,7 +514,7 @@ func TestRunConcludeVerdictHuman(t *testing.T) {
 }
 
 func TestRunConcludeAbort(t *testing.T) {
-	srv, _ := newRunCLIServer(t)
+	srv, _, _ := newRunCLIServer(t)
 	vmID := createCLIRunningVM(t, srv.URL)
 
 	code1, out1, _ := runCLI(t, "--api", srv.URL, "--json", "run", "submit",
@@ -552,7 +574,7 @@ func TestRunConcludeMissingRunIDExitsThree(t *testing.T) {
 // --- run report ---
 
 func TestRunReportPendingJSON(t *testing.T) {
-	srv, _ := newRunCLIServer(t)
+	srv, _, _ := newRunCLIServer(t)
 	vmID := createCLIRunningVM(t, srv.URL)
 
 	code1, out1, _ := runCLI(t, "--api", srv.URL, "--json", "run", "submit",
@@ -580,7 +602,7 @@ func TestRunReportPendingJSON(t *testing.T) {
 }
 
 func TestRunReportPendingHuman(t *testing.T) {
-	srv, _ := newRunCLIServer(t)
+	srv, _, _ := newRunCLIServer(t)
 	vmID := createCLIRunningVM(t, srv.URL)
 
 	code1, out1, _ := runCLI(t, "--api", srv.URL, "--json", "run", "submit",
@@ -599,6 +621,225 @@ func TestRunReportPendingHuman(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "pending") {
 		t.Errorf("human report missing pending status:\n%s", stdout)
+	}
+}
+
+// F3: generated report — JSON mode must be byte-for-byte the raw server body.
+func TestRunReportGeneratedJSON(t *testing.T) {
+	srv, _, st := newRunCLIServer(t)
+	vmID := createCLIRunningVM(t, srv.URL)
+
+	// Submit and conclude a run (operator_verdict run → terminal).
+	code1, out1, _ := runCLI(t, "--api", srv.URL, "--json", "run", "submit",
+		"--vm", vmID, "--goal", "generated report json", "--criteria", "operator_verdict",
+		"--on-completion", "keep_running")
+	if code1 != exitOK {
+		t.Fatalf("submit exit %d: %s", code1, out1)
+	}
+	var sr map[string]any
+	_ = json.Unmarshal([]byte(out1), &sr)
+	runID, _ := sr["run"].(map[string]any)["run_id"].(string)
+
+	b, _ := json.Marshal(map[string]any{"verdict": "succeeded"})
+	req, _ := http.NewRequestWithContext(t.Context(), http.MethodPost,
+		srv.URL+"/api/v1/runs/"+runID+"/conclude", strings.NewReader(string(b)))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("conclude: %v", err)
+	}
+	resp.Body.Close()
+
+	// Store a report directly, simulating what the real generator does.
+	const reportJSON = `{"schema_version":1,"phase":"succeeded"}`
+	const digest = "sha256:" + "aabbccdd11223344aabbccdd11223344aabbccdd11223344aabbccdd11223344"
+	if err := st.PutRunReport(t.Context(), runID, reportJSON, digest, 1); err != nil {
+		t.Fatalf("PutRunReport: %v", err)
+	}
+
+	// Poll until status=generated (the store write is synchronous so this should
+	// succeed on the first attempt, but we give it a deadline to be safe).
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	var wantBody []byte
+	for {
+		resp2, err2 := http.Get(srv.URL + "/api/v1/runs/" + runID + "/report")
+		if err2 != nil {
+			t.Fatalf("poll report: %v", err2)
+		}
+		raw, _ := io.ReadAll(resp2.Body)
+		resp2.Body.Close()
+		var rpt map[string]any
+		_ = json.Unmarshal(raw, &rpt)
+		if rpt["status"] == "generated" {
+			wantBody = raw
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("timeout waiting for generated report (last body: %s)", raw)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+
+	// CLI in --json mode must print the exact server body.
+	code, stdout, stderr := runCLI(t, "--api", srv.URL, "--json", "run", "report", runID)
+	if code != exitOK {
+		t.Fatalf("exit %d, stderr: %s", code, stderr)
+	}
+	// The server body ends with \n (json.NewEncoder.Encode); the CLI prints body+\n.
+	// Normalize by stripping one trailing newline from each side before comparing.
+	gotNorm := strings.TrimRight(stdout, "\n")
+	wantNorm := strings.TrimRight(string(wantBody), "\n")
+	if gotNorm != wantNorm {
+		t.Errorf("--json output mismatch:\n got: %s\nwant: %s", gotNorm, wantNorm)
+	}
+}
+
+// F3: generated report — human mode must print digest and report content.
+func TestRunReportGeneratedHuman(t *testing.T) {
+	srv, _, st := newRunCLIServer(t)
+	vmID := createCLIRunningVM(t, srv.URL)
+
+	code1, out1, _ := runCLI(t, "--api", srv.URL, "--json", "run", "submit",
+		"--vm", vmID, "--goal", "generated report human", "--criteria", "operator_verdict",
+		"--on-completion", "keep_running")
+	if code1 != exitOK {
+		t.Fatalf("submit exit %d: %s", code1, out1)
+	}
+	var sr map[string]any
+	_ = json.Unmarshal([]byte(out1), &sr)
+	runID, _ := sr["run"].(map[string]any)["run_id"].(string)
+
+	b, _ := json.Marshal(map[string]any{"verdict": "succeeded"})
+	req, _ := http.NewRequestWithContext(t.Context(), http.MethodPost,
+		srv.URL+"/api/v1/runs/"+runID+"/conclude", strings.NewReader(string(b)))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("conclude: %v", err)
+	}
+	resp.Body.Close()
+
+	const reportDigest = "sha256:" + "aabbccdd11223344aabbccdd11223344aabbccdd11223344aabbccdd11223344"
+	if err := st.PutRunReport(t.Context(), runID, `{"schema_version":1,"phase":"succeeded"}`, reportDigest, 1); err != nil {
+		t.Fatalf("PutRunReport: %v", err)
+	}
+
+	// Wait until the report endpoint reflects generated status.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	for {
+		resp2, _ := http.Get(srv.URL + "/api/v1/runs/" + runID + "/report")
+		raw, _ := io.ReadAll(resp2.Body)
+		resp2.Body.Close()
+		var rpt map[string]any
+		_ = json.Unmarshal(raw, &rpt)
+		if rpt["status"] == "generated" {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("timeout waiting for generated report (last body: %s)", raw)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+
+	code, stdout, stderr := runCLI(t, "--api", srv.URL, "run", "report", runID)
+	if code != exitOK {
+		t.Fatalf("exit %d, stderr: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "generated") {
+		t.Errorf("human report missing 'generated':\n%s", stdout)
+	}
+	if !strings.Contains(stdout, reportDigest) {
+		t.Errorf("human report missing digest %s:\n%s", reportDigest, stdout)
+	}
+	// The phase from the embedded report should appear.
+	if !strings.Contains(stdout, "succeeded") {
+		t.Errorf("human report missing phase from embedded report:\n%s", stdout)
+	}
+}
+
+// F3: failed report — human mode must print operation_id and retryable note.
+// Approach: conclude a run (terminal), insert a run.report_generate op via
+// st.InsertReportOperation, then mark it failed via st.UpdateOperation. The
+// API's GetLatestReportOperation query then returns the failed op and the
+// report endpoint returns status=failed.
+func TestRunReportFailedHuman(t *testing.T) {
+	srv, _, st := newRunCLIServer(t)
+	vmID := createCLIRunningVM(t, srv.URL)
+
+	code1, out1, _ := runCLI(t, "--api", srv.URL, "--json", "run", "submit",
+		"--vm", vmID, "--goal", "failed report human", "--criteria", "operator_verdict",
+		"--on-completion", "keep_running")
+	if code1 != exitOK {
+		t.Fatalf("submit exit %d: %s", code1, out1)
+	}
+	var sr map[string]any
+	_ = json.Unmarshal([]byte(out1), &sr)
+	runID, _ := sr["run"].(map[string]any)["run_id"].(string)
+
+	// Conclude → terminal phase.
+	b, _ := json.Marshal(map[string]any{"verdict": "failed"})
+	req, _ := http.NewRequestWithContext(t.Context(), http.MethodPost,
+		srv.URL+"/api/v1/runs/"+runID+"/conclude", strings.NewReader(string(b)))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("conclude: %v", err)
+	}
+	resp.Body.Close()
+
+	// Insert a report operation and immediately mark it failed. This simulates
+	// a generator that tried and failed. The API returns status=failed when the
+	// latest report op is in state "failed" and no stored report exists.
+	opID, err := st.InsertReportOperation(t.Context(), "local_operator", vmID, runID)
+	if err != nil {
+		t.Fatalf("InsertReportOperation: %v", err)
+	}
+	cause := "generation_error"
+	msg := "simulated failure"
+	if _, err := st.UpdateOperation(t.Context(), store.OperationUpdate{
+		OperationID:  opID,
+		Phase:        "failed",
+		State:        "failed",
+		ErrorCause:   &cause,
+		ErrorMessage: &msg,
+	}); err != nil {
+		t.Fatalf("UpdateOperation: %v", err)
+	}
+
+	// Poll until the report endpoint reflects failed status (the op write is
+	// synchronous so this should be immediate).
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	for {
+		resp2, _ := http.Get(srv.URL + "/api/v1/runs/" + runID + "/report")
+		raw, _ := io.ReadAll(resp2.Body)
+		resp2.Body.Close()
+		var rpt map[string]any
+		_ = json.Unmarshal(raw, &rpt)
+		if rpt["status"] == "failed" {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("timeout waiting for failed report (last body: %s)", raw)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+
+	code, stdout, stderr := runCLI(t, "--api", srv.URL, "run", "report", runID)
+	if code != exitOK {
+		t.Fatalf("exit %d, stderr: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "failed") {
+		t.Errorf("human failed-report missing 'failed':\n%s", stdout)
+	}
+	// The renderer prints op: <operation_id> when operation_id is present.
+	if !strings.Contains(stdout, "op:") {
+		t.Errorf("human failed-report missing operation_id:\n%s", stdout)
 	}
 }
 
@@ -698,5 +939,33 @@ func TestVMCreateRunFlagsAllOrNone_MissingOnCompletion(t *testing.T) {
 		"partial-run-vm")
 	if code != exitUsage {
 		t.Errorf("exit %d, want %d (missing --run-on-completion)", code, exitUsage)
+	}
+}
+
+// F1: --run-progress-events alone (without the trio) must exit 3 — the flag
+// engages the run-flag group, which requires the trio to be complete.
+func TestVMCreateRunProgressEventsAloneExitsThree(t *testing.T) {
+	srv := newVMServer(t)
+	code, _, stderr := runCLI(t, "--api", srv.URL, "vm", "create",
+		"--template", cliTestTemplate.TemplateID,
+		"--run-progress-events",
+		"progress-only-vm")
+	if code != exitUsage {
+		t.Errorf("exit %d, want %d (progress-events alone; stderr: %s)", code, exitUsage, stderr)
+	}
+}
+
+// F1: the trio alone (without --run-progress-events) must still succeed — guard
+// against the formula over-rejecting the canonical valid case.
+func TestVMCreateTrioAloneIsValid(t *testing.T) {
+	srv := newVMServer(t)
+	code, stdout, stderr := runCLI(t, "--api", srv.URL, "--json", "vm", "create",
+		"--template", cliTestTemplate.TemplateID,
+		"--run-goal", "trio only goal",
+		"--run-criteria", "operator_verdict",
+		"--run-on-completion", "keep_running",
+		"trio-only-vm")
+	if code != exitOK {
+		t.Fatalf("exit %d, want 0 (trio alone must be valid); stderr: %s stdout: %s", code, stderr, stdout)
 	}
 }

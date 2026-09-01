@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net/url"
 )
 
@@ -342,7 +343,7 @@ func (c *client) runReport(args []string) int {
 
 // printRun renders a run object in human-readable multi-line form. Used by
 // submit, get, and conclude to present a consistent view.
-func printRun(w interface{ Write([]byte) (int, error) }, run map[string]any) {
+func printRun(w io.Writer, run map[string]any) {
 	field := func(k string) string {
 		v, _ := run[k].(string)
 		return v

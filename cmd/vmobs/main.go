@@ -53,7 +53,9 @@ commands:
   vm list [--state S] [--after N] [--limit N]
                             list VMs
   vm get VM-ID              full VM detail
-  vm create --template ID [--vcpu N] [--memory MiB] [--idempotency-key K] NAME
+  vm create --template ID [--vcpu N] [--memory MiB] [--idempotency-key K]
+            [--run-goal TEXT --run-criteria TYPE --run-on-completion POLICY [--run-progress-events]]
+            NAME
                             create a VM and start provisioning
   vm action VM-ID ACTION --revision N
                             lifecycle action (pause|resume|stop|force_stop)
