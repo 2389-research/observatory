@@ -6,6 +6,7 @@ package guest
 
 import (
 	"fmt"
+	"os"
 
 	"golang.org/x/sys/unix"
 )
@@ -17,6 +18,11 @@ func LoadBootConfig(device, mountpoint string) (*BootConfig, error) {
 	// Config device is host-minted but mounted defensively: no setuid bits,
 	// no device files, no executable pages.
 	const mountFlags = unix.MS_RDONLY | unix.MS_NOSUID | unix.MS_NODEV | unix.MS_NOEXEC
+	// Under systemd /run is a fresh tmpfs; nothing else creates the
+	// mountpoint, so make it here.
+	if err := os.MkdirAll(mountpoint, 0o700); err != nil {
+		return nil, fmt.Errorf("create mountpoint %s: %w", mountpoint, err)
+	}
 	if err := unix.Mount(device, mountpoint, "ext4", mountFlags, ""); err != nil {
 		return nil, fmt.Errorf("mount %s at %s: %w", device, mountpoint, err)
 	}

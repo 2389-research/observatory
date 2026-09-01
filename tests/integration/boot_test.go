@@ -185,7 +185,7 @@ func TestM0Boot(t *testing.T) {
 
 	// --- Assertion 3: Independent disk ownership ---
 
-	statHostFiles(t, vmA, vmB)
+	ownership := statHostFiles(t, vmA, vmB)
 
 	// --- Assertion 4: Independent teardown ---
 
@@ -207,7 +207,7 @@ func TestM0Boot(t *testing.T) {
 	// --- Step 4: Write evidence file (only when the gate actually runs) ---
 
 	hostname, _ := os.Hostname()
-	writeEvidenceFile(t, repoRoot, hostname, lk, vmA, vmB, ackA, ackB, ackCross, manifestA, manifestB)
+	writeEvidenceFile(t, repoRoot, hostname, lk, vmA, vmB, ackA, ackB, ackCross, manifestA, manifestB, ownership)
 }
 
 // ------------------------------------------------------------------
@@ -305,9 +305,19 @@ func sendPing(ctx context.Context, conn net.Conn) error {
 
 // statHostFiles checks disk and socket ownership, isolation, and write permissions from the host.
 // Sockets (api.sock, v.sock) must already exist — call this after the vsock readiness wait.
-func statHostFiles(t *testing.T, vmA, vmB *fixture.VM) {
+// Returns the formatted observations for the evidence file — the jail dirs are gone
+// by evidence-writing time, so the writer must not stat again.
+func statHostFiles(t *testing.T, vmA, vmB *fixture.VM) []string {
 	t.Helper()
 	const jailBase = "/srv/vmobs/jail"
+	var lines []string
+	record := func(p string, st *syscall.Stat_t, err error) {
+		if err != nil {
+			lines = append(lines, fmt.Sprintf("%s: stat error: %v", p, err))
+			return
+		}
+		lines = append(lines, fmt.Sprintf("%s: uid=%d mode=%04o inode=%d", p, st.Uid, st.Mode&0777, st.Ino))
+	}
 
 	pathA := filepath.Join(jailBase, "firecracker", vmA.ID, "root", "rootfs.ext4")
 	pathB := filepath.Join(jailBase, "firecracker", vmB.ID, "root", "rootfs.ext4")
@@ -315,12 +325,16 @@ func statHostFiles(t *testing.T, vmA, vmB *fixture.VM) {
 	var statA, statB syscall.Stat_t
 	statAOK := true
 	statBOK := true
-	if err := syscall.Stat(pathA, &statA); err != nil {
-		t.Errorf("stat %s: %v", pathA, err)
+	errA := syscall.Stat(pathA, &statA)
+	record(pathA, &statA, errA)
+	if errA != nil {
+		t.Errorf("stat %s: %v", pathA, errA)
 		statAOK = false
 	}
-	if err := syscall.Stat(pathB, &statB); err != nil {
-		t.Errorf("stat %s: %v", pathB, err)
+	errB := syscall.Stat(pathB, &statB)
+	record(pathB, &statB, errB)
+	if errB != nil {
+		t.Errorf("stat %s: %v", pathB, errB)
 		statBOK = false
 	}
 
@@ -360,7 +374,9 @@ func statHostFiles(t *testing.T, vmA, vmB *fixture.VM) {
 		for _, sockName := range []string{"api.sock", "v.sock"} {
 			sockPath := filepath.Join(root, sockName)
 			var st syscall.Stat_t
-			if err := syscall.Stat(sockPath, &st); err != nil {
+			err := syscall.Stat(sockPath, &st)
+			record(sockPath, &st, err)
+			if err != nil {
 				t.Errorf("stat %s: %v", sockPath, err)
 				continue
 			}
@@ -369,6 +385,7 @@ func statHostFiles(t *testing.T, vmA, vmB *fixture.VM) {
 			}
 		}
 	}
+	return lines
 }
 
 // checkNoLeaks asserts that none of the test VM ids remain in the jail or netns
@@ -417,6 +434,7 @@ func writeEvidenceFile(
 	vmA, vmB *fixture.VM,
 	ackA, ackB, ackCross proto.HelloAck,
 	manifestA, manifestB proto.CapabilityManifest,
+	ownership []string,
 ) {
 	t.Helper()
 
@@ -473,23 +491,14 @@ func writeEvidenceFile(
 	}
 	fmt.Fprintln(w)
 
-	fmt.Fprintln(w, "## Disk and socket ownership (host stat)")
-	const jailBase = "/srv/vmobs/jail"
-	for _, vm := range []*fixture.VM{vmA, vmB} {
-		root := filepath.Join(jailBase, "firecracker", vm.ID, "root")
-		for _, name := range []string{"rootfs.ext4", "api.sock", "v.sock"} {
-			p := filepath.Join(root, name)
-			var st syscall.Stat_t
-			if err := syscall.Stat(p, &st); err == nil {
-				fmt.Fprintf(w, "  %s: uid=%d mode=%04o inode=%d\n", p, st.Uid, st.Mode&0777, st.Ino)
-			} else {
-				fmt.Fprintf(w, "  %s: stat error: %v\n", p, err)
-			}
-		}
+	fmt.Fprintln(w, "## Disk and socket ownership (host stat, captured while VMs were live)")
+	for _, l := range ownership {
+		fmt.Fprintf(w, "  %s\n", l)
 	}
 	fmt.Fprintln(w)
 
 	fmt.Fprintln(w, "## Teardown proof")
+	const jailBase = "/srv/vmobs/jail"
 	// Build expected jail and netns names from the actual ids to stay in sync with the helper.
 	expectedJail := map[string]bool{vmA.ID: true, vmB.ID: true}
 	expectedNS := map[string]bool{network.NamespaceName(vmA.ID): true, network.NamespaceName(vmB.ID): true}

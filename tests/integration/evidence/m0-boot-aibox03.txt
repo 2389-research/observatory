@@ -1,0 +1,57 @@
+# M0 boot gate evidence
+# hostname: aibox03
+# date: 2026-09-01T19:14:17Z
+
+## Lock artifact verification
+vmlinux_sha256:  b606768652b4ecf5d8a2651d258e70d8f1892fca9f74c6b5fc2c9031a50ddd31
+rootfs_sha256:   54426c1c4993b33c5b5e5724d803bbb31aff9a171302fb6d80971cdca40f4660
+verified: true (VerifyArtifacts returned no mismatches)
+
+## Firecracker version
+  Firecracker v1.16.1
+  
+  2026-09-01T19:14:17.742003589 [anonymous-instance:main] Firecracker exiting successfully. exit_code=0
+
+## Per-VM identity
+  vm_id=m0-a    uid=20000  gid=36000  cid=3  netns=vmobs-m0-a
+  vm_id=m0-b    uid=20001  gid=36000  cid=4  netns=vmobs-m0-b
+
+## Handshake transcript (message kinds only; tokens omitted)
+  vmA: hello → hello_ack (accepted=true reason="")
+  vmB: hello → hello_ack (accepted=true reason="")
+  cross-auth: vmA token on vmB socket → hello_ack (accepted=false reason="authentication failed")
+
+## Capability manifests
+  ### vmA  kernel=6.1.186
+    btf          present=true  evidence="/sys/kernel/btf/vmlinux"
+    bpf_syscall  present=true  evidence="syscall reachable"
+    fanotify     present=true  evidence="fanotify_init ok"
+    fanotify_report_fid present=true  evidence="fanotify_init(FAN_REPORT_FID) ok"
+    cgroup_v2    present=true  evidence="/sys/fs/cgroup/cgroup.controllers"
+    devpts       present=true  evidence="/proc/filesystems:devpts"
+    ext4         present=true  evidence="/proc/filesystems:ext4"
+    vsock        present=true  evidence="/dev/vsock"
+    virtio_net   present=true  evidence="/sys/bus/virtio/drivers/virtio_net"
+    virtio_blk   present=true  evidence="/sys/bus/virtio/drivers/virtio_blk"
+  ### vmB  kernel=6.1.186
+    btf          present=true  evidence="/sys/kernel/btf/vmlinux"
+    bpf_syscall  present=true  evidence="syscall reachable"
+    fanotify     present=true  evidence="fanotify_init ok"
+    fanotify_report_fid present=true  evidence="fanotify_init(FAN_REPORT_FID) ok"
+    cgroup_v2    present=true  evidence="/sys/fs/cgroup/cgroup.controllers"
+    devpts       present=true  evidence="/proc/filesystems:devpts"
+    ext4         present=true  evidence="/proc/filesystems:ext4"
+    vsock        present=true  evidence="/dev/vsock"
+    virtio_net   present=true  evidence="/sys/bus/virtio/drivers/virtio_net"
+    virtio_blk   present=true  evidence="/sys/bus/virtio/drivers/virtio_blk"
+
+## Disk and socket ownership (host stat, captured while VMs were live)
+  /srv/vmobs/jail/firecracker/m0-a/root/rootfs.ext4: uid=20000 mode=0644 inode=4587535
+  /srv/vmobs/jail/firecracker/m0-b/root/rootfs.ext4: uid=20001 mode=0644 inode=4587558
+  /srv/vmobs/jail/firecracker/m0-a/root/api.sock: uid=20000 mode=0775 inode=4587547
+  /srv/vmobs/jail/firecracker/m0-a/root/v.sock: uid=20000 mode=0775 inode=4587548
+  /srv/vmobs/jail/firecracker/m0-b/root/api.sock: uid=20001 mode=0775 inode=4587570
+  /srv/vmobs/jail/firecracker/m0-b/root/v.sock: uid=20001 mode=0775 inode=4587571
+
+## Teardown proof
+  no test VM entries remain in jail or netns (clean teardown)

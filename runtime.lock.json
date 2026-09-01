@@ -23,7 +23,7 @@
     "vmlinux_path": "images/dist/vmlinux"
   },
   "root_image": {
-    "sha256": "d8f8e20363219ecaa87b9554f9adcd07cb79db24f67b97771d4ad8039c4969fd",
+    "sha256": "54426c1c4993b33c5b5e5724d803bbb31aff9a171302fb6d80971cdca40f4660",
     "path": "images/dist/rootfs.ext4",
     "base_image_ref": "ubuntu@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517",
     "apt_snapshot": "20260820T000000Z",

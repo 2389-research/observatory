@@ -65,10 +65,18 @@ INVENTORY_OUT="$DIST_DIR/rootfs.inventory.txt"
 # Clean up any leftover container from a previous failed run
 docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
 
+# Remove the previous inventory so the post-run emptiness check cannot pass
+# on a stale file if the container script dies early.
+rm -f "$INVENTORY_OUT"
+
 echo "[rootfs/build.sh] starting rootfs container: $CONTAINER_NAME"
 
 # Run without --rm so we can docker export after completion.
 # Mount $DIST_DIR so the container can write the inventory directly.
+# QUOTING: the container script below is ONE host-side double-quoted string.
+# ${VARS} expand on the host even inside inner single quotes. A raw " inside
+# the script terminates the string and silently truncates the script — use
+# single quotes or \" only.
 docker run --name "$CONTAINER_NAME" \
     -v "$SCRIPT_DIR/guestd.service":/build/guestd.service:ro \
     -v "$GUESTD_BIN":/build/vmobs-guestd:ro \
@@ -81,7 +89,7 @@ echo '[rootfs] installing ca-certificates (live apt — needed for snapshot TLS)
 apt-get update -qq
 apt-get install -y --no-install-recommends ca-certificates 2>&1 | tail -3
 
-echo "[rootfs] updating package index from snapshot ${APT_SNAPSHOT} ..."
+echo '[rootfs] updating package index from snapshot ${APT_SNAPSHOT} ...'
 apt-get -S ${APT_SNAPSHOT} update -qq
 
 echo '[rootfs] installing packages from snapshot...'
@@ -129,6 +137,16 @@ if [ ! -s "$INVENTORY_OUT" ]; then
     exit 1
 fi
 echo "[rootfs/build.sh] inventory: $(wc -l < "$INVENTORY_OUT") lines → $INVENTORY_OUT"
+
+# The image's whole purpose is shipping guestd; refuse to mkfs without it.
+if [ ! -x "$UNPACK_DIR/usr/local/bin/vmobs-guestd" ]; then
+    echo "[rootfs/build.sh] ERROR: vmobs-guestd missing from unpacked tree — container script did not complete" >&2
+    exit 1
+fi
+if [ ! -f "$UNPACK_DIR/etc/systemd/system/guestd.service" ]; then
+    echo "[rootfs/build.sh] ERROR: guestd.service missing from unpacked tree" >&2
+    exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # Build ext4 image — exactly 1G; fail loudly if tree doesn't fit

@@ -47,26 +47,32 @@ AT-003: SPECIFIED.
   is M1/M2 work; no launch path exists yet. The guest_channel doctor check is permanently
   not_implemented in M0 (TestGuestChannelAlwaysNotImplemented).
 
-AT-004: SPECIFIED (fixture implemented; gate run deferred pending scripts/aibox03/setup.sh).
-  Fixture: tests/integration/boot_test.go:TestM0Boot — four assertions: vsock handshake + identity
-  isolation, capability report (btf/fanotify/vsock/virtio_blk/virtio_net/cgroup_v2/ext4 Present),
-  independent disk ownership (per-VM uid stats, inodes distinct, socket uid), teardown (no leaks).
-  Evidence file: tests/integration/evidence/m0-boot-<hostname>.txt (does not exist yet).
-  Gate deferred: scripts/aibox03/setup.sh not yet run on aibox03 (password sudo — Doctor Biz handoff).
-  Gate command when ready: scripts/linux 'VMOBS_FIXTURE=1 go test ./tests/integration/ -v -timeout 600s'
-  Status flips to TESTED_PASS after the gate runs and evidence is committed.
+AT-004: TESTED_PASS (2026-09-01, aibox03 bare-metal, Ubuntu 24.04 kernel 6.8, Firecracker v1.16.1).
+  Gate: scripts/linux 'VMOBS_FIXTURE=1 go test ./tests/integration/ -v -timeout 600s' —
+  TestM0Boot PASS (7.55s). Four assertions executed: vsock handshake + identity isolation
+  (cross-auth token rejected), capability report (btf/fanotify/vsock/virtio_blk/virtio_net/
+  cgroup_v2/ext4 Present on both VMs, kernel 6.1.186), independent disk ownership (uids
+  20000/20001, distinct inodes, sockets owned by each VM's uid — captured while VMs were live),
+  teardown (no jail or netns leaks).
+  Evidence: tests/integration/evidence/m0-boot-aibox03.txt (lock digests inside; rootfs sha256
+  54426c1c…, vmlinux b6067686…).
+  Defects found and fixed by running the gate (branch m0-gate-fixes; PLAN.md L0-R13/L0-R14):
+  jailer chroot-root traverse chmod race; vsock wait masking the real dial error; guestd config
+  mountpoint never created (ENOENT — /run is a fresh tmpfs under systemd); rootfs build quoting
+  regression (be420fd) that produced a guestd-less image and exposed two silent-failure holes
+  in build verification.
 
-AT-009: SPECIFIED (fixture seeds partial evidence; execution deferred with the gate).
+AT-009: SPECIFIED (seed evidence executed 2026-09-01 with the M0 gate; full row is M1 scope).
   TestM0Boot boots two simultaneous VMs with distinct VM IDs, UIDs (20000/20001), CIDs (3/4),
   and network namespaces — identity isolation is asserted at the vsock level. Full four-VM
   simultaneous launch is M1 scope.
 
-AT-011: SPECIFIED (fixture seeds partial evidence; execution deferred with the gate).
+AT-011: SPECIFIED (seed evidence executed 2026-09-01 with the M0 gate; full row is M1 scope).
   TestM0Boot assertion 4 (teardown): stops VM A while VM B still runs, asserts B still answers ping,
   then stops both and asserts no m0-* entries remain in the jail dir or netns. The independent
   teardown seed is the first evidence for this row; broader multi-VM stop/delete testing is M1.
 
-AT-018: SPECIFIED (fixture seeds partial evidence; execution deferred with the gate).
+AT-018: SPECIFIED (seed evidence executed 2026-09-01 with the M0 gate; full row is M1 scope).
   TestM0Boot teardown asserts netns and jail dirs contain no m0-* entries after both VMs stop —
   the seed assertion for leak detection. Repeat create/stop/delete cycles with baseline comparison
   is M1 scope.
