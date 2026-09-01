@@ -201,6 +201,54 @@ func missingVMError(t *testing.T, srvURL, secret string) (code, cause string) {
 	return e.Code, e.Cause
 }
 
+// missingOperationError returns the code+cause for a nonexistent operation, to compare with cross-owner denial.
+func missingOperationError(t *testing.T, srvURL, secret string) (code, cause string) {
+	t.Helper()
+	resp := doBearer(t, http.MethodGet, srvURL+"/api/v1/operations/op-999999", secret, nil, "")
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("nonexistent operation: want 404, got %d\n%s", resp.StatusCode, raw)
+	}
+	var e api.Error
+	if err := json.Unmarshal(raw, &e); err != nil {
+		t.Fatalf("decode: %v\n%s", err, raw)
+	}
+	return e.Code, e.Cause
+}
+
+// missingBatchError returns the code+cause for a nonexistent batch, to compare with cross-owner denial.
+func missingBatchError(t *testing.T, srvURL, secret string) (code, cause string) {
+	t.Helper()
+	resp := doBearer(t, http.MethodGet, srvURL+"/api/v1/vm-batches/batch-999999", secret, nil, "")
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("nonexistent batch: want 404, got %d\n%s", resp.StatusCode, raw)
+	}
+	var e api.Error
+	if err := json.Unmarshal(raw, &e); err != nil {
+		t.Fatalf("decode: %v\n%s", err, raw)
+	}
+	return e.Code, e.Cause
+}
+
+// missingRunError returns the code+cause for a nonexistent run, to compare with cross-owner denial.
+func missingRunError(t *testing.T, srvURL, secret string) (code, cause string) {
+	t.Helper()
+	resp := doBearer(t, http.MethodGet, srvURL+"/api/v1/runs/"+uuid.NewString(), secret, nil, "")
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("nonexistent run: want 404, got %d\n%s", resp.StatusCode, raw)
+	}
+	var e api.Error
+	if err := json.Unmarshal(raw, &e); err != nil {
+		t.Fatalf("decode: %v\n%s", err, raw)
+	}
+	return e.Code, e.Cause
+}
+
 // TestCrossOwnerDenied verifies AT-079: cross-owner access is denied without side effects,
 // indistinguishable from a missing resource.
 //
@@ -216,8 +264,11 @@ func TestCrossOwnerDenied(t *testing.T) {
 	foreignBatchID := seedForeignBatch(t, ctx, st)
 	foreignOpWireID := fmt.Sprintf("op-%06d", foreignOpID)
 
-	// Capture the reference 404 body (missing resource) for comparison.
-	wantCode, wantCause := missingVMError(t, srvURL, secret)
+	// Capture the reference 404 bodies (missing resource) for each resource type.
+	wantVMCode, wantVMCause := missingVMError(t, srvURL, secret)
+	wantOpCode, wantOpCause := missingOperationError(t, srvURL, secret)
+	wantBatchCode, wantBatchCause := missingBatchError(t, srvURL, secret)
+	wantRunCode, wantRunCause := missingRunError(t, srvURL, secret)
 
 	// --- AT-079 (1): GET /vms/{foreignID} → 404 identical to GET /vms/nonexistent ---
 	t.Run("GET_foreign_VM", func(t *testing.T) {
@@ -231,8 +282,8 @@ func TestCrossOwnerDenied(t *testing.T) {
 		if err := json.Unmarshal(raw, &e); err != nil {
 			t.Fatalf("decode: %v\n%s", err, raw)
 		}
-		if e.Code != wantCode || e.Cause != wantCause {
-			t.Errorf("code/cause = %q/%q, want %q/%q (must be identical to missing resource)", e.Code, e.Cause, wantCode, wantCause)
+		if e.Code != wantVMCode || e.Cause != wantVMCause {
+			t.Errorf("code/cause = %q/%q, want %q/%q (must be identical to missing resource)", e.Code, e.Cause, wantVMCode, wantVMCause)
 		}
 	})
 
@@ -245,6 +296,10 @@ func TestCrossOwnerDenied(t *testing.T) {
 		opsBefore, err := st.ListOperationsByState(ctx, "running")
 		if err != nil {
 			t.Fatalf("list ops before: %v", err)
+		}
+		evsBefore, err := st.Query(ctx, store.Query{Limit: 1})
+		if err != nil {
+			t.Fatalf("query events before: %v", err)
 		}
 
 		actionBody := fmt.Sprintf(`{"action":"stop","expected_revision":"%d"}`, vmBefore.Revision)
@@ -273,6 +328,15 @@ func TestCrossOwnerDenied(t *testing.T) {
 		if len(opsAfter) != len(opsBefore) {
 			t.Errorf("operations created despite denial: before=%d after=%d", len(opsBefore), len(opsAfter))
 		}
+		// Event stream must be unchanged (no events emitted).
+		evsAfter, err := st.Query(ctx, store.Query{Limit: 1})
+		if err != nil {
+			t.Fatalf("query events after: %v", err)
+		}
+		if evsAfter.LatestEventID != evsBefore.LatestEventID {
+			t.Errorf("event stream advanced despite denial: latest before=%q after=%q",
+				evsBefore.LatestEventID, evsAfter.LatestEventID)
+		}
 	})
 
 	// --- AT-079 (3): DELETE /vms/{foreignID} → 404; VM still present ---
@@ -296,6 +360,13 @@ func TestCrossOwnerDenied(t *testing.T) {
 		if resp.StatusCode != http.StatusNotFound {
 			t.Fatalf("get op: want 404, got %d\n%s", resp.StatusCode, raw)
 		}
+		var e api.Error
+		if err := json.Unmarshal(raw, &e); err != nil {
+			t.Fatalf("decode: %v\n%s", err, raw)
+		}
+		if e.Code != wantOpCode || e.Cause != wantOpCause {
+			t.Errorf("code/cause = %q/%q, want %q/%q (must be identical to missing operation)", e.Code, e.Cause, wantOpCode, wantOpCause)
+		}
 	})
 
 	t.Run("GET_foreign_batch", func(t *testing.T) {
@@ -304,6 +375,13 @@ func TestCrossOwnerDenied(t *testing.T) {
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusNotFound {
 			t.Fatalf("get batch: want 404, got %d\n%s", resp.StatusCode, raw)
+		}
+		var e api.Error
+		if err := json.Unmarshal(raw, &e); err != nil {
+			t.Fatalf("decode: %v\n%s", err, raw)
+		}
+		if e.Code != wantBatchCode || e.Cause != wantBatchCause {
+			t.Errorf("code/cause = %q/%q, want %q/%q (must be identical to missing batch)", e.Code, e.Cause, wantBatchCode, wantBatchCause)
 		}
 	})
 
@@ -315,6 +393,13 @@ func TestCrossOwnerDenied(t *testing.T) {
 		if resp.StatusCode != http.StatusNotFound {
 			t.Fatalf("get run: want 404, got %d\n%s", resp.StatusCode, raw)
 		}
+		var e api.Error
+		if err := json.Unmarshal(raw, &e); err != nil {
+			t.Fatalf("decode: %v\n%s", err, raw)
+		}
+		if e.Code != wantRunCode || e.Cause != wantRunCause {
+			t.Errorf("code/cause = %q/%q, want %q/%q (must be identical to missing run)", e.Code, e.Cause, wantRunCode, wantRunCause)
+		}
 	})
 
 	t.Run("GET_foreign_run_report", func(t *testing.T) {
@@ -323,6 +408,13 @@ func TestCrossOwnerDenied(t *testing.T) {
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusNotFound {
 			t.Fatalf("get run report: want 404, got %d\n%s", resp.StatusCode, raw)
+		}
+		var e api.Error
+		if err := json.Unmarshal(raw, &e); err != nil {
+			t.Fatalf("decode: %v\n%s", err, raw)
+		}
+		if e.Code != wantRunCode || e.Cause != wantRunCause {
+			t.Errorf("code/cause = %q/%q, want %q/%q (must be identical to missing run)", e.Code, e.Cause, wantRunCode, wantRunCause)
 		}
 	})
 
@@ -338,6 +430,13 @@ func TestCrossOwnerDenied(t *testing.T) {
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusNotFound {
 			t.Fatalf("conclude: want 404, got %d\n%s", resp.StatusCode, raw)
+		}
+		var e api.Error
+		if err := json.Unmarshal(raw, &e); err != nil {
+			t.Fatalf("decode: %v\n%s", err, raw)
+		}
+		if e.Code != wantRunCode || e.Cause != wantRunCause {
+			t.Errorf("code/cause = %q/%q, want %q/%q (must be identical to missing run)", e.Code, e.Cause, wantRunCode, wantRunCause)
 		}
 		// Run phase must be unchanged (no side effects).
 		runAfter, err := st.GetRun(ctx, foreignRunID)
