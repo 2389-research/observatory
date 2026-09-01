@@ -494,6 +494,247 @@ func TestGapEnvelopeIngress(t *testing.T) {
 	}
 }
 
+// corruptSegment flips a byte inside the first record body of segPath,
+// turning the record into an interior corrupt record (CRC mismatch).
+// The segment must have at least one written record.
+func corruptSegment(t *testing.T, segPath string) {
+	t.Helper()
+	raw, err := os.ReadFile(segPath)
+	if err != nil {
+		t.Fatalf("corruptSegment ReadFile %s: %v", segPath, err)
+	}
+	// Find header end (first '\n').
+	headerEnd := -1
+	for i, b := range raw {
+		if b == '\n' {
+			headerEnd = i
+			break
+		}
+	}
+	if headerEnd < 0 {
+		t.Fatalf("corruptSegment: no newline in %s", segPath)
+	}
+	// Flip a byte at offset 8 past header end (inside record body, past len+crc).
+	flipAt := headerEnd + 1 + 8
+	if flipAt >= len(raw) {
+		t.Fatalf("corruptSegment: segment too short to flip: len=%d flipAt=%d", len(raw), flipAt)
+	}
+	raw[flipAt] ^= 0xFF
+	if err := os.WriteFile(segPath, raw, 0o600); err != nil {
+		t.Fatalf("corruptSegment WriteFile %s: %v", segPath, err)
+	}
+}
+
+// TestTwoCorruptSegmentsTwoGaps — two corrupt segments produce two Gaps with
+// distinct (source_instance_id, source_seq); second ImportOnce dedups both.
+func TestTwoCorruptSegmentsTwoGaps(t *testing.T) {
+	st := openTestStore(t)
+	root := t.TempDir()
+
+	vmID := "88888888-8888-8888-8888-888888888888"
+	spoolDir := filepath.Join(root, vmID)
+	if err := os.MkdirAll(spoolDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	instanceID := "aaaaaaaa-aaaa-4444-bbbb-aaaaaaaaaaaa"
+
+	// Write two separate segments. Use large MaxSegmentBytes so no rotation
+	// occurs inside a single writer session — each Open/Close pair produces
+	// exactly one segment file with one record.
+	w0, err := spool.OpenWriter(spoolDir, spool.WriterCfg{
+		VMID: vmID, InstanceID: instanceID,
+		MaxSegmentBytes: 4 * 1024 * 1024, MaxSpoolBytes: 64 * 1024 * 1024,
+	})
+	if err != nil {
+		t.Fatalf("OpenWriter seg0: %v", err)
+	}
+	if err := w0.Append(makeSpoolEnvelope(vmID, instanceID, "100")); err != nil {
+		t.Fatalf("Append seg0: %v", err)
+	}
+	if err := w0.Close(); err != nil {
+		t.Fatalf("Close seg0: %v", err)
+	}
+
+	// seg0 now has header + 1 record + end-marker.
+	segsAfterFirst, _ := filepath.Glob(filepath.Join(spoolDir, "seg-*.vmsp"))
+	if len(segsAfterFirst) != 1 {
+		t.Fatalf("expected 1 segment after first write, got %d: %v", len(segsAfterFirst), segsAfterFirst)
+	}
+	seg0Path := segsAfterFirst[0]
+	corruptSegment(t, seg0Path)
+
+	// Open a second writer — nextSegmentIndex advances to idx 1.
+	w1, err := spool.OpenWriter(spoolDir, spool.WriterCfg{
+		VMID: vmID, InstanceID: instanceID,
+		MaxSegmentBytes: 4 * 1024 * 1024, MaxSpoolBytes: 64 * 1024 * 1024,
+	})
+	if err != nil {
+		t.Fatalf("OpenWriter seg1: %v", err)
+	}
+	if err := w1.Append(makeSpoolEnvelope(vmID, instanceID, "200")); err != nil {
+		t.Fatalf("Append seg1: %v", err)
+	}
+	if err := w1.Close(); err != nil {
+		t.Fatalf("Close seg1: %v", err)
+	}
+
+	// Find seg1 (the new one).
+	allSegs, _ := filepath.Glob(filepath.Join(spoolDir, "seg-*.vmsp"))
+	if len(allSegs) != 2 {
+		t.Fatalf("expected 2 segments, got %d: %v", len(allSegs), allSegs)
+	}
+	var seg1Path string
+	for _, s := range allSegs {
+		if s != seg0Path {
+			seg1Path = s
+			break
+		}
+	}
+	if seg1Path == "" {
+		t.Fatal("could not identify seg1")
+	}
+	corruptSegment(t, seg1Path)
+
+	// Verify Recover returns two Gaps.
+	report, err := spool.Recover(spoolDir)
+	if err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	if len(report.Gaps) != 2 {
+		t.Fatalf("Recover: want 2 Gaps, got %d", len(report.Gaps))
+	}
+
+	// The two Gaps must have distinct (source_instance_id, source_seq) pairs.
+	key0 := report.Gaps[0].SourceInstanceID + "/" + report.Gaps[0].SourceSeq
+	key1 := report.Gaps[1].SourceInstanceID + "/" + report.Gaps[1].SourceSeq
+	if key0 == key1 {
+		t.Errorf("gaps have same dedup key %q — identity collapses", key0)
+	}
+
+	// Both gaps must have non-empty UUIDs in SourceInstanceID.
+	for i, g := range report.Gaps {
+		if len(g.SourceInstanceID) != 36 {
+			t.Errorf("gap[%d].SourceInstanceID not UUID-shaped: %q", i, g.SourceInstanceID)
+		}
+		if g.SourceSeq == "" {
+			t.Errorf("gap[%d].SourceSeq is empty", i)
+		}
+	}
+
+	// First ImportOnce: both gap records land.
+	imp := spool.NewImporter(st, root, time.Second)
+	stats1, err := imp.ImportOnce(context.Background())
+	if err != nil {
+		t.Fatalf("ImportOnce (first): %v", err)
+	}
+
+	// Count gap records in store.
+	ctx := context.Background()
+	res, err := st.Query(ctx, store.Query{Limit: 100})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	var gapEnvs []*events.Envelope
+	for _, ev := range res.Events {
+		if ev.Kind == "spool.recovery_gap" {
+			gapEnvs = append(gapEnvs, ev)
+		}
+	}
+	if len(gapEnvs) != 2 {
+		t.Fatalf("store: want 2 gap records, got %d (Appended=%d, Deduped=%d)",
+			len(gapEnvs), stats1.Appended, stats1.Deduped)
+	}
+
+	// The two store-side gaps must also have distinct (source_instance_id, source_seq).
+	storeKey0 := gapEnvs[0].SourceInstanceID + "/" + gapEnvs[0].SourceSeq
+	storeKey1 := gapEnvs[1].SourceInstanceID + "/" + gapEnvs[1].SourceSeq
+	if storeKey0 == storeKey1 {
+		t.Errorf("store gap records share dedup key %q", storeKey0)
+	}
+
+	// Second ImportOnce: both must dedup, no new appended.
+	stats2, err := imp.ImportOnce(context.Background())
+	if err != nil {
+		t.Fatalf("ImportOnce (second): %v", err)
+	}
+	if stats2.Appended != 0 {
+		t.Errorf("second import: want 0 Appended, got %d", stats2.Appended)
+	}
+	// At least the two gaps must be deduped.
+	if stats2.Deduped < 2 {
+		t.Errorf("second import: want >=2 Deduped (the two gaps), got %d", stats2.Deduped)
+	}
+}
+
+// TestCorruptSegmentWithEndMarkerNotPruned — a corrupt interior segment that
+// carries a clean end marker must NOT be pruned by ImportOnce when the cursor
+// is past it. Evidence must survive on disk.
+func TestCorruptSegmentWithEndMarkerNotPruned(t *testing.T) {
+	st := openTestStore(t)
+	root := t.TempDir()
+
+	vmID := "99999999-9999-9999-9999-999999999999"
+	spoolDir := filepath.Join(root, vmID)
+	if err := os.MkdirAll(spoolDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	instanceID := "cccccccc-dddd-4444-eeee-cccccccccccc"
+
+	// Write segment 0 with one valid record and a clean close (end marker).
+	// Large MaxSegmentBytes avoids rotation — one record lands in seg0.
+	w0, err := spool.OpenWriter(spoolDir, spool.WriterCfg{
+		VMID: vmID, InstanceID: instanceID,
+		MaxSegmentBytes: 4 * 1024 * 1024, MaxSpoolBytes: 64 * 1024 * 1024,
+	})
+	if err != nil {
+		t.Fatalf("OpenWriter seg0: %v", err)
+	}
+	if err := w0.Append(makeSpoolEnvelope(vmID, instanceID, "0")); err != nil {
+		t.Fatalf("Append seg0: %v", err)
+	}
+	if err := w0.Close(); err != nil {
+		t.Fatalf("Close seg0: %v", err)
+	}
+
+	// Locate and corrupt seg0 AFTER close (so the end marker is in place).
+	segs0, _ := filepath.Glob(filepath.Join(spoolDir, "seg-*.vmsp"))
+	if len(segs0) != 1 {
+		t.Fatalf("expected 1 segment after close, got %d: %v", len(segs0), segs0)
+	}
+	seg0Path := segs0[0]
+	corruptSegment(t, seg0Path)
+
+	// Write segment 1 with one valid record and import it cleanly so the cursor
+	// advances past seg0.
+	w1, err := spool.OpenWriter(spoolDir, spool.WriterCfg{
+		VMID: vmID, InstanceID: instanceID,
+		MaxSegmentBytes: 4 * 1024 * 1024, MaxSpoolBytes: 64 * 1024 * 1024,
+	})
+	if err != nil {
+		t.Fatalf("OpenWriter seg1: %v", err)
+	}
+	if err := w1.Append(makeSpoolEnvelope(vmID, instanceID, "1")); err != nil {
+		t.Fatalf("Append seg1: %v", err)
+	}
+	if err := w1.Close(); err != nil {
+		t.Fatalf("Close seg1: %v", err)
+	}
+
+	// Run ImportOnce. The cursor should advance into/past seg1.
+	imp := spool.NewImporter(st, root, time.Second)
+	_, err = imp.ImportOnce(context.Background())
+	if err != nil {
+		t.Fatalf("ImportOnce: %v", err)
+	}
+
+	// seg0 must still exist — it is corrupt evidence, never pruned.
+	if _, err := os.Stat(seg0Path); os.IsNotExist(err) {
+		t.Error("corrupt segment with end marker was pruned — must survive as evidence")
+	}
+}
+
 // TestCursorIsWrittenAtomically — cursor.json must be a valid JSON file
 // after ImportOnce returns (tempfile+rename guarantees this).
 func TestCursorIsWrittenAtomically(t *testing.T) {

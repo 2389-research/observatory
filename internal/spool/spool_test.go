@@ -379,8 +379,8 @@ func TestRecoverEmptyDir(t *testing.T) {
 	if report.TruncatedTail {
 		t.Error("expected TruncatedTail=false on empty dir")
 	}
-	if report.GapEmitted != nil {
-		t.Error("expected GapEmitted=nil on empty dir")
+	if len(report.Gaps) != 0 {
+		t.Errorf("expected 0 Gaps on empty dir, got %d", len(report.Gaps))
 	}
 }
 

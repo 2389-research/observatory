@@ -4,6 +4,7 @@ package spool
 
 import (
 	"bufio"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -151,10 +152,12 @@ type RecoverReport struct {
 	// TruncatedTail is true when at least one segment had a truncated trailing record
 	// that was removed by truncation.
 	TruncatedTail bool
-	// GapEmitted is non-nil when records were skipped due to corruption. It is a
-	// synthetic envelope with kind "spool.recovery_gap" carrying gap metadata.
-	// Registration of this kind is Task 7's responsibility (per controller ruling).
-	GapEmitted *events.Envelope
+	// Gaps holds one synthetic envelope per corrupt segment, each with kind
+	// "spool.recovery_gap". Each envelope carries identity for its specific
+	// segment so distinct corruptions produce distinct (source_instance_id,
+	// source_seq) dedup keys and cannot collapse into a single store record.
+	// An empty slice means no corruption was detected.
+	Gaps []*events.Envelope
 }
 
 // Recover inspects all *.vmsp segment files in dir and repairs any truncated tails.
@@ -180,10 +183,7 @@ func Recover(dir string) (RecoverReport, error) {
 	var report RecoverReport
 	report.Segments = paths
 
-	var totalCorrupt int
-	var corruptPaths []string
-
-	for _, path := range paths {
+	for i, path := range paths {
 		truncated, corrupt, err := recoverSegment(path)
 		if err != nil {
 			return RecoverReport{}, fmt.Errorf("spool: recover segment %s: %w", path, err)
@@ -192,13 +192,13 @@ func Recover(dir string) (RecoverReport, error) {
 			report.TruncatedTail = true
 		}
 		if corrupt > 0 {
-			totalCorrupt += corrupt
-			corruptPaths = append(corruptPaths, filepath.Base(path))
+			// One gap envelope per corrupt segment: segment index i is the SourceSeq
+			// and vmDir+segname determines the SourceInstanceID. Two corruptions in
+			// the same dir always get different seqs (different i), so they land as
+			// distinct (source_instance_id, source_seq) pairs in the store — a second
+			// corruption cannot dedup away the first.
+			report.Gaps = append(report.Gaps, buildGapEnvelope(dir, path, i, corrupt))
 		}
-	}
-
-	if totalCorrupt > 0 {
-		report.GapEmitted = buildGapEnvelope(totalCorrupt, corruptPaths)
 	}
 
 	return report, nil
@@ -331,25 +331,66 @@ func recoverSegment(path string) (truncated bool, corruptCount int, err error) {
 	return false, corruptCount, nil
 }
 
-// buildGapEnvelope constructs a synthetic recovery gap envelope.
-// Kind is "spool.recovery_gap" (registration is Task 7's job per controller ruling).
-func buildGapEnvelope(corruptCount int, paths []string) *events.Envelope {
+// buildGapEnvelope constructs a synthetic recovery gap envelope for one corrupt segment.
+// vmDir is the spool directory; segPath is the absolute path to the affected segment;
+// segIdx is the segment's position in the sorted segment list (used as SourceSeq so
+// two distinct corruptions in the same dir cannot share a dedup key); corruptCount is
+// the count of corrupt records found (informational only — §12.5 caveat applies: no
+// lost-record count is claimed because the exact span is unknown).
+//
+// HostReceivedAt is derived from the segment file's mtime so the envelope payload is
+// stable across repeated Recover calls on the same corrupt file. Without a stable
+// timestamp the payload hash would change on each call, turning every re-import into
+// an ErrIntegrityFailure instead of a dedup.
+func buildGapEnvelope(vmDir, segPath string, segIdx, corruptCount int) *events.Envelope {
+	// Use the segment's mtime as the observation time — it is set when the file
+	// is written and does not change on subsequent reads, making the envelope
+	// payload deterministic across Recover calls.
+	var receivedAt time.Time
+	if info, err := os.Stat(segPath); err == nil {
+		receivedAt = info.ModTime().UTC()
+	} else {
+		receivedAt = time.Now().UTC()
+	}
+
 	return &events.Envelope{
 		SchemaVersion:    1,
-		SourceInstanceID: "spool.recovery",
-		SourceSeq:        "0",
-		Kind:             "spool.recovery_gap",
-		Provenance:       events.HostObserved,
-		Sensor:           "spool.recovery",
-		HostReceivedAt:   events.Timestamp{Time: time.Now().UTC()},
+		SourceInstanceID: gapSourceInstanceID(vmDir),
+		// SourceSeq is the segment's sorted index in the directory as a decimal
+		// string. Each corrupt segment gets a unique index, so two corruptions in
+		// the same dir produce distinct (source_instance_id, source_seq) dedup keys.
+		SourceSeq:      fmt.Sprintf("%d", segIdx),
+		Kind:           "spool.recovery_gap",
+		Provenance:     events.HostObserved,
+		Sensor:         "spool.recovery",
+		HostReceivedAt: events.Timestamp{Time: receivedAt},
 		Quality: events.Quality{
 			PathResolution: events.PathNotApplicable,
 			Attribution:    events.AttributionNotApplicable,
 			Notes:          []string{"synthetic gap record emitted by spool recovery"},
 		},
 		Data: map[string]any{
+			// The exact number of lost records and their time span are unknown
+			// (§12.5 caveat): only the affected segment is reported. Do not
+			// claim a precise lost-record count.
+			"affected_segment":     filepath.Base(segPath),
 			"corrupt_record_count": corruptCount,
-			"affected_segments":    paths,
 		},
 	}
+}
+
+// gapSourceInstanceID returns a stable UUID for gap envelopes from vmDir.
+// We hash the directory path to a UUID v4-shaped value so that the same
+// VM dir always produces the same SourceInstanceID across imports. Combined
+// with the per-segment SourceSeq (the segment's sorted index), each corrupt
+// segment gets a unique (source_instance_id, source_seq) dedup key.
+func gapSourceInstanceID(vmDir string) string {
+	h := sha256.Sum256([]byte("spool.recovery.gap:" + vmDir))
+	// Format as UUID v4 (variant bits set per RFC 4122).
+	// Byte 6: version nibble = 4; byte 8: variant bits = 10xx.
+	b := h[:16]
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }

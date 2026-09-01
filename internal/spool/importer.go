@@ -4,7 +4,6 @@ package spool
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -119,14 +118,12 @@ func (imp *Importer) importVM(ctx context.Context, vmDir string) (ImportStats, e
 	// Step 2: load cursor (absent = start of everything).
 	cur := imp.loadCursor(vmDir)
 
-	// Step 3: if recovery detected a gap, append the gap envelope to the store.
-	// buildGapEnvelope (Task 6) sets SourceInstanceID="spool.recovery" which is
-	// not a UUID and fails Validate(). As trusted ingress, we patch it to a stable
-	// per-vmDir UUID so dedup works across imports for the same corruption span.
-	if report.GapEmitted != nil {
-		gapEnv := *report.GapEmitted // copy; do not mutate Task 6's value
-		gapEnv.SourceInstanceID = gapSourceInstanceID(vmDir)
-		ar, err := imp.st.Append(ctx, &gapEnv)
+	// Step 3: if recovery detected corrupt segments, append one gap envelope per
+	// segment to the store. Each envelope carries its own stable
+	// (source_instance_id, source_seq) identity built by buildGapEnvelope in
+	// reader.go, so distinct corruptions cannot dedup away each other.
+	for _, gapEnv := range report.Gaps {
+		ar, err := imp.st.Append(ctx, gapEnv)
 		if err != nil {
 			return stats, fmt.Errorf("importer: append gap envelope: %w", err)
 		}
@@ -149,12 +146,17 @@ func (imp *Importer) importVM(ctx context.Context, vmDir string) (ImportStats, e
 
 		if cur.Segment != "" && segName < cur.Segment {
 			// PAST segment: all records already committed.
-			// Count them as Deduped; prune if it has an end marker.
+			// Count readable records as Deduped; prune only when the segment is
+			// readable end-to-end (countSegmentRecords >= 0) AND has the end
+			// marker. A corrupt segment (countSegmentRecords == -1) is never
+			// pruned — it is evidence whose last records never committed, and
+			// the prune rule requires the store batch containing its last record
+			// to have committed. Corrupt evidence survives on disk permanently.
 			n := countSegmentRecords(segPath)
 			if n > 0 {
 				stats.Deduped += n
 			}
-			if segmentHasEndMarker(segPath) {
+			if n >= 0 && segmentHasEndMarker(segPath) {
 				if rerr := os.Remove(segPath); rerr == nil {
 					stats.Pruned++
 				}
@@ -312,21 +314,6 @@ func writeCursor(vmDir string, cur cursor) error {
 		return fmt.Errorf("rename cursor: %w", err)
 	}
 	return nil
-}
-
-// gapSourceInstanceID returns a stable UUID for gap envelopes from vmDir.
-// We hash the directory path to a UUID v4-shaped value so that the same
-// corruption in the same dir always produces the same (source_instance_id, source_seq)
-// dedup key. The gap envelope uses SourceSeq="0" (fixed in buildGapEnvelope).
-func gapSourceInstanceID(vmDir string) string {
-	h := sha256.Sum256([]byte("spool.recovery.gap:" + vmDir))
-	// Format as UUID v4 (variant bits set per RFC 4122).
-	// Bytes 6: version nibble = 4; bytes 8: variant bits = 10xx.
-	b := h[:16]
-	b[6] = (b[6] & 0x0f) | 0x40
-	b[8] = (b[8] & 0x3f) | 0x80
-	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
-		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 // countSegmentRecords counts records in a segment to know if cursor is at the end.
