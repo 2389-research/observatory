@@ -128,7 +128,13 @@ note "PASS daemon up on $API (auth on)"
 # Without --token the CLI sends no credentials; the API rejects with 401
 # (unauthenticated), which the CLI surfaces as exit 1.
 run_expect 1 "$VMOBS" --api "$API" vm list
-note "PASS proved: unauthenticated vm list exits 1 (auth boundary enforced)"
+if grep -q "unauthenticated" "$TMP/err" "$TMP/out"; then
+  note "PASS proved: unauthenticated vm list exits 1 and names unauthenticated"
+else
+  note "FAIL unauthenticated vm list did not mention unauthenticated:"
+  sed 's/^/  /' "$TMP/err"
+  fail=1
+fi
 
 # --- auth whoami with a valid token ---
 
@@ -263,7 +269,12 @@ fi
 out_check "GET /auth/session: returns csrf_token and session method" \
   '(.csrf_token | type) == "string" and .method == "session"'
 CSRF_TOKEN=$(jq -r '.csrf_token' <"$TMP/out")
-note "PASS csrf_token captured from /auth/session"
+if [ -n "$CSRF_TOKEN" ] && [ "$CSRF_TOKEN" != "null" ]; then
+  note "PASS csrf_token captured from /auth/session"
+else
+  note "FAIL csrf_token missing or null from /auth/session"
+  fail=1
+fi
 
 # Mutation with cookie + correct CSRF → success (create a token via session).
 curl -sf -X POST \
