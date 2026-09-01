@@ -44,4 +44,29 @@ install -o root -g root -m 0440 "$here/sudoers-vmobs" /etc/sudoers.d/vmobs-fixtu
 install -d -o harper -g vmobs-fixture -m 0775 /srv/vmobs /srv/vmobs/fixture
 install -d -o root -g root -m 0755 /srv/vmobs/jail
 
-echo "setup complete: kvm+vmobs-fixture groups (re-login needed), firecracker $ver, helper+sudoers installed"
+# 6. vmobs-privd daemon.
+go_bin="$(command -v go || true)"
+[ -n "$go_bin" ] || { echo "go not found in PATH; add mise/go to root PATH" >&2; exit 1; }
+"$go_bin" build -o /usr/local/sbin/vmobs-privd "$repo/cmd/vmobs-privd"
+
+# Substitute the invoking user's uid/gid into the unit before installing.
+# setup.sh is run via `sudo sh`, so SUDO_UID/SUDO_GID carry the real operator identity.
+: "${SUDO_UID:?SUDO_UID not set; run via sudo sh setup.sh}"
+: "${SUDO_GID:?SUDO_GID not set; run via sudo sh setup.sh}"
+sed \
+  -e "s/__ALLOWED_UID__/$SUDO_UID/g" \
+  -e "s/__ALLOWED_GID__/$SUDO_GID/g" \
+  "$here/vmobs-privd.service" \
+  > /etc/systemd/system/vmobs-privd.service
+
+# stage directory owned by the operator user so vmobsd can drop artifacts there.
+install -d -o "$SUDO_UID" -g "$SUDO_GID" -m 0755 /srv/vmobs/stage
+
+systemctl daemon-reload
+systemctl enable --now vmobs-privd
+
+# Verify the unit came up and the socket exists.
+systemctl is-active vmobs-privd || { echo "vmobs-privd failed to start; check: journalctl -u vmobs-privd" >&2; exit 1; }
+[ -S /run/vmobs/privd.sock ] || { echo "privd.sock absent after start" >&2; exit 1; }
+
+echo "setup complete: kvm+vmobs-fixture groups (re-login needed), firecracker $ver, helper+sudoers installed, vmobs-privd running"

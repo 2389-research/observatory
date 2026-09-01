@@ -65,6 +65,42 @@ After launching the jailer, `jail-start` waits (≤10s) for firecracker to bind 
 
 `jail-stop` reads the PID from `$JAIL_BASE/firecracker/<id>/root/firecracker.pid`, which is where the jailer writes it when `--daemonize` is used (per the Firecracker/jailer v1.16.1 documentation). The process title is `firecracker --id=<id> ...` (using `=`, not space), so pgrep string matching is unreliable; the pid file is the authoritative source.
 
+## `vmobs-privd` — the M1 privilege daemon
+
+`vmobs-privd` replaces the M0 root helper. It runs as root via systemd, listens on a unix socket at `/run/vmobs/privd.sock`, and serves typed verbs over the wire protocol in `internal/privd`. The socket is owned `root:<operator-gid>` mode `0660`; the server enforces peer-credential uid checks on every connection.
+
+### What it does
+
+Handles all root-required operations the non-root runner needs: `allocate_network`, `release_network`, `start_vm`, `signal_vm`, `release_vm`. The VM uid/gid range is `[10000, 60000)` — the same policy as the old root helper.
+
+### Install / upgrade
+
+Re-running `setup.sh` is the full upgrade path:
+
+```
+scripts/linux 'true'   # sync the latest tree to aibox03
+ssh -t harper@100.64.0.100 'cd vmobs-build && sudo sh scripts/aibox03/setup.sh'
+```
+
+setup.sh builds `cmd/vmobs-privd` on aibox03, installs the binary to `/usr/local/sbin/vmobs-privd`, writes `/etc/systemd/system/vmobs-privd.service` (with the operator's uid/gid substituted from `$SUDO_UID`/`$SUDO_GID`), and restarts the unit.
+
+### Health check
+
+```
+# Unit status
+systemctl status vmobs-privd
+
+# Socket permissions (should be root:<operator-gid> 0660)
+ls -l /run/vmobs/privd.sock
+
+# Live smoke (run from aibox03 as the operator user)
+scripts/linux 'go test ./internal/privd/ -run TestPrivdLiveSmoke -v'
+```
+
+### Caution
+
+Agents must never restart `vmobs-privd` directly (`systemctl restart vmobs-privd` requires root). If the daemon goes down, the operator re-runs setup.sh or manually restarts via `sudo systemctl restart vmobs-privd`.
+
 ## Re-pinning Firecracker
 
 When a new release is needed:
