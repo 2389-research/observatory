@@ -321,10 +321,9 @@ func TestLoginBadPassword(t *testing.T) {
 		t.Errorf("bad password: code=%q cause=%q, want unauthenticated/invalid_credentials", e.Code, e.Cause)
 	}
 
-	// Wait a moment for the event to land (the handler delays then appends).
-	time.Sleep(50 * time.Millisecond)
-
 	// Verify a login_failed event was recorded.
+	// No sleep needed: appendAuthEvent is synchronous, completing before the 401
+	// response is written, so receiving the response guarantees the event is stored.
 	result, err := st.Query(context.Background(), store.Query{Kind: "auth.login_failed", Limit: 10})
 	if err != nil {
 		t.Fatalf("query login_failed: %v", err)
@@ -533,6 +532,25 @@ func TestAuthDisabledInjectsLocalOperator(t *testing.T) {
 	if e2.Code != "auth_disabled" {
 		t.Errorf("code = %q, want auth_disabled", e2.Code)
 	}
+
+	// POST /auth/logout → 409 auth_disabled (spec: every auth endpoint except
+	// GET /auth/session returns 409 auth_disabled when auth is off).
+	resp3, err := http.Post(srv.URL+"/api/v1/auth/logout", "application/json", nil)
+	if err != nil {
+		t.Fatalf("logout: %v", err)
+	}
+	raw3, _ := io.ReadAll(resp3.Body)
+	resp3.Body.Close()
+	if resp3.StatusCode != http.StatusConflict {
+		t.Fatalf("logout with auth disabled: want 409, got %d\n%s", resp3.StatusCode, raw3)
+	}
+	var e3 api.Error
+	if err := json.Unmarshal(raw3, &e3); err != nil {
+		t.Fatalf("decode logout error: %v\n%s", err, raw3)
+	}
+	if e3.Cause != "auth_disabled" {
+		t.Errorf("logout auth_disabled cause = %q, want auth_disabled", e3.Cause)
+	}
 }
 
 func TestSessionEventsEmitted(t *testing.T) {
@@ -613,15 +631,16 @@ func TestSessionEventsEmitted(t *testing.T) {
 	}
 
 	// Neither event's payload should contain the session cookie value.
-	if sessionCookieValue != "" {
-		for _, env := range append(createdResult.Events, endedResult.Events...) {
-			payload, err := json.Marshal(env)
-			if err != nil {
-				t.Fatalf("marshal: %v", err)
-			}
-			if strings.Contains(string(payload), sessionCookieValue) {
-				t.Errorf("event payload contains session cookie value: %s", payload)
-			}
+	if sessionCookieValue == "" {
+		t.Fatalf("could not extract session cookie for event assertion")
+	}
+	for _, env := range append(createdResult.Events, endedResult.Events...) {
+		payload, err := json.Marshal(env)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if strings.Contains(string(payload), sessionCookieValue) {
+			t.Errorf("event payload contains session cookie value: %s", payload)
 		}
 	}
 

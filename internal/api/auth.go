@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -296,6 +297,21 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 
 // handleAuthLogout handles POST /auth/logout.
 func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
+	if !s.auth.ac.Enabled {
+		writeError(w, http.StatusConflict, Error{
+			Code:      "auth_disabled",
+			Message:   "authentication is not required in this configuration; all requests run as local_operator",
+			Retryable: false,
+			Cause:     "auth_disabled",
+			Remediation: []Remediation{{
+				Action:    "get",
+				Params:    map[string]any{"path": basePath + "/auth/session"},
+				Rationale: "check the current identity",
+			}},
+		})
+		return
+	}
+
 	id, ok := auth.IdentityFrom(r.Context())
 	if !ok || id.Method != "session" {
 		writeError(w, http.StatusBadRequest, Error{
@@ -378,7 +394,7 @@ func (s *Server) appendAuthEvent(r *http.Request, kind string, data map[string]a
 	env := &events.Envelope{
 		SchemaVersion:    1,
 		SourceInstanceID: s.auth.authInstID,
-		SourceSeq:        seqString(seq),
+		SourceSeq:        strconv.FormatInt(seq, 10),
 		Kind:             kind,
 		Provenance:       events.HostObserved,
 		Sensor:           "api",
@@ -391,34 +407,6 @@ func (s *Server) appendAuthEvent(r *http.Request, kind string, data map[string]a
 	}
 	_, err := s.store.Append(r.Context(), env)
 	return err
-}
-
-// seqString formats an int64 as a decimal string for use as SourceSeq.
-func seqString(n int64) string {
-	// Avoid importing strconv in a way that's confusing — inline it.
-	return formatInt(n)
-}
-
-func formatInt(n int64) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	var buf [20]byte
-	pos := len(buf)
-	for n > 0 {
-		pos--
-		buf[pos] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		pos--
-		buf[pos] = '-'
-	}
-	return string(buf[pos:])
 }
 
 func initAuthState(ac AuthConfig) authState {
