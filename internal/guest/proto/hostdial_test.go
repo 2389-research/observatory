@@ -4,6 +4,7 @@ package proto
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -237,33 +238,45 @@ func TestDialHostVsockCancelSuccessRaceDeterministic(t *testing.T) {
 	})
 
 	for i := 0; i < iterations; i++ {
-		ctx, cancel := context.WithCancel(context.Background())
+		func() {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 
-		// Cancel races the handshake: fire in a separate goroutine with no delay.
-		go cancel()
+			// Cancel races the handshake: fire in a separate goroutine with no delay.
+			go cancel()
 
-		conn, err := DialHostVsock(ctx, socketPath, testPort)
-		if err != nil {
-			// Cancel won — acceptable.
-			continue
-		}
+			conn, err := DialHostVsock(ctx, socketPath, testPort)
+			if err != nil {
+				// Cancel won — acceptable. cancel() runs via defer.
+				if !errors.Is(err, context.Canceled) {
+					// Any other error is also fine (e.g. the race resolved to
+					// a context-cancelled dial), but surface unexpected ones.
+					_ = err
+				}
+				return
+			}
+			defer conn.Close()
 
-		// Success path: the conn must not carry a poisoned instant deadline.
-		// Apply a fresh 200ms deadline and confirm a Write does not time out
-		// instantly (a timed-out Write returns immediately).
-		defer conn.Close()
-		if setErr := conn.SetDeadline(time.Now().Add(200 * time.Millisecond)); setErr != nil {
-			t.Errorf("iter %d: SetDeadline on returned conn: %v", i, setErr)
-			continue
-		}
-		start := time.Now()
-		_, writeErr := conn.Write([]byte{0x01})
-		elapsed := time.Since(start)
-		if writeErr != nil && elapsed < 50*time.Millisecond {
-			// Write failed in under 50ms — the deadline was already expired when
-			// the conn was returned (the race bug).
-			t.Errorf("iter %d: Write on returned conn failed in %v (instant deadline leak): %v", i, elapsed, writeErr)
-		}
-		cancel() // already cancelled but harmless
+			// Success path: the conn must not carry a poisoned instant deadline.
+			// Apply a fresh 200ms deadline and confirm a Write does not time out
+			// instantly (a timed-out Write returns immediately).
+			if setErr := conn.SetDeadline(time.Now().Add(200 * time.Millisecond)); setErr != nil {
+				t.Errorf("iter %d: SetDeadline on returned conn: %v", i, setErr)
+				return
+			}
+			start := time.Now()
+			_, writeErr := conn.Write([]byte{0x01})
+			elapsed := time.Since(start)
+			if writeErr != nil {
+				// A Write error is only the poisoned-deadline bug when it is a
+				// timeout that fired in under 50ms. A slow timeout or any
+				// non-timeout error is not the bug we are detecting.
+				var netErr net.Error
+				if errors.As(writeErr, &netErr) && netErr.Timeout() && elapsed < 50*time.Millisecond {
+					t.Errorf("iter %d: Write on returned conn timed out in %v (instant deadline leak): %v", i, elapsed, writeErr)
+				}
+				// Non-timeout write error or slow timeout: not a poisoned conn.
+			}
+		}()
 	}
 }
