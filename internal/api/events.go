@@ -81,12 +81,6 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		q.Family = family
-		// The "run" family rides the host-wide stream (vm_id column NULL; VM
-		// linkage in payload data). When vm_id= is also set, extend matching to
-		// json_extract(payload,'$.data.vm_id') so reproduce_queries reproduce.
-		if family == "run" {
-			q.MatchDataVMID = true
-		}
 	}
 	if raw := params.Get("until"); raw != "" {
 		if !events.DecimalString(raw) {

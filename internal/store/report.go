@@ -12,13 +12,14 @@ import (
 
 // CountEventsForReport counts events in the run window (after < event_id <= until)
 // for the given family, matching by vm_id column OR by data.vm_id in the payload.
-// This covers regular VM events (vm_id column set) and store-synthesized run.*
-// events (vm_id column NULL, VM linkage in data.vm_id).
+// This covers regular VM events (vm_id column set) and store-synthesized events
+// (vm.*, run.*) that ride the host-wide stream with a NULL vm_id column and VM
+// linkage in data.vm_id.
 //
 // The matching reproduce_query is:
 // /api/v1/events?vm_id=<vm>&family=<f>&after=<after>&until=<until>
-// The API applies the same two-clause match when family=run (MatchDataVMID path),
-// keeping SQL and API structurally congruent (P-05).
+// store.Query applies the same two-clause match unconditionally whenever VMID is
+// set, keeping SQL and API structurally congruent (P-05).
 func (s *Store) CountEventsForReport(ctx context.Context, vmID, runID, family string, afterID, untilID int64) (int64, error) {
 	familyKinds := events.KindsByFamily(family)
 	if familyKinds == nil {
@@ -42,7 +43,7 @@ func (s *Store) CountEventsForReport(ctx context.Context, vmID, runID, family st
 	// The data.run_id arm was dropped (P-05 congruence): every store-synthesized
 	// run.* event sets data.vm_id, so data.vm_id matching alone covers them.
 	// The API reproduce_query uses family=run&vm_id=<vm> which applies the same
-	// two-clause match via MatchDataVMID; adding data.run_id would diverge.
+	// two-clause match; adding data.run_id would diverge from the API's semantics.
 	q := `SELECT COUNT(*) FROM events
 		WHERE event_id > ? AND event_id <= ?
 		AND kind IN (` + placeholders + `)

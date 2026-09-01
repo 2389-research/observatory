@@ -147,8 +147,9 @@ func TestRoundTrip_AllCountedFieldsReproduce(t *testing.T) {
 // TestTerminalEvidenceLinkReturnsOneEvent verifies that the terminal evidence link
 // in the report returns exactly 1 run.state_changed event with a terminal "to"
 // phase when executed against the real API server. This is the F2 regression test:
-// the link uses family=run (not kind=) so MatchDataVMID applies and the NULL
-// vm_id column on run.* events is handled correctly.
+// the link uses family=run (not kind=) so the vm_id= filter applies the two-clause
+// match (column OR data.vm_id), which is required for run.* events that ride the
+// host-wide stream with a NULL vm_id column.
 func TestTerminalEvidenceLinkReturnsOneEvent(t *testing.T) {
 	st := openStore(t)
 	mgr := newManagerWithStore(t, st)
@@ -594,6 +595,124 @@ func mustRunVMID(t *testing.T, st *store.Store, runID string) string {
 		t.Fatalf("GetRun(%s): %v", runID, err)
 	}
 	return run.VMID
+}
+
+// TestP05_VMFamilyRoundTrip_LaunchAttachedBoot is the P-05 regression test for
+// the critical finding in fix round 2: a launch-attached run where the VM boots
+// INSIDE the run window produces a family=vm event_rollup row with count > 0.
+// The reproduce_query (/api/v1/events?vm_id=X&family=vm&after=A&until=B) must
+// return that same count when executed against the real httptest API server.
+//
+// Before the fix: vm_id= applied only a column-equality match; vm.state_changed
+// events ride the host-wide stream with a NULL vm_id column (VM linkage in
+// data.vm_id), so the API returned 0 while the report stored count > 0 — a
+// live P-05 violation.
+//
+// After the fix: vm_id= always applies the two-clause match (column OR
+// data.vm_id); the API returns the same count the report stored.
+func TestP05_VMFamilyRoundTrip_LaunchAttachedBoot(t *testing.T) {
+	st := openStore(t)
+	mgr := newManagerWithStore(t, st)
+	srv := newAPIServer(t, st, mgr)
+
+	bootID := "00000000-0000-4000-8000-cccccccccccc"
+
+	// Create the VM, stopping at provisioning so the boot lands inside the run window.
+	vmID := fmt.Sprintf("00000000-0000-4000-8000-%012d", mustSeq(t))
+	_, _, _, err := st.CreateVMWithOperation(t.Context(), store.CreateVMInput{
+		VMID:             vmID,
+		Name:             "test-vm-p05-" + vmID[:8],
+		Owner:            "test",
+		TemplateID:       "tmpl-test",
+		TemplateDigest:   fmt.Sprintf("sha256:%064d", 1),
+		VCPUCount:        2,
+		MemoryMiB:        2048,
+		RootDiskMiB:      8192,
+		WorkspaceDiskMiB: 10240,
+		MemoryTotalMiB:   2048 + 768,
+		NetworkProfile:   "transport",
+		NetworkPolicyID:  "transport-public-web",
+		Labels:           map[string]string{},
+		Kind:             "vm.create",
+		RequestHash:      fmt.Sprintf("hash-p05-%s", vmID),
+		Admit:            func(store.ReservationTotals) error { return nil },
+	})
+	if err != nil {
+		t.Fatalf("CreateVMWithOperation: %v", err)
+	}
+
+	// Create the run while the VM is still in "provisioning" — this is the
+	// launch-attached case. CreatedEventID is anchored BEFORE any boot events.
+	run, _, err := st.CreateRun(t.Context(), store.CreateRunInput{
+		VMID: vmID, Owner: "test", Goal: "p05 vm-family round-trip test",
+		CriteriaType: "operator_verdict", OnCompletion: "keep_running",
+		RequestHash: "hash-p05-run", InitialPhase: "pending",
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	// Boot the VM — vm.state_changed events land inside the run window.
+	// These events ride the host-wide stream (vm_id column NULL; data.vm_id = vmID).
+	starting := "provisioning"
+	if _, err := st.TransitionVM(t.Context(), store.TransitionInput{
+		VMID: vmID, From: &starting, To: "starting", Reason: "launch",
+		BootID: &bootID,
+	}); err != nil {
+		t.Fatalf("→starting: %v", err)
+	}
+	if _, err := st.TransitionVM(t.Context(), store.TransitionInput{
+		VMID: vmID, To: "running", Reason: "launch_complete",
+	}); err != nil {
+		t.Fatalf("→running: %v", err)
+	}
+
+	// Conclude the run; the boot events are inside the window.
+	mustTransitionRun(t, st, run.RunID, "pending", "concluding", "", "operator verdict")
+	mustTransitionRun(t, st, run.RunID, "concluding", "succeeded", "operator", "operator verdict: succeeded")
+
+	raw, _, err := report.Generate(t.Context(), st, run.RunID, report.Options{})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	// Find the family=vm row in the event_rollup.
+	var rep struct {
+		EventRollup []struct {
+			Family         string `json:"family"`
+			Count          int64  `json:"count"`
+			ReproduceQuery string `json:"reproduce_query"`
+		} `json:"event_rollup"`
+	}
+	if err := json.Unmarshal(raw, &rep); err != nil {
+		t.Fatalf("unmarshal report: %v", err)
+	}
+
+	var vmRow *struct {
+		Family         string `json:"family"`
+		Count          int64  `json:"count"`
+		ReproduceQuery string `json:"reproduce_query"`
+	}
+	for i := range rep.EventRollup {
+		if rep.EventRollup[i].Family == "vm" {
+			vmRow = &rep.EventRollup[i]
+			break
+		}
+	}
+	if vmRow == nil {
+		t.Fatal("event_rollup has no 'vm' family row — CountEventsForReport failed to find vm.state_changed events; check data.vm_id matching")
+	}
+	if vmRow.Count == 0 {
+		t.Fatal("event_rollup 'vm' family row has count 0 — boot events not counted; check vm_id column-or-data.vm_id matching in store")
+	}
+	t.Logf("report: family=vm count=%d reproduce_query=%s", vmRow.Count, vmRow.ReproduceQuery)
+
+	// P-05: execute the reproduce_query against the real API and page through.
+	reproduced := pageAndCount(t, srv.URL, vmRow.ReproduceQuery)
+	if reproduced != vmRow.Count {
+		t.Errorf("P-05 VIOLATION: reproduce_query %q returned %d events from API, report stored %d — family=vm vm_id matching is broken",
+			vmRow.ReproduceQuery, reproduced, vmRow.Count)
+	}
 }
 
 // waitForVMState polls until the VM reaches wantState.

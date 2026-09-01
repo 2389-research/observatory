@@ -53,8 +53,10 @@ func Generate(ctx context.Context, st *store.Store, runID string, opts Options) 
 	// --- outcome ---
 	evidenceLinks := []string{
 		// The terminal record: the run.state_changed event at conclusion.
-		// Uses family=run (not kind=) so the API applies MatchDataVMID, which is
-		// required for run.* events that ride the host-wide stream with NULL vm_id column.
+		// Uses family=run (not kind=) so the API narrows to run-family kinds
+		// while vm_id= applies the unconditional two-clause match (column OR
+		// data.vm_id), which is required for run.* events that ride the
+		// host-wide stream with a NULL vm_id column.
 		fmt.Sprintf("/api/v1/events?family=run&vm_id=%s&after=%d&until=%d",
 			run.VMID, run.ConcludedEventID-1, run.ConcludedEventID),
 	}
@@ -199,8 +201,9 @@ func Generate(ctx context.Context, st *store.Store, runID string, opts Options) 
 //
 // vm.state_changed events are store-synthesized via systemEnvelope, which does
 // not set the envelope VMID field — so they ride the host-wide stream with a
-// NULL vm_id column, just like run.* events. VM linkage lives in data.vm_id.
-// MatchDataVMID: true extends the filter to OR on json_extract(payload,'$.data.vm_id').
+// NULL vm_id column. VM linkage lives in data.vm_id. store.Query applies the
+// unconditional two-clause match (vm_id column OR data.vm_id) whenever VMID is
+// set, so no extra flag is needed here.
 func collectBootIDs(ctx context.Context, st *store.Store, vmID, _ string, after, until int64) ([]string, error) {
 	seen := map[string]bool{}
 	var ids []string
@@ -208,12 +211,11 @@ func collectBootIDs(ctx context.Context, st *store.Store, vmID, _ string, after,
 	untilStr := strconv.FormatInt(until, 10)
 	for {
 		res, err := st.Query(ctx, store.Query{
-			VMID:          &vmID,
-			Kind:          "vm.state_changed",
-			After:         afterCursor,
-			Until:         untilStr,
-			Limit:         1000,
-			MatchDataVMID: true,
+			VMID:  &vmID,
+			Kind:  "vm.state_changed",
+			After: afterCursor,
+			Until: untilStr,
+			Limit: 1000,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("query vm.state_changed: %w", err)

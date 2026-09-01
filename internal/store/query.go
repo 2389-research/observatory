@@ -48,12 +48,6 @@ type Query struct {
 	After  string  // "": from the start
 	Until  string  // "": no upper bound (inclusive); decimal event_id
 	Limit  int     // 0: DefaultPageLimit
-	// MatchDataVMID extends the VMID filter to also match events where
-	// json_extract(payload, '$.data.vm_id') = *VMID. Used for families like
-	// "run" whose events ride the host-wide stream (vm_id column NULL, VM
-	// linkage in event data). Set automatically by the API when the family
-	// filter includes run.* kinds (or any family with host-stream events).
-	MatchDataVMID bool
 }
 
 // QueryResult always states how far the store goes (LatestEventID) so an empty
@@ -116,16 +110,12 @@ func (s *Store) Query(ctx context.Context, q Query) (QueryResult, error) {
 		args = append(args, until)
 	}
 	if q.VMID != nil {
-		if q.MatchDataVMID {
-			// vm-or-data matching: covers both regular VM events (vm_id column)
-			// and store-synthesized events that ride the host-wide stream with VM
-			// linkage in payload (e.g. run.* family).
-			where += " AND (vm_id = ? OR json_extract(payload, '$.data.vm_id') = ?)"
-			args = append(args, *q.VMID, *q.VMID)
-		} else {
-			where += " AND vm_id = ?"
-			args = append(args, *q.VMID)
-		}
+		// vm_id= has one meaning everywhere: events linked to this VM, whether
+		// by the envelope column (regular ingested events) or by data.vm_id in
+		// the payload (store-synthesized events — vm.*, run.* — that ride the
+		// host-wide stream with a NULL vm_id column). No knob; always both arms.
+		where += " AND (vm_id = ? OR json_extract(payload, '$.data.vm_id') = ?)"
+		args = append(args, *q.VMID, *q.VMID)
 	}
 	if q.Kind != "" {
 		where += " AND kind = ?"
