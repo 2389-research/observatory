@@ -313,38 +313,43 @@ func statHostFiles(t *testing.T, vmA, vmB *fixture.VM) {
 	pathB := filepath.Join(jailBase, "firecracker", vmB.ID, "root", "rootfs.ext4")
 
 	var statA, statB syscall.Stat_t
+	statAOK := true
+	statBOK := true
 	if err := syscall.Stat(pathA, &statA); err != nil {
 		t.Errorf("stat %s: %v", pathA, err)
-		return
+		statAOK = false
 	}
 	if err := syscall.Stat(pathB, &statB); err != nil {
 		t.Errorf("stat %s: %v", pathB, err)
-		return
+		statBOK = false
 	}
 
 	// Each VM's file must be owned by its own UID.
-	if int(statA.Uid) != vmA.UID {
+	if statAOK && int(statA.Uid) != vmA.UID {
 		t.Errorf("%s: uid=%d, want %d", pathA, statA.Uid, vmA.UID)
 	}
-	if int(statB.Uid) != vmB.UID {
+	if statBOK && int(statB.Uid) != vmB.UID {
 		t.Errorf("%s: uid=%d, want %d", pathB, statB.Uid, vmB.UID)
 	}
 
 	// UIDs must differ — identity isolation at the filesystem level.
-	if statA.Uid == statB.Uid {
-		t.Errorf("vmA and vmB share uid %d (identity isolation failure)", statA.Uid)
-	}
+	// Guard: only compare inodes/uids when both stats succeeded.
+	if statAOK && statBOK {
+		if statA.Uid == statB.Uid {
+			t.Errorf("vmA and vmB share uid %d (identity isolation failure)", statA.Uid)
+		}
 
-	// Independent inodes — truly separate copies, not hardlinks.
-	if statA.Ino == statB.Ino {
-		t.Errorf("vmA and vmB rootfs.ext4 share inode %d (hardlink detected)", statA.Ino)
+		// Independent inodes — truly separate copies, not hardlinks.
+		if statA.Ino == statB.Ino {
+			t.Errorf("vmA and vmB rootfs.ext4 share inode %d (hardlink detected)", statA.Ino)
+		}
 	}
 
 	// Not world-writable: no other process should be able to corrupt the disk.
-	if statA.Mode&0002 != 0 {
+	if statAOK && statA.Mode&0002 != 0 {
 		t.Errorf("%s: world-writable (mode %04o)", pathA, statA.Mode&0777)
 	}
-	if statB.Mode&0002 != 0 {
+	if statBOK && statB.Mode&0002 != 0 {
 		t.Errorf("%s: world-writable (mode %04o)", pathB, statB.Mode&0777)
 	}
 

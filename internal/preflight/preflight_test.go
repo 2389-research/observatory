@@ -460,6 +460,23 @@ func TestReportSummaryWarnListsCheckIDs(t *testing.T) {
 	}
 }
 
+func TestReportSummaryTwoWarnChecksJoinedByComma(t *testing.T) {
+	// Two warn-status checks must produce "warn (id1, id2)" — pins the exact
+	// comma-space join format that Summary() produces.
+	report := preflight.Report{
+		Overall: preflight.StatusWarn,
+		Checks: []preflight.Check{
+			{ID: "fc_binaries", Status: preflight.StatusWarn, Summary: "unpinned", Evidence: nil},
+			{ID: "kernel_tuple", Status: preflight.StatusWarn, Summary: "no lock", Evidence: nil},
+		},
+	}
+	want := "warn (fc_binaries, kernel_tuple)"
+	s := report.Summary()
+	if s != want {
+		t.Errorf("Summary() = %q, want %q", s, want)
+	}
+}
+
 // --- kernel_tuple ---
 
 func TestKernelTupleNoLock(t *testing.T) {

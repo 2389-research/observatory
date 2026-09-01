@@ -79,7 +79,8 @@ type Mismatch struct {
 	Subject string
 	// Want is the pinned SHA-256 hex digest.
 	Want string
-	// Got is the computed SHA-256 hex digest, or "absent" if the file was missing.
+	// Got is the computed SHA-256 hex digest, "absent" if the file was missing,
+	// or "unreadable" for any other read error.
 	Got string
 }
 

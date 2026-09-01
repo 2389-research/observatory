@@ -341,6 +341,47 @@ func TestVerifyBinariesUnreadableFile(t *testing.T) {
 	}
 }
 
+// TestVerifyArtifactsUnreadableFile verifies that an artifact file that exists
+// but cannot be read (mode 0000) yields Got="unreadable" — distinct from "absent"
+// which is reserved for missing files. Mirrors TestVerifyBinariesUnreadableFile.
+func TestVerifyArtifactsUnreadableFile(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: chmod 0000 has no effect")
+	}
+	repoRoot := t.TempDir()
+	imagesDir := filepath.Join(repoRoot, "images", "dist")
+	if err := os.MkdirAll(imagesDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	vmlinuxContent := []byte("fake-vmlinux-content")
+	vmlinuxPath := filepath.Join(imagesDir, "vmlinux")
+	if err := os.WriteFile(vmlinuxPath, vmlinuxContent, 0o644); err != nil {
+		t.Fatalf("write vmlinux: %v", err)
+	}
+	// Remove all permissions so the file exists but cannot be read.
+	if err := os.Chmod(vmlinuxPath, 0o000); err != nil {
+		t.Fatalf("chmod 0000: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(vmlinuxPath, 0o644) })
+
+	l := &lock.Lock{
+		Schema: "vmobs.runtime_lock.v1",
+		GuestKernel: lock.GuestKernelEntry{
+			VmlinuxSHA256: hashOf(vmlinuxContent),
+			VmlinuxPath:   "images/dist/vmlinux",
+		},
+	}
+
+	mismatches := l.VerifyArtifacts(repoRoot)
+	if len(mismatches) != 1 {
+		t.Fatalf("expected 1 mismatch for unreadable artifact; got %d: %v", len(mismatches), mismatches)
+	}
+	if mismatches[0].Got != "unreadable" {
+		t.Errorf("unreadable artifact should yield Got=%q; got %q", "unreadable", mismatches[0].Got)
+	}
+}
+
 // TestLoadRealLockFile parses the committed runtime.lock.json from the repo root
 // to guarantee the Lock struct mirrors the actual schema exactly.
 func TestLoadRealLockFile(t *testing.T) {

@@ -249,9 +249,9 @@ func TestDialHostVsockCancelSuccessRaceDeterministic(t *testing.T) {
 			if err != nil {
 				// Cancel won — acceptable. cancel() runs via defer.
 				if !errors.Is(err, context.Canceled) {
-					// Any other error is also fine (e.g. the race resolved to
-					// a context-cancelled dial), but surface unexpected ones.
-					_ = err
+					// Non-Canceled errors are logged for diagnosis, not failed on:
+					// the race may resolve as a dial error for other transient reasons.
+					t.Logf("iter %d: non-Canceled error on cancel path: %v", i, err)
 				}
 				return
 			}

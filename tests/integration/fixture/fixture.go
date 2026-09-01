@@ -418,6 +418,10 @@ func copyFile(src, dst string) error {
 		out.Close()
 		return err
 	}
+	if err := out.Sync(); err != nil {
+		out.Close()
+		return err
+	}
 	return out.Close()
 }
 
