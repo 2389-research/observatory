@@ -6,6 +6,7 @@
 package fixture
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/2389-research/observatory-v2/internal/guest"
 	"github.com/2389-research/observatory-v2/internal/guest/proto"
@@ -356,6 +358,39 @@ func TestBuildVMConfig(t *testing.T) {
 	}
 	if bootCfg.CapabilityToken == bootCfg2.CapabilityToken {
 		t.Errorf("capability tokens are identical across two builds (should be random)")
+	}
+}
+
+// TestWaitForVsockReportsLastRealDialError pins the error-surfacing contract:
+// when the outer deadline expires between retries, waitForVsock must report
+// the last error an attempt produced on its own merits (here: EACCES from an
+// untraversable directory), not the context-expiry noise of a final doomed
+// dial. During the first M0 gate run that noise ("i/o timeout") masked a
+// persistent permission-denied and misdirected the diagnosis.
+func TestWaitForVsockReportsLastRealDialError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: directory modes do not block traversal")
+	}
+	locked := filepath.Join(t.TempDir(), "locked")
+	if err := os.Mkdir(locked, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	sock := filepath.Join(locked, "v.sock")
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+
+	// 700ms outer deadline expires mid-backoff (attempts at 0ms and 500ms both
+	// fail instantly with EACCES; the next wake is at 1000ms, past expiry).
+	ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
+	defer cancel()
+	err := waitForVsock(ctx, sock)
+	if err == nil {
+		t.Fatal("waitForVsock succeeded against an untraversable directory")
+	}
+	if !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("real dial error masked; want permission denied, got: %v", err)
 	}
 }
 

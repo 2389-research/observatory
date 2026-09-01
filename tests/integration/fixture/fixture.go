@@ -437,7 +437,12 @@ func waitForVsock(ctx context.Context, udsPath string) error {
 			conn.Close()
 			return nil
 		}
-		lastErr = err
+		// Keep the last error an attempt produced on its own merits. Once the
+		// outer deadline has expired, a dial reports context noise ("i/o
+		// timeout"), which would mask the real cause (e.g. permission denied).
+		if ctx.Err() == nil || lastErr == nil {
+			lastErr = err
+		}
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf("vsock %s not ready after %s: %w", udsPath, time.Since(start).Round(time.Millisecond), lastErr)

@@ -6,7 +6,6 @@ set -eu
 JAIL_BASE=/srv/vmobs/jail
 STAGE_BASE=/srv/vmobs/fixture
 RUN_BASE=/run/vmobs-fixture
-FC_GROUP=vmobs-fixture
 
 die() { echo "vmobs-root-helper: $*" >&2; exit 1; }
 
@@ -94,6 +93,19 @@ jail-start)
     --cgroup-version 2 \
     --daemonize \
     -- --config-file fc-config.json --api-sock api.sock
+  # Jailer chmods its chroot root to 0700 (uid-owned) during setup, which can
+  # finish after daemonize returns control here. The fixture group needs
+  # traverse to reach v.sock (the umask above already makes the socket itself
+  # group-writable). Firecracker binds v.sock strictly after jailer's chroot
+  # prep, so waiting for the socket before reopening the dir means jailer
+  # cannot re-tighten it behind us. If firecracker dies before binding, chmod
+  # anyway so the operator can inspect the jail; the boot failure itself
+  # surfaces at the caller's vsock wait.
+  i=0
+  while [ ! -S "$root/v.sock" ] && [ "$i" -lt 100 ]; do
+    i=$((i+1)); sleep 0.1
+  done
+  chmod 0750 "$root"
   ;;
 jail-stop)
   id="$1"; valid_id "$id"
