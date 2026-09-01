@@ -203,7 +203,8 @@ storage:
 }
 
 // TestRuntimeLockFileDefault verifies that omitting the runtime: section
-// results in LockFile defaulting to "runtime.lock.json".
+// results in LockFile defaulting to "runtime.lock.json". An absent key must
+// not be conflated with an explicit empty string.
 func TestRuntimeLockFileDefault(t *testing.T) {
 	cfg, err := load(t, minimalConfig)
 	if err != nil {
@@ -211,6 +212,20 @@ func TestRuntimeLockFileDefault(t *testing.T) {
 	}
 	if cfg.Runtime.LockFile != "runtime.lock.json" {
 		t.Errorf("expected default LockFile=%q, got %q", "runtime.lock.json", cfg.Runtime.LockFile)
+	}
+}
+
+// TestRuntimeLockFileExplicitEmpty verifies that lock_file: "" in YAML means
+// "explicitly no lock" — verification is skipped. The explicit empty value must
+// survive Load unchanged (not get overwritten by the default).
+func TestRuntimeLockFileExplicitEmpty(t *testing.T) {
+	const withEmptyLock = minimalConfig + "runtime:\n  lock_file: \"\"\n"
+	cfg, err := load(t, withEmptyLock)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Runtime.LockFile != "" {
+		t.Errorf("explicit lock_file: \"\" must survive as empty; got %q", cfg.Runtime.LockFile)
 	}
 }
 

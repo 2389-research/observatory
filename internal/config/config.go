@@ -180,6 +180,20 @@ type PerformanceTargets struct {
 	SteadyMetadataEventsPerSecond int `yaml:"steady_metadata_events_per_second"`
 }
 
+// defaults holds the pre-decode values for fields whose zero value is
+// ambiguous: an absent YAML key leaves these intact, while an explicit YAML
+// value overwrites them. Fields with unambiguous zero values (bool, int 0)
+// stay in post-decode logic below.
+func defaults() Config {
+	return Config{
+		Runtime: Runtime{
+			// Empty string means "explicitly no lock". An absent runtime:
+			// lock_file key leaves this default; lock_file: "" overwrites it.
+			LockFile: "runtime.lock.json",
+		},
+	}
+}
+
 // Load parses path strictly (unknown fields are config typos, not extensions)
 // and validates the constraints this build enforces.
 func Load(path string) (*Config, error) {
@@ -191,15 +205,12 @@ func Load(path string) (*Config, error) {
 
 	dec := yaml.NewDecoder(f)
 	dec.KnownFields(true)
-	var cfg Config
+	cfg := defaults()
 	if err := dec.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	if cfg.Auth.SessionTTLMinutes == 0 {
 		cfg.Auth.SessionTTLMinutes = 720
-	}
-	if cfg.Runtime.LockFile == "" {
-		cfg.Runtime.LockFile = "runtime.lock.json"
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)

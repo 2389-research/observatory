@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -100,9 +101,19 @@ func Load(path string) (*Lock, error) {
 	return &l, nil
 }
 
+// hashErrorLabel returns "absent" when err signals a missing file, and
+// "unreadable" for any other I/O error (permissions, mid-stream failure, etc.).
+func hashErrorLabel(err error) string {
+	if errors.Is(err, os.ErrNotExist) {
+		return "absent"
+	}
+	return "unreadable"
+}
+
 // VerifyBinaries checks the SHA-256 of the installed firecracker and jailer
 // binaries against the pinned values. install_path values are used as-is
-// (absolute paths). A missing file yields a Mismatch with Got="absent".
+// (absolute paths). A missing file yields a Mismatch with Got="absent"; any
+// other read error (permissions, mid-stream I/O) yields Got="unreadable".
 // An empty sha256 field is skipped — call Unpinned to enumerate those.
 func (l *Lock) VerifyBinaries() []Mismatch {
 	var out []Mismatch
@@ -112,7 +123,7 @@ func (l *Lock) VerifyBinaries() []Mismatch {
 		}
 		got, err := sha256File(path)
 		if err != nil {
-			out = append(out, Mismatch{Subject: subject, Want: pinnedHash, Got: "absent"})
+			out = append(out, Mismatch{Subject: subject, Want: pinnedHash, Got: hashErrorLabel(err)})
 			return
 		}
 		if got != pinnedHash {
@@ -127,6 +138,7 @@ func (l *Lock) VerifyBinaries() []Mismatch {
 // VerifyArtifacts checks the SHA-256 of repo-relative artifacts (guest kernel
 // vmlinux and root image) against the pinned values. Paths are resolved
 // relative to repoRoot. An empty sha256 is skipped (see Unpinned).
+// A missing file yields Got="absent"; any other read error yields Got="unreadable".
 func (l *Lock) VerifyArtifacts(repoRoot string) []Mismatch {
 	var out []Mismatch
 	check := func(subject, pinnedHash, relPath string) {
@@ -136,7 +148,7 @@ func (l *Lock) VerifyArtifacts(repoRoot string) []Mismatch {
 		abs := filepath.Join(repoRoot, relPath)
 		got, err := sha256File(abs)
 		if err != nil {
-			out = append(out, Mismatch{Subject: subject, Want: pinnedHash, Got: "absent"})
+			out = append(out, Mismatch{Subject: subject, Want: pinnedHash, Got: hashErrorLabel(err)})
 			return
 		}
 		if got != pinnedHash {

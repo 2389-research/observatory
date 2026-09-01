@@ -152,7 +152,7 @@ func verifyRuntimeLock(lockPath string, logger *slog.Logger) error {
 	if lockPath == "" {
 		return nil
 	}
-	if _, err := os.Stat(lockPath); os.IsNotExist(err) {
+	if _, err := os.Stat(lockPath); errors.Is(err, os.ErrNotExist) {
 		logger.Warn("runtime lock absent; launches will be refused by preflight")
 		return nil
 	}

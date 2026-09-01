@@ -308,6 +308,39 @@ func TestVerifyArtifactsAbsent(t *testing.T) {
 	}
 }
 
+// TestVerifyBinariesUnreadableFile verifies that a binary with mode 0000
+// (unreadable, not absent) yields Got="unreadable" — distinct from Got="absent"
+// which is reserved for missing files.
+func TestVerifyBinariesUnreadableFile(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: chmod 0000 has no effect")
+	}
+	dir := t.TempDir()
+	fcContent := []byte("fake-firecracker-binary")
+	fcPath := makeBinary(t, dir, "firecracker", fcContent)
+	// Remove all permissions so the file exists but cannot be read.
+	if err := os.Chmod(fcPath, 0o000); err != nil {
+		t.Fatalf("chmod 0000: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(fcPath, 0o755) })
+
+	l := &lock.Lock{
+		Schema: "vmobs.runtime_lock.v1",
+		Firecracker: lock.FirecrackerEntry{
+			SHA256:      hashOf(fcContent),
+			InstallPath: fcPath,
+		},
+	}
+
+	mismatches := l.VerifyBinaries()
+	if len(mismatches) != 1 {
+		t.Fatalf("expected 1 mismatch for unreadable file; got %d: %v", len(mismatches), mismatches)
+	}
+	if mismatches[0].Got != "unreadable" {
+		t.Errorf("unreadable file should yield Got=%q; got %q", "unreadable", mismatches[0].Got)
+	}
+}
+
 // TestLoadRealLockFile parses the committed runtime.lock.json from the repo root
 // to guarantee the Lock struct mirrors the actual schema exactly.
 func TestLoadRealLockFile(t *testing.T) {
