@@ -42,12 +42,12 @@
     {
       "family": "process",
       "count": 96,
-      "reproduce_query": "/api/v1/events?vm_id=1ed7fdbf-7007-43f3-b5b2-8071e96b2df5&run_id=3f1c2c53-42a2-46bb-9f21-6c0f6f8d6b2e&kind_prefix=process."
+      "reproduce_query": "/api/v1/events?vm_id=1ed7fdbf-7007-43f3-b5b2-8071e96b2df5&family=process&after=10042&until=10891"
     },
     {
       "family": "fs",
       "count": 412,
-      "reproduce_query": "/api/v1/events?vm_id=1ed7fdbf-7007-43f3-b5b2-8071e96b2df5&run_id=3f1c2c53-42a2-46bb-9f21-6c0f6f8d6b2e&kind_prefix=fs."
+      "reproduce_query": "/api/v1/events?vm_id=1ed7fdbf-7007-43f3-b5b2-8071e96b2df5&family=fs&after=10042&until=10891"
     }
   ],
   "coverage": {
@@ -58,21 +58,21 @@
     "profile": "transport",
     "flows": {
       "count": 3,
-      "reproduce_query": "/api/v1/events?vm_id=1ed7fdbf-7007-43f3-b5b2-8071e96b2df5&run_id=3f1c2c53-42a2-46bb-9f21-6c0f6f8d6b2e&kind_prefix=net.flow."
+      "reproduce_query": "/api/v1/events?vm_id=1ed7fdbf-7007-43f3-b5b2-8071e96b2df5&family=net.flow&after=10042&until=10891"
     },
     "dns_queries": {
       "count": 2,
-      "reproduce_query": "/api/v1/events?vm_id=1ed7fdbf-7007-43f3-b5b2-8071e96b2df5&run_id=3f1c2c53-42a2-46bb-9f21-6c0f6f8d6b2e&kind_prefix=dns."
+      "reproduce_query": "/api/v1/events?vm_id=1ed7fdbf-7007-43f3-b5b2-8071e96b2df5&family=dns&after=10042&until=10891"
     },
     "policy_denials": {
       "count": 0,
-      "reproduce_query": "/api/v1/events?vm_id=1ed7fdbf-7007-43f3-b5b2-8071e96b2df5&run_id=3f1c2c53-42a2-46bb-9f21-6c0f6f8d6b2e&kind_prefix=policy.&outcome=denied"
+      "reproduce_query": "/api/v1/events?vm_id=1ed7fdbf-7007-43f3-b5b2-8071e96b2df5&family=policy&after=10042&until=10891"
     }
   },
   "filesystem_summary": {
     "live_mutation_events": {
       "count": 412,
-      "reproduce_query": "/api/v1/events?vm_id=1ed7fdbf-7007-43f3-b5b2-8071e96b2df5&run_id=3f1c2c53-42a2-46bb-9f21-6c0f6f8d6b2e&kind_prefix=fs."
+      "reproduce_query": "/api/v1/events?vm_id=1ed7fdbf-7007-43f3-b5b2-8071e96b2df5&family=fs&after=10042&until=10891"
     },
     "final_diff": {
       "status": "complete",
@@ -107,7 +107,7 @@
   "links": {
     "run": "/api/v1/runs/3f1c2c53-42a2-46bb-9f21-6c0f6f8d6b2e",
     "vm": "/api/v1/vms/1ed7fdbf-7007-43f3-b5b2-8071e96b2df5",
-    "events": "/api/v1/events?run_id=3f1c2c53-42a2-46bb-9f21-6c0f6f8d6b2e",
+    "events": "/api/v1/events?vm_id=1ed7fdbf-7007-43f3-b5b2-8071e96b2df5&after=10042&until=10891",
     "export": "/api/v1/vms/1ed7fdbf-7007-43f3-b5b2-8071e96b2df5/exports"
   }
 }

@@ -4,6 +4,20 @@ These checks validate the handoff documents and synthetic interface examples. **
 
 The canonical check is `validation/check.py`, run as `uv run docs/validation/check.py`. Re-run it after changing any file in `docs/` and append a dated revision below. Earlier revisions are the historical record; never rewrite them.
 
+## Revision 4 (2026-08-31) — fix reproduce_query params in run-report example
+
+Run after rewriting all `reproduce_query` fields and the `links.events` URL in `docs/examples/run-report.json` to match what `internal/report/generate.go` actually emits. The old example used `kind_prefix=` and `run_id=` params that the `/api/v1/events` endpoint does not accept — silently ignored → 0 results (P-05 hazard). The new URLs use `vm_id=`, `family=`, `after=`, and `until=` only, matching the generator's `fmt.Sprintf` patterns exactly.
+
+### Results
+
+- 46 package checks passed (`uv run docs/validation/check.py`, exit 0).
+- Run-report example continues to satisfy the run-report schema.
+- All revision-3 results hold; only `docs/examples/run-report.json` changed.
+
+### Check log
+
+- PASS — All 46 checks (identical list to revision 3; output elided for brevity).
+
 ## Revision 3 (2026-08-31) — relax boot_ids to allow empty array
 
 Run after relaxing `boot_ids` `minItems` from 1 to 0 in `run-report.schema.json`. Rationale (R5): a run whose VM fails before boot has zero boot identities in durable records; AT-094 requires a report in every terminal phase; inventing a boot ID would be fabricated evidence.
