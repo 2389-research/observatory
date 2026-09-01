@@ -47,12 +47,18 @@ func (e *Engine) Config() Config { return e.cfg }
 // happened; system actions state what the system already did — both from the
 // record, never speculation.
 // match is an optional predicate: nil means "match all events of this kind".
+// severity is used when fixed; severityFn overrides it for event-dependent grades.
+// evidenceFn and actionsFn override the per-event evidence links and suggested
+// actions when the default (event cursor link) is insufficient.
 type rule struct {
 	class        string
 	severity     string
+	severityFn   func(env *events.Envelope) string // overrides severity when non-nil
 	match        func(env *events.Envelope) bool
 	summary      func(env *events.Envelope) string
 	systemAction string
+	evidenceFn   func(env *events.Envelope, id int64) []string      // overrides default evidence links
+	actionsFn    func(env *events.Envelope) []store.SuggestedAction // extra suggested actions
 }
 
 // reconciliationReasons are the reasons the controller uses when cleaning up
@@ -63,6 +69,15 @@ var reconciliationReasons = map[string]bool{
 	"vmm_disappeared_on_restart": true,
 }
 
+// terminalRunPhases is the set of run phases from which no further transitions
+// exist. Mirrors the same constant in the store package without importing it.
+var terminalRunPhases = map[string]bool{
+	"succeeded":    true,
+	"failed":       true,
+	"inconclusive": true,
+	"aborted":      true,
+}
+
 // envVMID returns the VM ID from the envelope if set, otherwise from event data.
 // Host-observed lifecycle events carry vm_id in data, not at the envelope level.
 func envVMID(env *events.Envelope) *string {
@@ -70,6 +85,15 @@ func envVMID(env *events.Envelope) *string {
 		return env.VMID
 	}
 	if s, ok := env.Data["vm_id"].(string); ok && s != "" {
+		return &s
+	}
+	return nil
+}
+
+// runIDFromData extracts run_id from event data, or returns nil. Used for
+// run.state_changed events where run linkage lives in data, not the envelope.
+func runIDFromData(env *events.Envelope) *string {
+	if s, ok := env.Data["run_id"].(string); ok && s != "" {
 		return &s
 	}
 	return nil
@@ -142,6 +166,63 @@ var rulesByKind = map[string][]rule{
 			systemAction: "recorded the unexpected state; VM compute released, history preserved",
 		},
 	},
+
+	// run.state_changed fires only on terminal transitions. The event is
+	// store-synthesized: vm_id is in data, not the envelope. succeeded → info;
+	// failed/inconclusive/aborted → needs_decision (operator must review report).
+	"run.state_changed": {{
+		class: "run_concluded",
+		match: func(env *events.Envelope) bool {
+			to, _ := env.Data["to"].(string)
+			return terminalRunPhases[to]
+		},
+		severityFn: func(env *events.Envelope) string {
+			to, _ := env.Data["to"].(string)
+			if to == "succeeded" {
+				return store.SeverityInfo
+			}
+			return store.SeverityNeedsDecision
+		},
+		summary: func(env *events.Envelope) string {
+			vmID, _ := env.Data["vm_id"].(string)
+			runID, _ := env.Data["run_id"].(string)
+			to, _ := env.Data["to"].(string)
+			evaluatedBy, _ := env.Data["evaluated_by"].(string)
+			reason, _ := env.Data["reason"].(string)
+			s := fmt.Sprintf("run %s on VM %s concluded %s", runID, vmID, to)
+			if evaluatedBy != "" {
+				s += fmt.Sprintf("; evaluated_by %s", evaluatedBy)
+			}
+			if reason != "" {
+				s += fmt.Sprintf(": %s", reason)
+			}
+			return s
+		},
+		systemAction: "recorded the terminal phase; report generation enqueued",
+		evidenceFn: func(env *events.Envelope, _ int64) []string {
+			runID, _ := env.Data["run_id"].(string)
+			if runID == "" {
+				return []string{}
+			}
+			return []string{
+				"/api/v1/runs/" + runID,
+				"/api/v1/runs/" + runID + "/report",
+			}
+		},
+		actionsFn: func(env *events.Envelope) []store.SuggestedAction {
+			runID, _ := env.Data["run_id"].(string)
+			if runID == "" {
+				return nil
+			}
+			return []store.SuggestedAction{
+				{
+					Action:    "get",
+					Params:    map[string]any{"path": "/api/v1/runs/" + runID + "/report"},
+					Rationale: "review the run report to understand the outcome",
+				},
+			}
+		},
+	}},
 
 	// operation.state_changed fires when a create is refused due to capacity.
 	"operation.state_changed": {{
@@ -225,19 +306,35 @@ func (e *Engine) Evaluate(ctx context.Context) error {
 				if r.match != nil && !r.match(env) {
 					continue
 				}
+				severity := r.severity
+				if r.severityFn != nil {
+					severity = r.severityFn(env)
+				}
+				evidenceLinks := []string{
+					fmt.Sprintf("/api/v1/events?after=%d&limit=1", id-1),
+				}
+				if r.evidenceFn != nil {
+					evidenceLinks = r.evidenceFn(env, id)
+				}
+				var suggestedActions []store.SuggestedAction
+				if r.actionsFn != nil {
+					suggestedActions = r.actionsFn(env)
+				}
+				// run.state_changed carries vm_id and run_id in data.
+				runID := runIDFromData(env)
 				if _, err := e.st.RaiseAttention(ctx, store.RaiseInput{
-					TriggerClass: r.class,
-					Severity:     r.severity,
-					VMID:         envVMID(env),
-					Summary:      r.summary(env),
-					SystemAction: r.systemAction,
-					EvidenceLinks: []string{
-						fmt.Sprintf("/api/v1/events?after=%d&limit=1", id-1),
-					},
-					Collapse:   e.cfg.CollapseDuplicates,
-					QueueMax:   e.cfg.QueueMaxItems,
-					CursorName: CursorName,
-					CursorTo:   id,
+					TriggerClass:     r.class,
+					Severity:         severity,
+					VMID:             envVMID(env),
+					RunID:            runID,
+					Summary:          r.summary(env),
+					SystemAction:     r.systemAction,
+					EvidenceLinks:    evidenceLinks,
+					SuggestedActions: suggestedActions,
+					Collapse:         e.cfg.CollapseDuplicates,
+					QueueMax:         e.cfg.QueueMaxItems,
+					CursorName:       CursorName,
+					CursorTo:         id,
 				}); err != nil {
 					return fmt.Errorf("raise for event %d: %w", id, err)
 				}

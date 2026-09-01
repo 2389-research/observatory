@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -77,8 +78,8 @@ func breakTelemetry(t *testing.T, s *store.Store, source, seq string) {
 func TestActiveClassesIsEnabledIntersectImplemented(t *testing.T) {
 	s := openStore(t)
 
-	// Four classes are now implemented.
-	wantAll := []string{"capacity_exhausted", "lifecycle_failed", "reconciliation_surprise", "telemetry_degraded"}
+	// Five classes are now implemented (run_concluded added in Task 9).
+	wantAll := []string{"capacity_exhausted", "lifecycle_failed", "reconciliation_surprise", "run_concluded", "telemetry_degraded"}
 	got := engineOver(s, allTriggers()).ActiveClasses()
 	if len(got) != len(wantAll) {
 		t.Errorf("active = %v, want %v", got, wantAll)
@@ -92,7 +93,7 @@ func TestActiveClassesIsEnabledIntersectImplemented(t *testing.T) {
 
 	off := allTriggers()
 	off["telemetry_degraded"] = false
-	if got := engineOver(s, off).ActiveClasses(); len(got) != 3 {
+	if got := engineOver(s, off).ActiveClasses(); len(got) != 4 {
 		t.Errorf("disabled class still active or missing: %v", got)
 	}
 
@@ -218,8 +219,8 @@ func TestSnapshotEmptyStoreIsMonitoredCalm(t *testing.T) {
 		t.Errorf("snapshot = %+v, want as_of 0 and quiet", snap)
 	}
 	// Quiet must carry the watch scope: calm is only meaningful when the
-	// response says who was watching (P-03). Now 4 classes are implemented.
-	if len(snap.ActiveClasses) != 4 {
+	// response says who was watching (P-03). Now 5 classes are implemented.
+	if len(snap.ActiveClasses) != 5 {
 		t.Errorf("quiet without watch scope: %+v", snap.ActiveClasses)
 	}
 	if snap.VMsRunning != 0 || snap.VMsTotal != 0 || len(snap.Head) != 0 {
@@ -450,5 +451,262 @@ func TestEvaluateRaisesOnCapacityExhausted(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("capacity_exhausted not raised; items: %+v", items)
+	}
+}
+
+// makeTestRun creates a VM and a run, then transitions the run to the given
+// terminal phase. Returns the vmID and runID.
+func makeTestRunTerminal(t *testing.T, s *store.Store, vmID string, to string) (runID string) {
+	t.Helper()
+	makeTestVM(t, s, vmID)
+	// Drive VM through provisioning→starting→running (SPEC §5.2 state machine).
+	_, err := s.TransitionVM(t.Context(), store.TransitionInput{
+		VMID:   vmID,
+		To:     "starting",
+		Reason: "launching",
+	})
+	if err != nil {
+		t.Fatalf("TransitionVM to starting: %v", err)
+	}
+	_, err = s.TransitionVM(t.Context(), store.TransitionInput{
+		VMID:   vmID,
+		To:     "running",
+		Reason: "launched",
+	})
+	if err != nil {
+		t.Fatalf("TransitionVM to running: %v", err)
+	}
+
+	run, _, err := s.CreateRun(t.Context(), store.CreateRunInput{
+		VMID:         vmID,
+		Owner:        "local_operator",
+		Goal:         "test goal",
+		CriteriaType: "operator_verdict",
+		OnCompletion: "keep_running",
+		InitialPhase: "running",
+		RequestHash:  vmID + "-run",
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	// Transition through concluding then to the terminal phase.
+	_, err = s.TransitionRun(t.Context(), store.RunTransitionInput{
+		RunID: run.RunID,
+		From:  "running",
+		To:    "concluding",
+	})
+	if err != nil {
+		t.Fatalf("TransitionRun to concluding: %v", err)
+	}
+	_, err = s.TransitionRun(t.Context(), store.RunTransitionInput{
+		RunID:       run.RunID,
+		From:        "concluding",
+		To:          to,
+		EvaluatedBy: "operator",
+		Reason:      "test reason",
+	})
+	if err != nil {
+		t.Fatalf("TransitionRun to %s: %v", to, err)
+	}
+	return run.RunID
+}
+
+func TestEvaluateRaisesRunConcludedSucceeded(t *testing.T) {
+	// succeeded → severity info; item carries trigger_class run_concluded,
+	// vm_id, run_id, evidence links (run + report paths), suggested actions.
+	s := openStore(t)
+	eng := engineOver(s, allTriggers())
+	ctx := t.Context()
+
+	vmID := testUUID(200)
+	runID := makeTestRunTerminal(t, s, vmID, "succeeded")
+
+	if err := eng.Evaluate(ctx); err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+
+	items, err := s.ListAttention(ctx, store.AttentionQuery{Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found *store.AttentionItem
+	for _, it := range items {
+		if it.TriggerClass == "run_concluded" {
+			found = it
+		}
+	}
+	if found == nil {
+		t.Fatalf("run_concluded not raised; items: %+v", items)
+	}
+	if found.Severity != store.SeverityInfo {
+		t.Errorf("succeeded run severity = %q, want info", found.Severity)
+	}
+	if found.VMID == nil || *found.VMID != vmID {
+		t.Errorf("vm_id = %v, want %q", found.VMID, vmID)
+	}
+	if found.RunID == nil || *found.RunID != runID {
+		t.Errorf("run_id = %v, want %q", found.RunID, runID)
+	}
+	if found.Summary == "" || found.SystemAction == "" {
+		t.Errorf("item lacks summary/action: %+v", found)
+	}
+	// Evidence links must point at run and report API paths.
+	if len(found.EvidenceLinks) < 2 {
+		t.Errorf("expected at least 2 evidence links (run+report), got %v", found.EvidenceLinks)
+	}
+	var hasRun, hasReport bool
+	for _, l := range found.EvidenceLinks {
+		if strings.Contains(l, "/api/v1/runs/"+runID) && !strings.Contains(l, "/report") {
+			hasRun = true
+		}
+		if strings.Contains(l, "/api/v1/runs/"+runID+"/report") {
+			hasReport = true
+		}
+	}
+	if !hasRun || !hasReport {
+		t.Errorf("evidence links missing run or report path: %v", found.EvidenceLinks)
+	}
+	// Suggested actions must include at least get_report.
+	var hasGetReport bool
+	for _, a := range found.SuggestedActions {
+		if a.Action == "get" {
+			if path, ok := a.Params["path"].(string); ok && strings.Contains(path, "/report") {
+				hasGetReport = true
+			}
+		}
+	}
+	if !hasGetReport {
+		t.Errorf("suggested actions missing get_report action: %+v", found.SuggestedActions)
+	}
+}
+
+func TestEvaluateRaisesRunConcludedFailedNeedsDecision(t *testing.T) {
+	// failed/inconclusive/aborted → severity needs_decision.
+	for _, phase := range []string{"failed", "inconclusive", "aborted"} {
+		phase := phase
+		t.Run(phase, func(t *testing.T) {
+			s := openStore(t)
+			eng := engineOver(s, allTriggers())
+			ctx := t.Context()
+
+			vmID := testUUID(210 + len(phase))
+			makeTestRunTerminal(t, s, vmID, phase)
+
+			if err := eng.Evaluate(ctx); err != nil {
+				t.Fatalf("evaluate: %v", err)
+			}
+
+			items, err := s.ListAttention(ctx, store.AttentionQuery{Limit: 20})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var found *store.AttentionItem
+			for _, it := range items {
+				if it.TriggerClass == "run_concluded" {
+					found = it
+				}
+			}
+			if found == nil {
+				t.Fatalf("run_concluded not raised for %s; items: %+v", phase, items)
+			}
+			if found.Severity != store.SeverityNeedsDecision {
+				t.Errorf("%s run severity = %q, want needs_decision", phase, found.Severity)
+			}
+		})
+	}
+}
+
+func TestEvaluateRunConcludedNonTerminalRaisesNothing(t *testing.T) {
+	// Non-terminal transitions (pending→running, running→concluding) must not raise.
+	s := openStore(t)
+	eng := engineOver(s, allTriggers())
+	ctx := t.Context()
+
+	vmID := testUUID(220)
+	makeTestVM(t, s, vmID)
+	_, err := s.TransitionVM(ctx, store.TransitionInput{
+		VMID:   vmID,
+		To:     "starting",
+		Reason: "launching",
+	})
+	if err != nil {
+		t.Fatalf("TransitionVM to starting: %v", err)
+	}
+	_, err = s.TransitionVM(ctx, store.TransitionInput{
+		VMID:   vmID,
+		To:     "running",
+		Reason: "launched",
+	})
+	if err != nil {
+		t.Fatalf("TransitionVM to running: %v", err)
+	}
+
+	run, _, err := s.CreateRun(ctx, store.CreateRunInput{
+		VMID:         vmID,
+		Owner:        "local_operator",
+		Goal:         "test goal",
+		CriteriaType: "operator_verdict",
+		OnCompletion: "keep_running",
+		InitialPhase: "running",
+		RequestHash:  vmID + "-run",
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	// Only transition to concluding — non-terminal, must not raise run_concluded.
+	_, err = s.TransitionRun(ctx, store.RunTransitionInput{
+		RunID: run.RunID,
+		From:  "running",
+		To:    "concluding",
+	})
+	if err != nil {
+		t.Fatalf("TransitionRun to concluding: %v", err)
+	}
+
+	if err := eng.Evaluate(ctx); err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+
+	items, err := s.ListAttention(ctx, store.AttentionQuery{Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range items {
+		if it.TriggerClass == "run_concluded" {
+			t.Errorf("run_concluded raised for non-terminal transition: %+v", it)
+		}
+	}
+}
+
+func TestEvaluateRunConcludedDisabledClass(t *testing.T) {
+	// When run_concluded is disabled in config, the trigger does not fire.
+	s := openStore(t)
+	off := allTriggers()
+	off["run_concluded"] = false
+	eng := engineOver(s, off)
+	ctx := t.Context()
+
+	vmID := testUUID(230)
+	makeTestRunTerminal(t, s, vmID, "succeeded")
+
+	if err := eng.Evaluate(ctx); err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	items, err := s.ListAttention(ctx, store.AttentionQuery{Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range items {
+		if it.TriggerClass == "run_concluded" {
+			t.Errorf("disabled run_concluded still raised: %+v", it)
+		}
+	}
+	// run_concluded must not appear in ActiveClasses when disabled.
+	for _, c := range eng.ActiveClasses() {
+		if c == "run_concluded" {
+			t.Error("disabled run_concluded appears in ActiveClasses")
+		}
 	}
 }

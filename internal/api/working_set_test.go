@@ -115,8 +115,8 @@ func TestSituationEmptyStoreIsMonitoredCalm(t *testing.T) {
 		t.Errorf("situation = %+v, want as_of 0 and quiet", got)
 	}
 	// P-03: quiet must state the watch scope, or calm is indistinguishable
-	// from blindness. Four classes are now implemented.
-	if len(got.Host.Watch.TriggerClassesActive) != 4 {
+	// from blindness. Five classes are now implemented (run_concluded added Task 9).
+	if len(got.Host.Watch.TriggerClassesActive) != 5 {
 		t.Errorf("watch scope = %v", got.Host.Watch.TriggerClassesActive)
 	}
 	if got.ChangedVMs == nil || len(got.ChangedVMs) != 0 {
@@ -398,5 +398,189 @@ func TestSituationResponseByteBound(t *testing.T) {
 	// reachable via GET /attention.
 	if len(got.AttentionHead) >= 8 {
 		t.Errorf("head not shrunk: %d items in %d bytes", len(got.AttentionHead), len(raw))
+	}
+}
+
+// TestActiveRunInChangedVMs verifies the per-VM active_run summary:
+// present with run_id+phase when a run is active; key absent when no run.
+func TestActiveRunInChangedVMs(t *testing.T) {
+	srvURL, st, fake := newRunServer(t)
+	vmID := createRunningVM(t, srvURL, fake)
+
+	// No run yet: changed_vm must not include the active_run key at all.
+	var snap map[string]any
+	getJSON(t, srvURL+"/api/v1/situation?since=0", http.StatusOK, &snap)
+	changed, _ := snap["changed_vms"].([]any)
+	var entry map[string]any
+	for _, c := range changed {
+		m, _ := c.(map[string]any)
+		if m["vm_id"] == vmID {
+			entry = m
+		}
+	}
+	if entry == nil {
+		t.Fatal("VM not in changed_vms")
+	}
+	if _, present := entry["active_run"]; present {
+		t.Errorf("active_run key present with no run; got %v", entry["active_run"])
+	}
+
+	// Create a run on that VM.
+	var runResp map[string]any
+	doRequest(t, http.MethodPost, srvURL+"/api/v1/vms/"+vmID+"/runs", map[string]any{
+		"goal":             "active run test",
+		"success_criteria": map[string]any{"type": "operator_verdict"},
+		"on_completion":    "keep_running",
+	}, http.StatusCreated, &runResp)
+	runID, _ := runResp["run"].(map[string]any)["run_id"].(string)
+	if runID == "" {
+		t.Fatal("run_id missing from create response")
+	}
+
+	// After run create the VM's last_event_id bumps; ?since=0 surfaces the VM again.
+	var snap2 map[string]any
+	getJSON(t, srvURL+"/api/v1/situation?since=0", http.StatusOK, &snap2)
+	changed2, _ := snap2["changed_vms"].([]any)
+	var entry2 map[string]any
+	for _, c := range changed2 {
+		m, _ := c.(map[string]any)
+		if m["vm_id"] == vmID {
+			entry2 = m
+		}
+	}
+	if entry2 == nil {
+		t.Fatal("VM not in changed_vms after run create")
+	}
+	ar, present := entry2["active_run"]
+	if !present || ar == nil {
+		t.Fatalf("active_run key absent or null after run created; entry=%v", entry2)
+	}
+	arMap, _ := ar.(map[string]any)
+	if arMap["run_id"] != runID {
+		t.Errorf("active_run.run_id = %v, want %q", arMap["run_id"], runID)
+	}
+	if arMap["phase"] == "" || arMap["phase"] == nil {
+		t.Errorf("active_run.phase missing; entry=%v", arMap)
+	}
+
+	// Conclude the run: active_run key must be absent afterwards.
+	doRequest(t, http.MethodPost, srvURL+"/api/v1/runs/"+runID+"/conclude", map[string]any{
+		"verdict": "succeeded",
+	}, http.StatusOK, nil)
+
+	// Store the run; wait briefly for report generation to settle (synchronous path).
+	if _, err := st.GetRun(t.Context(), runID); err != nil {
+		t.Fatalf("GetRun after conclude: %v", err)
+	}
+
+	var snap3 map[string]any
+	getJSON(t, srvURL+"/api/v1/situation?since=0", http.StatusOK, &snap3)
+	changed3, _ := snap3["changed_vms"].([]any)
+	var entry3 map[string]any
+	for _, c := range changed3 {
+		m, _ := c.(map[string]any)
+		if m["vm_id"] == vmID {
+			entry3 = m
+		}
+	}
+	if entry3 == nil {
+		t.Fatal("VM not in changed_vms after run concluded")
+	}
+	if ar3, present := entry3["active_run"]; present && ar3 != nil {
+		t.Errorf("active_run key still present after run concluded; got %v", ar3)
+	}
+}
+
+// TestSituationDeltaIncludesVMAfterRunTransition asserts that a run transition
+// bumps the VM's last_event_id (Task 3 behaviour) so the VM surfaces in ?since.
+func TestSituationDeltaIncludesVMAfterRunTransition(t *testing.T) {
+	srvURL, _, fake := newRunServer(t)
+	vmID := createRunningVM(t, srvURL, fake)
+
+	// Capture the current as_of cursor.
+	var snap0 map[string]any
+	getJSON(t, srvURL+"/api/v1/situation", http.StatusOK, &snap0)
+	cursor, _ := snap0["as_of_cursor"].(string)
+	if cursor == "" {
+		t.Fatal("no as_of_cursor")
+	}
+
+	// Create a run: the VM's last_event_id must move past cursor.
+	var runResp map[string]any
+	doRequest(t, http.MethodPost, srvURL+"/api/v1/vms/"+vmID+"/runs", map[string]any{
+		"goal":             "delta test",
+		"success_criteria": map[string]any{"type": "operator_verdict"},
+		"on_completion":    "keep_running",
+	}, http.StatusCreated, &runResp)
+
+	// ?since=<old cursor> must include the VM.
+	var delta map[string]any
+	getJSON(t, srvURL+"/api/v1/situation?since="+cursor, http.StatusOK, &delta)
+	changed, _ := delta["changed_vms"].([]any)
+	var found bool
+	for _, c := range changed {
+		m, _ := c.(map[string]any)
+		if m["vm_id"] == vmID {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("VM %s not in delta changed_vms after run transition; changed=%v", vmID, changed)
+	}
+}
+
+// TestRunConcludedRaisesAttentionViaHTTP ensures the situation endpoint picks
+// up run_concluded attention raised on a concluded run.
+func TestRunConcludedRaisesAttentionViaHTTP(t *testing.T) {
+	srvURL, _, fake := newRunServer(t)
+	vmID := createRunningVM(t, srvURL, fake)
+
+	// Create and conclude a run.
+	var runResp map[string]any
+	doRequest(t, http.MethodPost, srvURL+"/api/v1/vms/"+vmID+"/runs", map[string]any{
+		"goal":             "http trigger test",
+		"success_criteria": map[string]any{"type": "operator_verdict"},
+		"on_completion":    "keep_running",
+	}, http.StatusCreated, &runResp)
+	runID, _ := runResp["run"].(map[string]any)["run_id"].(string)
+
+	doRequest(t, http.MethodPost, srvURL+"/api/v1/runs/"+runID+"/conclude", map[string]any{
+		"verdict": "failed",
+	}, http.StatusOK, nil)
+
+	// GET /situation evaluates triggers and must raise run_concluded.
+	var sit map[string]any
+	getJSON(t, srvURL+"/api/v1/situation", http.StatusOK, &sit)
+
+	quiet, _ := sit["quiet"].(bool)
+	if quiet {
+		t.Error("situation quiet after a failed run conclusion")
+	}
+
+	var got map[string]any
+	getJSON(t, srvURL+"/api/v1/attention", http.StatusOK, &got)
+	items, _ := got["items"].([]any)
+	var found bool
+	for _, raw := range items {
+		item, _ := raw.(map[string]any)
+		if item["kind"] == "run_concluded" {
+			found = true
+			if item["severity"] != "needs_decision" {
+				t.Errorf("failed run attention severity = %v, want needs_decision", item["severity"])
+			}
+			links, _ := item["evidence_links"].([]any)
+			var hasReport bool
+			for _, l := range links {
+				if s, _ := l.(string); strings.Contains(s, "/report") {
+					hasReport = true
+				}
+			}
+			if !hasReport {
+				t.Errorf("run_concluded evidence links missing report path: %v", links)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("run_concluded attention item not found; items: %v", items)
 	}
 }

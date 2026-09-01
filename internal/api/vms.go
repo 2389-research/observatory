@@ -66,13 +66,20 @@ type wireOperation struct {
 	UpdatedAt   string              `json:"updated_at"`
 }
 
+// wireActiveRun is the compact run summary in the per-VM changed_vms entry.
+// The key is omitted entirely when no active run exists (§12.7).
+type wireActiveRun struct {
+	RunID string `json:"run_id"`
+	Phase string `json:"phase"`
+}
+
 // wireChangedVM is the compact per-VM entry in situation's changed_vms list.
 type wireChangedVM struct {
 	VMID            string            `json:"vm_id"`
 	Name            string            `json:"name"`
 	LifecycleState  string            `json:"lifecycle_state"`
 	TelemetryHealth string            `json:"telemetry_health"`
-	ActiveRun       any               `json:"active_run"` // null until P4 runs exist
+	ActiveRun       *wireActiveRun    `json:"active_run,omitempty"` // omitted when no active run
 	AttentionOpen   int64             `json:"attention_open"`
 	Links           map[string]string `json:"links"`
 }
@@ -168,18 +175,24 @@ func renderOperation(op *store.Operation) wireOperation {
 	return w
 }
 
-func renderChangedVM(vm *store.VM, attentionOpen int64) wireChangedVM {
-	return wireChangedVM{
+func renderChangedVM(vm *store.VM, attentionOpen int64, activeRun *store.Run) wireChangedVM {
+	w := wireChangedVM{
 		VMID:            vm.VMID,
 		Name:            vm.Name,
 		LifecycleState:  vm.ObservedState,
 		TelemetryHealth: "unknown", // honest: no sensors exist yet
-		ActiveRun:       nil,       // null until P4 runs land
 		AttentionOpen:   attentionOpen,
 		Links: map[string]string{
 			"vm": basePath + "/vms/" + vm.VMID,
 		},
 	}
+	if activeRun != nil {
+		w.ActiveRun = &wireActiveRun{
+			RunID: activeRun.RunID,
+			Phase: activeRun.Phase,
+		}
+	}
+	return w
 }
 
 func renderTemplate(id string, tpl runtime.Template) wireTemplate {

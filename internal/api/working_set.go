@@ -190,7 +190,14 @@ func (s *Server) handleSituation(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		for _, vm := range changed {
-			changedVMs = append(changedVMs, renderChangedVM(vm, openByVM[vm.VMID]))
+			activeRun, err := s.store.ActiveRunForVM(ctx, vm.VMID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, Error{
+					Code: "internal", Message: "active run query failed", Retryable: true, Cause: "storage_failure",
+				})
+				return
+			}
+			changedVMs = append(changedVMs, renderChangedVM(vm, openByVM[vm.VMID], activeRun))
 		}
 	}
 
