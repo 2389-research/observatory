@@ -32,7 +32,7 @@ type Check struct {
 	ID          string       `json:"id"`
 	Status      Status       `json:"status"`
 	Summary     string       `json:"summary"`
-	Evidence    []string     `json:"evidence"`
+	Evidence    []string     `json:"evidence,omitempty"`
 	Remediation *Remediation `json:"remediation,omitempty"`
 }
 
@@ -115,22 +115,23 @@ func aggregateOverall(checks []Check) Status {
 }
 
 // Summary returns a one-line summary of the report for embedding in error messages.
-// Format: "pass" or "fail (arch_kvm, fc_binaries)" listing failing check IDs.
+// Format: "pass", "fail (arch_kvm, fc_binaries)", or "warn (kernel_tuple)" listing
+// check IDs that match the overall status.
 func (rep *Report) Summary() string {
 	if rep.Overall == StatusPass {
 		return "pass"
 	}
-	var failing []string
+	var listed []string
 	for _, c := range rep.Checks {
-		if c.Status == StatusFail {
-			failing = append(failing, c.ID)
+		if c.Status == StatusFail || (rep.Overall == StatusWarn && c.Status == StatusWarn) {
+			listed = append(listed, c.ID)
 		}
 	}
-	if len(failing) == 0 {
+	if len(listed) == 0 {
 		return string(rep.Overall)
 	}
 	result := string(rep.Overall) + " ("
-	for i, id := range failing {
+	for i, id := range listed {
 		if i > 0 {
 			result += ", "
 		}

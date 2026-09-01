@@ -262,6 +262,7 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready f
 
 	// The preflight hook re-runs on demand (?refresh=1) or returns the last result.
 	// For M0 we always re-run (cheap <1s checks); caching is future work.
+	// refresh ignored in M0: no caching yet; every call re-runs.
 	pfFunc := api.PreflightFunc(func(pCtx context.Context, _ bool) preflight.Report {
 		return pfRunner.Run(pCtx)
 	})

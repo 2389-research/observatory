@@ -439,6 +439,27 @@ func TestReportSummaryFail(t *testing.T) {
 	}
 }
 
+func TestReportSummaryWarnListsCheckIDs(t *testing.T) {
+	report := preflight.Report{
+		Overall: preflight.StatusWarn,
+		Checks: []preflight.Check{
+			{ID: "kernel_tuple", Status: preflight.StatusWarn, Summary: "no lock", Evidence: nil},
+			{ID: "fc_binaries", Status: preflight.StatusPass, Summary: "ok", Evidence: nil},
+		},
+	}
+	s := report.Summary()
+	if !strings.HasPrefix(s, "warn") {
+		t.Errorf("Summary() of warn report should start with 'warn': %q", s)
+	}
+	if !strings.Contains(s, "kernel_tuple") {
+		t.Errorf("Summary() should list warn check ID 'kernel_tuple': %q", s)
+	}
+	// Pass-status checks must not appear.
+	if strings.Contains(s, "fc_binaries") {
+		t.Errorf("Summary() must not list passing check 'fc_binaries': %q", s)
+	}
+}
+
 // --- kernel_tuple ---
 
 func TestKernelTupleNoLock(t *testing.T) {
