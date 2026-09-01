@@ -15,7 +15,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/2389-research/observatory-v2/internal/guest"
 	"github.com/2389-research/observatory-v2/internal/guest/proto"
@@ -381,9 +380,10 @@ func TestWaitForVsockReportsLastRealDialError(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
 
-	// 700ms outer deadline expires mid-backoff (attempts at 0ms and 500ms both
-	// fail instantly with EACCES; the next wake is at 1000ms, past expiry).
-	ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
+	// The outer deadline expires mid-backoff: attempts at 0 and 1×readyBackoff
+	// both fail instantly with EACCES, and the next wake at 2×readyBackoff
+	// lands past expiry. Derived from readyBackoff so the arithmetic tracks it.
+	ctx, cancel := context.WithTimeout(context.Background(), readyBackoff+readyBackoff/2)
 	defer cancel()
 	err := waitForVsock(ctx, sock)
 	if err == nil {

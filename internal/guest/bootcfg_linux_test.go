@@ -17,8 +17,9 @@ import (
 
 // Under systemd, /run is a fresh tmpfs: nothing pre-creates guestd's config
 // mountpoint, so LoadBootConfig must create it before mounting. Non-root, the
-// mount then fails EPERM — the assertions are that the failure is NOT ENOENT
-// and that the directory exists afterward.
+// mount then fails EPERM. A NOT-ENOENT assertion plus a stat of the directory
+// prove MkdirAll ran before mount — ENOENT here was the pre-fix failure mode,
+// where mount was attempted against a missing mountpoint.
 func TestLoadBootConfigCreatesMountpoint(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: the mount could succeed and change the failure mode")

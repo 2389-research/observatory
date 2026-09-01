@@ -101,6 +101,8 @@ jail-start)
   # cannot re-tighten it behind us. If firecracker dies before binding, chmod
   # anyway so the operator can inspect the jail; the boot failure itself
   # surfaces at the caller's vsock wait.
+  # Fractional sleep is a coreutils extension, not POSIX — fine on Ubuntu
+  # (dash execs /usr/bin/sleep); revisit if this ever runs under busybox.
   i=0
   while [ ! -S "$root/v.sock" ] && [ "$i" -lt 100 ]; do
     i=$((i+1)); sleep 0.1
