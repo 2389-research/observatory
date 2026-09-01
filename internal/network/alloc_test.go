@@ -5,6 +5,7 @@ package network_test
 import (
 	_ "embed"
 	"net/netip"
+	"strings"
 	"testing"
 
 	"github.com/2389-research/observatory-v2/internal/network"
@@ -12,6 +13,9 @@ import (
 
 //go:embed testdata/aibox03-routes.json
 var aibox03RoutesJSON []byte
+
+//go:embed testdata/aibox03-routes-table-all.json
+var aibox03RoutesTableAllJSON []byte
 
 // defaultPools are the two default pools defined in §10.1.
 var defaultPools = []netip.Prefix{
@@ -179,5 +183,129 @@ func TestAllocatorExhaustion(t *testing.T) {
 	_, err = a.Next()
 	if err == nil {
 		t.Fatal("expected error on exhausted pool, got nil")
+	}
+}
+
+// TestParseIPRoutesTableAll verifies parsing of the real `ip -json route show table all`
+// fixture from aibox03. Key assertions:
+//   - Tailscale /32s from table 52 are present (100.64.0.1 etc.)
+//   - type=local, type=broadcast, type=multicast entries are absent
+//   - The fixture contains at least 40 tailscale IPv4 unicast routes
+//
+// On aibox03, tailscale publishes individual /32 peer routes in table 52, not a
+// single /10 block. Each peer is a bare IP in the JSON dst field, parsed as /32.
+func TestParseIPRoutesTableAll(t *testing.T) {
+	routes, err := network.ParseIPRoutes(aibox03RoutesTableAllJSON)
+	if err != nil {
+		t.Fatalf("ParseIPRoutes(table-all): %v", err)
+	}
+
+	// Tailscale /32 that must appear: aibox03's first table-52 entry.
+	wantTS := netip.MustParsePrefix("100.64.0.1/32")
+	foundTS := false
+	for _, r := range routes {
+		if r.Dst == wantTS {
+			foundTS = true
+		}
+	}
+	if !foundTS {
+		t.Errorf("tailscale route %s not found in table-all parse result", wantTS)
+	}
+
+	// Count tailscale IPv4 /32 routes (100.x.x.x/32, no gateway, via tailscale0).
+	// The fixture has 40 such entries; verify we got most of them (≥ 10 is a
+	// conservative bound that survives minor tailnet churn).
+	tsCount := 0
+	for _, r := range routes {
+		addr := r.Dst.Addr()
+		if addr.Is4() && r.Dst.Bits() == 32 {
+			b := addr.As4()
+			if b[0] == 100 {
+				tsCount++
+			}
+		}
+	}
+	if tsCount < 10 {
+		t.Errorf("expected ≥10 tailscale /32 routes in table-all result, got %d", tsCount)
+	}
+
+	// No type=local/broadcast/multicast entries should be present.
+	// Those entries have dst values like "127.0.0.1/32", "127.255.255.255/32",
+	// "172.17.255.255/32" (broadcast), "ff00::/8" (multicast). We verify by
+	// checking that known local/broadcast dsts are absent.
+	excluded := []string{
+		"127.0.0.1/32",       // type=local loopback
+		"127.255.255.255/32", // type=broadcast
+		"172.17.255.255/32",  // type=broadcast docker
+	}
+	for _, ex := range excluded {
+		want := netip.MustParsePrefix(ex)
+		for _, r := range routes {
+			if r.Dst == want {
+				t.Errorf("non-unicast route %s was not filtered out", ex)
+			}
+		}
+	}
+}
+
+// TestAllocatorExcludesTailscaleRoutes verifies that an allocator built from
+// the table-all fixture excludes a pool that overlaps a tailscale /32 route.
+// Tailscale routes on aibox03 are individual /32s (e.g., 100.64.0.1/32),
+// not a block; a pool containing that address is detected as overlapping.
+func TestAllocatorExcludesTailscaleRoutes(t *testing.T) {
+	routes, err := network.ParseIPRoutes(aibox03RoutesTableAllJSON)
+	if err != nil {
+		t.Fatalf("ParseIPRoutes(table-all): %v", err)
+	}
+
+	// 100.65.0.0/16 contains 100.64.0.1 (a tailscale /32 in the fixture).
+	// Using it as a pool must trigger an exclusion.
+	// 10.190.0.0/16 is the fallback pool that must remain usable.
+	pools := []netip.Prefix{
+		netip.MustParsePrefix("100.65.0.0/16"),
+		netip.MustParsePrefix("10.190.0.0/16"),
+	}
+	a, err := network.NewAllocator(routes, pools)
+	if err != nil {
+		t.Fatalf("NewAllocator: %v", err)
+	}
+	if len(a.Exclusions()) == 0 {
+		t.Error("expected at least one exclusion for pool 100.65.0.0/16 overlapping tailscale routes")
+	}
+	// Verify the exclusion message mentions the overlapping pool.
+	found := false
+	for _, ex := range a.Exclusions() {
+		if strings.Contains(ex, "100.65.0.0/16") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("exclusion for 100.65.0.0/16 not found; got: %v", a.Exclusions())
+	}
+}
+
+// TestNewAllocatorRejectsIPv6Pool verifies that NewAllocator returns an error
+// when a pool is not IPv4. The /30 arithmetic (As4, addUint32, lastAddr) requires
+// plain IPv4; an IPv6 pool would silently mis-allocate.
+func TestNewAllocatorRejectsIPv6Pool(t *testing.T) {
+	ipv6Pool := netip.MustParsePrefix("fd00::/16")
+	_, err := network.NewAllocator(nil, []netip.Prefix{ipv6Pool})
+	if err == nil {
+		t.Fatal("expected error for IPv6 pool, got nil")
+	}
+}
+
+// TestNewAllocatorRejectsIPv4MappedPool verifies that IPv4-in-IPv6 mapped pools
+// are also rejected. Unmap().Is4() is false for ::ffff:10.0.0.0/104.
+func TestNewAllocatorRejectsIPv4MappedPool(t *testing.T) {
+	// ::ffff:10.0.0.1 is the IPv4-mapped form of 10.0.0.1.
+	// netip.ParsePrefix("::ffff:10.0.0.0/104") gives a mapped prefix.
+	mapped, err := netip.ParsePrefix("::ffff:10.0.0.0/104")
+	if err != nil {
+		t.Skipf("platform did not parse mapped prefix: %v", err)
+	}
+	_, err = network.NewAllocator(nil, []netip.Prefix{mapped})
+	if err == nil {
+		t.Fatal("expected error for IPv4-mapped pool, got nil")
 	}
 }

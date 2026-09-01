@@ -28,7 +28,7 @@ func TestNetNSSetupTeardown(t *testing.T) {
 		t.Skip("set VMOBS_FIXTURE=1 to run root-gated network integration tests")
 	}
 	if _, err := os.Stat(helperPath); os.IsNotExist(err) {
-		t.Skipf("root helper not installed at %s; run scripts/aibox03/setup to install it", helperPath)
+		t.Skipf("root helper not installed at %s; run scripts/aibox03/setup.sh to install it", helperPath)
 	}
 
 	// Teardown on cleanup regardless of assertion failures.
