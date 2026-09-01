@@ -26,7 +26,11 @@ type Sessions struct {
 }
 
 // NewSessions returns a Sessions store that grants sessions with the given TTL.
+// Panics if ttl is zero or negative — a non-positive TTL is programmer error.
 func NewSessions(ttl time.Duration) *Sessions {
+	if ttl <= 0 {
+		panic("auth: session ttl must be positive")
+	}
 	return &Sessions{
 		ttl:     ttl,
 		entries: make(map[string]Session),
@@ -42,6 +46,16 @@ func randToken() string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
+// sweepExpiredLocked deletes all entries whose ExpiresAt is before now.
+// The caller must hold s.mu.
+func (s *Sessions) sweepExpiredLocked(now time.Time) {
+	for id, sess := range s.entries {
+		if now.After(sess.ExpiresAt) {
+			delete(s.entries, id)
+		}
+	}
+}
+
 // Create mints a new session for owner, sweeps expired entries opportunistically,
 // and stores the session. The session ID and CSRF token are independent 32-byte
 // random values (base64url); they are guaranteed to differ.
@@ -49,13 +63,8 @@ func (s *Sessions) Create(owner string) Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Opportunistic sweep of expired entries.
 	now := time.Now().UTC()
-	for id, sess := range s.entries {
-		if now.After(sess.ExpiresAt) {
-			delete(s.entries, id)
-		}
-	}
+	s.sweepExpiredLocked(now)
 
 	id := randToken()
 	csrf := randToken()
@@ -77,35 +86,32 @@ func (s *Sessions) Create(owner string) Session {
 }
 
 // Get returns the session for id, or (zero, false) for unknown or expired
-// sessions. Expired entries are deleted on first miss.
+// sessions. Sweeps all expired entries on every call.
 func (s *Sessions) Get(id string) (Session, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	now := time.Now().UTC()
+	s.sweepExpiredLocked(now)
+
 	sess, ok := s.entries[id]
 	if !ok {
-		return Session{}, false
-	}
-	if time.Now().UTC().After(sess.ExpiresAt) {
-		delete(s.entries, id)
 		return Session{}, false
 	}
 	return sess, true
 }
 
 // Revoke removes the session for id. Returns true if the session existed and
-// was removed, false if it was already gone or expired.
+// was not expired at call time; false if unknown or already expired. Sweeps all
+// expired entries on every call.
 func (s *Sessions) Revoke(id string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	sess, ok := s.entries[id]
-	if !ok {
-		return false
-	}
-	// Treat an expired session as already gone.
-	if time.Now().UTC().After(sess.ExpiresAt) {
-		delete(s.entries, id)
+	now := time.Now().UTC()
+	s.sweepExpiredLocked(now)
+
+	if _, ok := s.entries[id]; !ok {
 		return false
 	}
 	delete(s.entries, id)

@@ -45,3 +45,65 @@ func TestSessionIDsUnique(t *testing.T) {
 		seen[s.ID] = true
 	}
 }
+
+func TestNewSessionsZeroTTLPanics(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic for ttl=0, got none")
+		}
+	}()
+	NewSessions(0)
+}
+
+func TestNewSessionsNegativeTTLPanics(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic for negative ttl, got none")
+		}
+	}()
+	NewSessions(-time.Second)
+}
+
+// TestExpiredSweepOnGet verifies that expired entries are purged when Get is
+// called — even for a nonexistent id — not only when Create runs.
+func TestExpiredSweepOnGet(t *testing.T) {
+	sm := NewSessions(10 * time.Millisecond)
+	sm.Create("victim1")
+	sm.Create("victim2")
+
+	time.Sleep(30 * time.Millisecond)
+
+	if len(sm.entries) != 2 {
+		t.Fatalf("expected 2 entries before sweep, got %d", len(sm.entries))
+	}
+
+	// Calling Get with a nonexistent id should still sweep all expired entries.
+	sm.Get("does-not-exist")
+
+	if len(sm.entries) != 0 {
+		t.Fatalf("expected 0 entries after sweep via Get, got %d", len(sm.entries))
+	}
+}
+
+// TestExpiredSweepOnRevoke verifies that expired entries are purged when
+// Revoke is called for a *different* id.
+func TestExpiredSweepOnRevoke(t *testing.T) {
+	sm := NewSessions(10 * time.Millisecond)
+	sm.Create("victim1")
+	sm.Create("victim2")
+
+	time.Sleep(30 * time.Millisecond)
+
+	if len(sm.entries) != 2 {
+		t.Fatalf("expected 2 entries before sweep, got %d", len(sm.entries))
+	}
+
+	// Revoke a nonexistent id — only the sweep path should run.
+	sm.Revoke("does-not-exist")
+
+	if len(sm.entries) != 0 {
+		t.Fatalf("expected 0 entries after sweep via Revoke, got %d", len(sm.entries))
+	}
+}
