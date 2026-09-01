@@ -58,6 +58,18 @@ func ReadSegment(path string) (*SegmentIter, error) {
 	return &SegmentIter{f: f, r: br}, nil
 }
 
+// Close releases the file descriptor held by the iterator. Callers should
+// call Close when they are done reading, including after an io.EOF or
+// ErrCorruptRecord return from Next.
+func (it *SegmentIter) Close() error {
+	if it.f == nil {
+		return nil
+	}
+	err := it.f.Close()
+	it.f = nil
+	return err
+}
+
 // Next returns the next envelope in the segment.
 // Returns io.EOF when all records have been read (including after a clean end marker).
 // Returns ErrCorruptRecord for a CRC mismatch or oversize record — the caller should

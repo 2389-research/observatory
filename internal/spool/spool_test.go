@@ -74,6 +74,7 @@ func TestRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadSegment: %v", err)
 	}
+	defer iter.Close()
 
 	for i, want := range envs {
 		got, err := iter.Next()
@@ -142,6 +143,7 @@ func TestCrashSimulation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadSegment after Recover: %v", err)
 	}
+	defer iter.Close()
 	count := 0
 	for {
 		_, err := iter.Next()
@@ -213,6 +215,7 @@ func TestInteriorCorruption(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadSegment: %v", err)
 	}
+	defer iter.Close()
 	// First Next() must return ErrCorruptRecord (record 0 is corrupt).
 	_, err = iter.Next()
 	if !errors.Is(err, spool.ErrCorruptRecord) {
@@ -281,6 +284,7 @@ func TestSegmentRotation(t *testing.T) {
 			t.Fatalf("ReadSegment(%s): %v", seg, err)
 		}
 		_, err = iter.Next()
+		_ = iter.Close()
 		if errors.Is(err, io.EOF) {
 			t.Errorf("segment %s has zero records (expected at least one)", seg)
 		} else if err != nil {
@@ -406,6 +410,7 @@ func TestZeroRecordSegment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadSegment: %v", err)
 	}
+	defer iter.Close()
 	_, err = iter.Next()
 	if !errors.Is(err, io.EOF) {
 		t.Errorf("expected EOF from empty segment, got %v", err)
