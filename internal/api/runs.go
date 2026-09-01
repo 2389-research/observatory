@@ -502,22 +502,14 @@ func (s *Server) handleConcludeRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Exactly one of verdict or abort must be set.
+	// verdict and abort are mutually exclusive; supplying both is a wire error.
+	// Supplying neither is a semantic error handled by ConcludeRun (→ ErrConcludeArgsMissing).
 	hasVerdict := body.Verdict != nil
 	hasAbort := body.Abort
 	if hasVerdict && hasAbort {
 		writeError(w, http.StatusBadRequest, Error{
 			Code:      "malformed_request",
 			Message:   "verdict and abort are mutually exclusive; supply exactly one",
-			Retryable: false,
-			Cause:     "body_invalid",
-		})
-		return
-	}
-	if !hasVerdict && !hasAbort {
-		writeError(w, http.StatusBadRequest, Error{
-			Code:      "malformed_request",
-			Message:   "one of verdict or abort must be set",
 			Retryable: false,
 			Cause:     "body_invalid",
 		})
@@ -560,6 +552,16 @@ func (s *Server) handleConcludeRun(w http.ResponseWriter, r *http.Request) {
 				Retryable: false,
 				Cause:     "already_concluded",
 				Details:   map[string]any{"outcome": outcome},
+			})
+			return
+		}
+		if errors.Is(err, runtime.ErrConcludeArgsMissing) {
+			writeError(w, http.StatusBadRequest, Error{
+				Code:      "validation_failed",
+				Message:   "conclude requires a verdict or abort:true",
+				Retryable: false,
+				Cause:     "conclude_args_missing",
+				Details:   map[string]any{"run_id": runID},
 			})
 			return
 		}

@@ -587,7 +587,33 @@ func TestConcludeNeitherVerdictNorAbortRejects(t *testing.T) {
 	doRequest(t, http.MethodPost, srvURL+"/api/v1/runs/"+runID+"/conclude", map[string]any{
 		"reason": "only a reason, no verdict or abort",
 	}, http.StatusBadRequest, &e)
-	requireTeaching(t, e, "malformed_request")
+	requireTeaching(t, e, "validation_failed")
+	if e.Cause != "conclude_args_missing" {
+		t.Errorf("cause = %q, want conclude_args_missing", e.Cause)
+	}
+}
+
+// TestConcludeRunNoArgsReturns400: POST conclude with neither verdict nor
+// abort must answer a typed 400, not a 500.
+func TestConcludeRunNoArgsReturns400(t *testing.T) {
+	srvURL, _, fake := newRunServer(t)
+	vmID := createRunningVM(t, srvURL, fake)
+
+	var createResp map[string]any
+	doRequest(t, http.MethodPost, srvURL+"/api/v1/vms/"+vmID+"/runs", map[string]any{
+		"goal":             "conclude without args",
+		"success_criteria": map[string]any{"type": "operator_verdict"},
+		"on_completion":    "keep_running",
+	}, http.StatusCreated, &createResp)
+	runID, _ := createResp["run"].(map[string]any)["run_id"].(string)
+
+	var e api.Error
+	doRequest(t, http.MethodPost, srvURL+"/api/v1/runs/"+runID+"/conclude", map[string]any{},
+		http.StatusBadRequest, &e)
+	requireTeaching(t, e, "validation_failed")
+	if e.Cause != "conclude_args_missing" {
+		t.Fatalf("cause = %q, want conclude_args_missing", e.Cause)
+	}
 }
 
 func TestConcludeRunNotFound(t *testing.T) {
