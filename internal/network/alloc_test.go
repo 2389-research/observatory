@@ -1,5 +1,5 @@
 // ABOUTME: Tests for transit-subnet allocation with host-route overlap detection.
-// ABOUTME: Fixture data is real captured output from aibox03 via `ip -json route`.
+// ABOUTME: Fixture data is real captured aibox03 output: `ip -json route` and `ip -json route show table all`.
 package network_test
 
 import (
