@@ -234,11 +234,16 @@ func (r *RealOps) StartVM(entry *VMEntry, req StartVMReq) (StartVMResp, error) {
 		// Jailer tightens the chroot root to 0700 mid-startup; we reopen to 0750
 		// strictly after firecracker binds v.sock (which follows jailer's chroot prep).
 		sockPath := filepath.Join(root, "v.sock")
+		sockFound := false
 		for i := 0; i < 100; i++ {
 			if _, err := os.Stat(sockPath); err == nil {
+				sockFound = true
 				break
 			}
 			time.Sleep(100 * time.Millisecond)
+		}
+		if !sockFound {
+			r.log.Printf("v.sock not found after 10s at %s — proceeding with chmod anyway", sockPath)
 		}
 		if err := os.Chmod(root, 0o750); err != nil {
 			r.log.Printf("chmod jail root 0750: %v (non-fatal)", err)

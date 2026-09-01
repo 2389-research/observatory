@@ -43,9 +43,10 @@ func TestStagedFileVerification(t *testing.T) {
 		if err != nil {
 			t.Errorf("correct digest: unexpected error: %v", err)
 		}
-		if fd != nil {
-			fd.Close()
+		if fd == nil {
+			t.Fatal("correct digest: expected non-nil fd on success (pinned fd is the copy contract)")
 		}
+		fd.Close()
 	})
 
 	t.Run("wrong_digest", func(t *testing.T) {
