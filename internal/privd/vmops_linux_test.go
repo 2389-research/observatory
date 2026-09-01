@@ -39,15 +39,22 @@ func TestStagedFileVerification(t *testing.T) {
 
 	t.Run("correct_digest", func(t *testing.T) {
 		staged := privd.StagedFile{Name: fname, SHA256: correctDigest}
-		err := privd.VerifyStagedFile(dir, staged)
+		fd, err := privd.VerifyStagedFile(dir, staged)
 		if err != nil {
 			t.Errorf("correct digest: unexpected error: %v", err)
+		}
+		if fd != nil {
+			fd.Close()
 		}
 	})
 
 	t.Run("wrong_digest", func(t *testing.T) {
 		staged := privd.StagedFile{Name: fname, SHA256: wrongDigest}
-		err := privd.VerifyStagedFile(dir, staged)
+		fd, err := privd.VerifyStagedFile(dir, staged)
+		if fd != nil {
+			fd.Close()
+			t.Error("wrong digest: expected nil fd, got non-nil (fd leak)")
+		}
 		if err == nil {
 			t.Fatal("wrong digest: expected error, got nil")
 		}
@@ -74,7 +81,11 @@ func TestStagedFileVerification(t *testing.T) {
 			t.Fatalf("symlink: %v", err)
 		}
 		staged := privd.StagedFile{Name: linkName, SHA256: correctDigest}
-		err := privd.VerifyStagedFile(dir, staged)
+		fd, err := privd.VerifyStagedFile(dir, staged)
+		if fd != nil {
+			fd.Close()
+			t.Error("symlink: expected nil fd, got non-nil (fd leak)")
+		}
 		if err == nil {
 			t.Fatal("symlink: expected error from O_NOFOLLOW, got nil")
 		}
@@ -209,6 +220,95 @@ func TestSignalIdentityGate(t *testing.T) {
 			t.Errorf("CheckSignalIdentity with correct starttime: unexpected error: %v", err)
 		}
 	})
+}
+
+// ----- TestVerifyAndCopyFromPinnedFd -----
+
+// TestVerifyAndCopyFromPinnedFd is the RED/GREEN test for the fd-reuse fix.
+//
+// Protocol:
+//  1. Write a known file to a stage dir and compute its digest.
+//  2. Call VerifyStagedFile — it must return a non-nil *os.File (the pinned fd).
+//  3. Swap the stage path with different content (simulating a TOCTOU attacker).
+//  4. Seek the pinned fd to 0 and copy via CopyFromPinnedFd into a destination.
+//  5. Assert the destination contains the ORIGINAL content, not the swapped content.
+//
+// Under the old two-open code, CopyFromPinnedFd did not exist (or reopened by path),
+// so this test either fails to compile or copies the swapped content.
+func TestVerifyAndCopyFromPinnedFd(t *testing.T) {
+	dir := t.TempDir()
+
+	original := []byte("original verified image data")
+	swapped := []byte("ATTACKER CONTENT — should never land in jail")
+	fname := "rootfs.ext4"
+	fpath := filepath.Join(dir, fname)
+	if err := os.WriteFile(fpath, original, 0o644); err != nil {
+		t.Fatalf("write original: %v", err)
+	}
+
+	h := sha256.Sum256(original)
+	digest := hex.EncodeToString(h[:])
+
+	staged := privd.StagedFile{Name: fname, SHA256: digest}
+
+	// VerifyStagedFile must now return the open fd on success.
+	fd, err := privd.VerifyStagedFile(dir, staged)
+	if err != nil {
+		t.Fatalf("VerifyStagedFile: %v", err)
+	}
+	if fd == nil {
+		t.Fatal("VerifyStagedFile returned nil fd on success")
+	}
+	defer fd.Close()
+
+	// TOCTOU attacker replaces the file at the path: remove the original inode
+	// and create a new file. os.WriteFile rewrites in-place (same inode, same fd);
+	// the real attack is a rename/create that plants a new inode at the path.
+	if err := os.Remove(fpath); err != nil {
+		t.Fatalf("remove original: %v", err)
+	}
+	if err := os.WriteFile(fpath, swapped, 0o644); err != nil {
+		t.Fatalf("write swapped: %v", err)
+	}
+
+	// Copy from the pinned fd — must ignore the swapped path content.
+	// Use current uid/gid; chowning to root requires privileges we don't have here.
+	dstDir := t.TempDir()
+	if err := privd.CopyFromPinnedFd(fd, dstDir, staged, os.Getuid(), os.Getgid()); err != nil {
+		t.Fatalf("CopyFromPinnedFd: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(dstDir, fname))
+	if err != nil {
+		t.Fatalf("read dst: %v", err)
+	}
+	if string(got) != string(original) {
+		t.Errorf("destination contains %q, want original %q", got, original)
+	}
+	if string(got) == string(swapped) {
+		t.Error("destination contains swapped (attacker) content — fd reuse is BROKEN")
+	}
+}
+
+// TestVerifyStagedFileReturnsNilFdOnMismatch checks that VerifyStagedFile returns
+// nil fd (not a leaked fd) when digest verification fails.
+func TestVerifyStagedFileReturnsNilFdOnMismatch(t *testing.T) {
+	dir := t.TempDir()
+	content := []byte("some data")
+	fname := "kernel"
+	if err := os.WriteFile(filepath.Join(dir, fname), content, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	staged := privd.StagedFile{Name: fname, SHA256: strings.Repeat("a", 64)}
+	fd, err := privd.VerifyStagedFile(dir, staged)
+	if err == nil {
+		t.Fatal("expected digest_mismatch error, got nil")
+	}
+	if fd != nil {
+		fd.Close()
+		t.Error("VerifyStagedFile returned non-nil fd on mismatch — fd leak")
+	}
 }
 
 // ----- TestWireBackendErrorCause -----

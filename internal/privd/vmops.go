@@ -23,41 +23,84 @@ import (
 )
 
 // VerifyStagedFile opens the named file in stageDir using O_NOFOLLOW (refuses symlinks),
-// streams its SHA-256 from the open fd, and returns a BackendError{Cause:"digest_mismatch"}
-// on mismatch. Callers must not reopen the path; this is the TOCTOU-safe entry point.
+// streams its SHA-256 from the open fd, and returns the open *os.File on success.
+// On any error (including digest mismatch) the fd is closed and nil is returned.
+// Callers must close the returned *os.File. This is the TOCTOU-safe entry point:
+// the same fd is used for the subsequent copy (via CopyFromPinnedFd) so the path
+// is never reopened after verification.
 //
 // §15.3: error messages name the file, never dump its contents.
-func VerifyStagedFile(stageDir string, f StagedFile) error {
+func VerifyStagedFile(stageDir string, f StagedFile) (*os.File, error) {
 	fpath := filepath.Join(stageDir, f.Name)
 
 	// O_NOFOLLOW: if the path is a symlink the open fails (ELOOP on Linux).
 	fd, err := unix.Open(fpath, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return fmt.Errorf("privd: open staged file %q: %w", f.Name, err)
+		return nil, fmt.Errorf("privd: open staged file %q: %w", f.Name, err)
 	}
 	file := os.NewFile(uintptr(fd), fpath)
-	defer file.Close()
 
 	// fstat: confirm regular file.
 	var st unix.Stat_t
 	if err := unix.Fstat(fd, &st); err != nil {
-		return fmt.Errorf("privd: fstat staged file %q: %w", f.Name, err)
+		file.Close()
+		return nil, fmt.Errorf("privd: fstat staged file %q: %w", f.Name, err)
 	}
 	if st.Mode&unix.S_IFMT != unix.S_IFREG {
-		return fmt.Errorf("privd: staged file %q is not a regular file", f.Name)
+		file.Close()
+		return nil, fmt.Errorf("privd: staged file %q is not a regular file", f.Name)
 	}
 
 	// Stream SHA-256 from the open fd.
 	h := sha256.New()
 	if _, err := io.Copy(h, file); err != nil {
-		return fmt.Errorf("privd: hash staged file %q: %w", f.Name, err)
+		file.Close()
+		return nil, fmt.Errorf("privd: hash staged file %q: %w", f.Name, err)
 	}
 	got := hex.EncodeToString(h.Sum(nil))
 	if got != f.SHA256 {
-		return &BackendError{
+		file.Close()
+		return nil, &BackendError{
 			Cause:   "digest_mismatch",
 			Message: fmt.Sprintf("file %s: digest mismatch (got %s, want %s)", f.Name, got, f.SHA256),
 		}
+	}
+	// fd position is after the last byte — caller must Seek(0, io.SeekStart) before copying.
+	return file, nil
+}
+
+// CopyFromPinnedFd copies from the already-verified *os.File (seeks to 0 first) into
+// dstDir/<f.Name>. This is the second half of the single-open staging pipeline: the fd
+// was opened and digest-verified by VerifyStagedFile; we never reopen the path.
+// Mode: 0644 for most files, 0640 for fc-config.json. Chowns to uid:gid.
+func CopyFromPinnedFd(src *os.File, dstDir string, f StagedFile, uid, gid int) error {
+	// Seek the verified fd back to the start — same open, never a new path open.
+	if _, err := src.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("privd: seek staged file %q: %w", f.Name, err)
+	}
+
+	mode := os.FileMode(0o644)
+	if f.Name == "fc-config.json" {
+		mode = 0o640
+	}
+
+	dstPath := filepath.Join(dstDir, f.Name)
+	dst, err := os.OpenFile(dstPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+	if err != nil {
+		return fmt.Errorf("privd: create dst %q: %w", f.Name, err)
+	}
+	defer dst.Close()
+
+	if _, err := io.Copy(dst, src); err != nil {
+		return fmt.Errorf("privd: copy %q: %w", f.Name, err)
+	}
+	if err := dst.Close(); err != nil {
+		return fmt.Errorf("privd: close dst %q: %w", f.Name, err)
+	}
+
+	// chown to uid:gid.
+	if err := os.Lchown(dstPath, uid, gid); err != nil {
+		return fmt.Errorf("privd: chown %q: %w", f.Name, err)
 	}
 	return nil
 }
@@ -126,21 +169,41 @@ func CheckSignalIdentity(entry VMEntry) error {
 func (r *RealOps) StartVM(entry *VMEntry, req StartVMReq) (StartVMResp, error) {
 	stageDir := req.StageDir
 
-	// Step 1: verify all staged files before touching the jail dir.
-	for _, f := range req.Files {
-		if err := VerifyStagedFile(stageDir, f); err != nil {
+	// Step 1: verify all staged files, keeping each fd open (single-open pipeline).
+	// All files are verified before any jail dir is touched; on any mismatch we
+	// close all open fds and abort.
+	fds := make([]*os.File, len(req.Files))
+	for i, f := range req.Files {
+		pinned, err := VerifyStagedFile(stageDir, f)
+		if err != nil {
+			// Close fds opened so far.
+			for _, open := range fds[:i] {
+				open.Close()
+			}
 			return StartVMResp{}, err
 		}
+		fds[i] = pinned
 	}
 
-	// Step 2: create jail dirs and copy files.
+	// Step 2: create jail dirs and copy each file from its pinned fd.
+	// The path is never reopened — CopyFromPinnedFd seeks to 0 and reads the
+	// same fd that was digest-verified above, closing the TOCTOU window entirely.
 	root := filepath.Join(r.cfg.JailBase, "firecracker", req.VMID, "root")
 	if err := os.MkdirAll(root, 0o750); err != nil {
+		for _, f := range fds {
+			f.Close()
+		}
 		return StartVMResp{}, fmt.Errorf("privd: mkdir jail root %q: %w", root, err)
 	}
 
-	for _, f := range req.Files {
-		if err := copyFromStage(stageDir, root, f, req.UID, req.GID); err != nil {
+	for i, f := range req.Files {
+		err := CopyFromPinnedFd(fds[i], root, f, req.UID, req.GID)
+		fds[i].Close() // close immediately after copy, regardless of outcome
+		if err != nil {
+			// Close remaining open fds.
+			for _, open := range fds[i+1:] {
+				open.Close()
+			}
 			return StartVMResp{}, err
 		}
 	}
@@ -236,48 +299,6 @@ func (r *RealOps) ReleaseVM(entry VMEntry) error {
 	jailDir := filepath.Join(r.cfg.JailBase, "firecracker", entry.VMID)
 	if err := os.RemoveAll(jailDir); err != nil {
 		return fmt.Errorf("privd: remove jail dir %q: %w", jailDir, err)
-	}
-	return nil
-}
-
-// copyFromStage copies a verified staged file into dstDir.
-// Re-opens from the stage path (safe: verification already pinned the fd and confirmed
-// no symlink; we're copying the same file by path). Mode: 0644 for most files,
-// 0640 for fc-config.json.
-func copyFromStage(stageDir, dstDir string, f StagedFile, uid, gid int) error {
-	srcPath := filepath.Join(stageDir, f.Name)
-
-	// Open with O_NOFOLLOW again for the copy — defend against a race that
-	// replaced the file with a symlink between verify and copy.
-	srcFD, err := unix.Open(srcPath, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return fmt.Errorf("privd: open source %q for copy: %w", f.Name, err)
-	}
-	src := os.NewFile(uintptr(srcFD), srcPath)
-	defer src.Close()
-
-	mode := os.FileMode(0o644)
-	if f.Name == "fc-config.json" {
-		mode = 0o640
-	}
-
-	dstPath := filepath.Join(dstDir, f.Name)
-	dst, err := os.OpenFile(dstPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
-	if err != nil {
-		return fmt.Errorf("privd: create dst %q: %w", f.Name, err)
-	}
-	defer dst.Close()
-
-	if _, err := io.Copy(dst, src); err != nil {
-		return fmt.Errorf("privd: copy %q: %w", f.Name, err)
-	}
-	if err := dst.Close(); err != nil {
-		return fmt.Errorf("privd: close dst %q: %w", f.Name, err)
-	}
-
-	// chown to uid:gid.
-	if err := os.Lchown(dstPath, uid, gid); err != nil {
-		return fmt.Errorf("privd: chown %q: %w", f.Name, err)
 	}
 	return nil
 }
