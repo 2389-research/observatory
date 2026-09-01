@@ -651,3 +651,293 @@ func TestSessionEventsEmitted(t *testing.T) {
 		}
 	}
 }
+
+// TestTokenLifecycleOverAPI exercises the full create→use→list→revoke path.
+func TestTokenLifecycleOverAPI(t *testing.T) {
+	srv, st, _ := newAuthServer(t)
+	csrfToken, client := loginAndGetSession(t, srv.URL)
+
+	// POST /auth/tokens — create a token.
+	createResp := doWithCSRF(t, client, http.MethodPost, srv.URL+"/api/v1/auth/tokens",
+		csrfToken, strings.NewReader(`{"name":"ci"}`), "application/json")
+	createRaw, _ := io.ReadAll(createResp.Body)
+	createResp.Body.Close()
+	if createResp.StatusCode != http.StatusCreated {
+		t.Fatalf("create token: want 201, got %d\n%s", createResp.StatusCode, createRaw)
+	}
+	var createBody struct {
+		Token struct {
+			ID        string `json:"id"`
+			Name      string `json:"name"`
+			Owner     string `json:"owner"`
+			CreatedAt string `json:"created_at"`
+			ExpiresAt string `json:"expires_at"`
+		} `json:"token"`
+		Secret string `json:"secret"`
+	}
+	if err := json.Unmarshal(createRaw, &createBody); err != nil {
+		t.Fatalf("decode create response: %v\n%s", err, createRaw)
+	}
+	if !strings.HasPrefix(createBody.Secret, "vmobs_") {
+		t.Errorf("secret %q: want vmobs_ prefix", createBody.Secret)
+	}
+	if createBody.Token.ID == "" {
+		t.Error("token id must be non-empty")
+	}
+	if createBody.Token.Name != "ci" {
+		t.Errorf("token name = %q, want ci", createBody.Token.Name)
+	}
+	if createBody.Token.Owner != testOperator {
+		t.Errorf("token owner = %q, want %q", createBody.Token.Owner, testOperator)
+	}
+	tokenID := createBody.Token.ID
+	secret := createBody.Secret
+
+	// Bearer token on GET /vms → 200.
+	bearerReq, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/vms", nil)
+	bearerReq.Header.Set("Authorization", "Bearer "+secret)
+	bearerResp, err := http.DefaultClient.Do(bearerReq)
+	if err != nil {
+		t.Fatalf("bearer GET /vms: %v", err)
+	}
+	bearerResp.Body.Close()
+	if bearerResp.StatusCode != http.StatusOK {
+		t.Errorf("bearer token: want 200, got %d", bearerResp.StatusCode)
+	}
+
+	// GET /auth/tokens — list; must not contain the secret.
+	listResp, err := client.Get(srv.URL + "/api/v1/auth/tokens")
+	if err != nil {
+		t.Fatalf("list tokens: %v", err)
+	}
+	listRaw, _ := io.ReadAll(listResp.Body)
+	listResp.Body.Close()
+	if listResp.StatusCode != http.StatusOK {
+		t.Fatalf("list tokens: want 200, got %d\n%s", listResp.StatusCode, listRaw)
+	}
+	var listBody struct {
+		Tokens []struct {
+			ID string `json:"id"`
+		} `json:"tokens"`
+	}
+	if err := json.Unmarshal(listRaw, &listBody); err != nil {
+		t.Fatalf("decode list: %v\n%s", err, listRaw)
+	}
+	if len(listBody.Tokens) != 1 {
+		t.Errorf("list: want 1 token, got %d", len(listBody.Tokens))
+	}
+	// Raw body must not contain the secret.
+	if strings.Contains(string(listRaw), secret) {
+		t.Errorf("list response contains the secret: %s", listRaw)
+	}
+
+	// DELETE /auth/tokens/{id} → 200.
+	revokeResp := doWithCSRF(t, client, http.MethodDelete,
+		srv.URL+"/api/v1/auth/tokens/"+tokenID,
+		csrfToken, nil, "")
+	revokeRaw, _ := io.ReadAll(revokeResp.Body)
+	revokeResp.Body.Close()
+	if revokeResp.StatusCode != http.StatusOK {
+		t.Fatalf("revoke token: want 200, got %d\n%s", revokeResp.StatusCode, revokeRaw)
+	}
+	var revokeBody struct {
+		Revoked bool `json:"revoked"`
+	}
+	if err := json.Unmarshal(revokeRaw, &revokeBody); err != nil {
+		t.Fatalf("decode revoke: %v\n%s", err, revokeRaw)
+	}
+	if !revokeBody.Revoked {
+		t.Error("revoke: want {revoked: true}")
+	}
+
+	// Bearer token is now rejected.
+	bearerReq2, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/vms", nil)
+	bearerReq2.Header.Set("Authorization", "Bearer "+secret)
+	bearerResp2, err := http.DefaultClient.Do(bearerReq2)
+	if err != nil {
+		t.Fatalf("bearer after revoke: %v", err)
+	}
+	bearerResp2.Body.Close()
+	if bearerResp2.StatusCode != http.StatusUnauthorized {
+		t.Errorf("bearer after revoke: want 401, got %d", bearerResp2.StatusCode)
+	}
+
+	// auth.token_created and auth.token_revoked events must exist and must not
+	// contain the secret in any serialised form.
+	for _, kind := range []string{"auth.token_created", "auth.token_revoked"} {
+		result, err := st.Query(context.Background(), store.Query{Kind: kind, Limit: 10})
+		if err != nil {
+			t.Fatalf("query %s: %v", kind, err)
+		}
+		if len(result.Events) == 0 {
+			t.Fatalf("expected at least one %s event", kind)
+		}
+		for _, env := range result.Events {
+			payload, _ := json.Marshal(env)
+			if strings.Contains(string(payload), secret) {
+				t.Errorf("%s event contains secret: %s", kind, payload)
+			}
+		}
+	}
+}
+
+// TestTokenCreateRequiresAuth verifies that unauthenticated requests are rejected
+// and that a bearer token identity can mint a successor token.
+func TestTokenCreateRequiresAuth(t *testing.T) {
+	srv, _, _ := newAuthServer(t)
+
+	// No credentials → 401.
+	resp, err := http.Post(srv.URL+"/api/v1/auth/tokens", "application/json",
+		strings.NewReader(`{"name":"anon"}`))
+	if err != nil {
+		t.Fatalf("unauthenticated create: %v", err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated: want 401, got %d\n%s", resp.StatusCode, raw)
+	}
+
+	// Bearer token identity may mint a successor (single-operator V1).
+	// First, get a token via session.
+	csrfToken, client := loginAndGetSession(t, srv.URL)
+	createResp := doWithCSRF(t, client, http.MethodPost, srv.URL+"/api/v1/auth/tokens",
+		csrfToken, strings.NewReader(`{"name":"seed"}`), "application/json")
+	createRaw, _ := io.ReadAll(createResp.Body)
+	createResp.Body.Close()
+	if createResp.StatusCode != http.StatusCreated {
+		t.Fatalf("session create: want 201, got %d\n%s", createResp.StatusCode, createRaw)
+	}
+	var seedBody struct {
+		Secret string `json:"secret"`
+	}
+	if err := json.Unmarshal(createRaw, &seedBody); err != nil {
+		t.Fatalf("decode seed: %v", err)
+	}
+
+	// Use the bearer token to create another.
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/auth/tokens",
+		strings.NewReader(`{"name":"successor"}`))
+	req.Header.Set("Authorization", "Bearer "+seedBody.Secret)
+	req.Header.Set("Content-Type", "application/json")
+	// No CSRF header needed for bearer-only requests (CSRF guard only fires for session cookies).
+	succResp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("bearer mint: %v", err)
+	}
+	succRaw, _ := io.ReadAll(succResp.Body)
+	succResp.Body.Close()
+	if succResp.StatusCode != http.StatusCreated {
+		t.Fatalf("bearer mint: want 201, got %d\n%s", succResp.StatusCode, succRaw)
+	}
+}
+
+// TestTokenTTL verifies that ttl_minutes produces a non-empty expires_at ≈ now+TTL.
+func TestTokenTTL(t *testing.T) {
+	srv, _, _ := newAuthServer(t)
+	csrfToken, client := loginAndGetSession(t, srv.URL)
+
+	before := time.Now()
+	resp := doWithCSRF(t, client, http.MethodPost, srv.URL+"/api/v1/auth/tokens",
+		csrfToken, strings.NewReader(`{"name":"short","ttl_minutes":1}`), "application/json")
+	after := time.Now()
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create with TTL: want 201, got %d\n%s", resp.StatusCode, raw)
+	}
+
+	var body struct {
+		Token struct {
+			ExpiresAt string `json:"expires_at"`
+		} `json:"token"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatalf("decode TTL response: %v\n%s", err, raw)
+	}
+	if body.Token.ExpiresAt == "" {
+		t.Fatal("expires_at must be non-empty when ttl_minutes is set")
+	}
+	exp, err := time.Parse(time.RFC3339Nano, body.Token.ExpiresAt)
+	if err != nil {
+		// Also try plain RFC3339.
+		exp, err = time.Parse(time.RFC3339, body.Token.ExpiresAt)
+		if err != nil {
+			t.Fatalf("parse expires_at %q: %v", body.Token.ExpiresAt, err)
+		}
+	}
+	minExp := before.Add(50 * time.Second)
+	maxExp := after.Add(70 * time.Second)
+	if exp.Before(minExp) || exp.After(maxExp) {
+		t.Errorf("expires_at %v not in [%v, %v]", exp, minExp, maxExp)
+	}
+}
+
+// TestTokenEndpointsDisabled verifies that all three token endpoints return 409
+// auth_disabled when auth is not enabled.
+func TestTokenEndpointsDisabled(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "events.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	eng := situation.New(st, situation.Config{
+		Triggers:                  map[string]bool{},
+		QueueMaxItems:             500,
+		CollapseDuplicates:        true,
+		SituationMaxResponseBytes: 65536,
+	})
+	mgr, err := runtime.NewManager(st, runtimetest.NewFake(), runtime.ManagerConfig{
+		Admission:  config.Admission{},
+		VMDefaults: config.VMDefaults{},
+		Owner:      testOperator,
+		Templates:  map[string]runtime.Template{},
+		Host:       runtime.HostResources{TotalMemoryMiB: 8192, CPUCores: 4, StateDiskFreeMiB: 100 * 1024},
+	})
+	if err != nil {
+		t.Fatalf("create manager: %v", err)
+	}
+	t.Cleanup(func() { mgr.Close() })
+
+	srv := httptest.NewServer(api.New(st, eng, mgr, api.AuthConfig{Enabled: false}))
+	t.Cleanup(srv.Close)
+
+	probes := []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{http.MethodPost, "/api/v1/auth/tokens", `{"name":"x"}`},
+		{http.MethodGet, "/api/v1/auth/tokens", ""},
+		{http.MethodDelete, "/api/v1/auth/tokens/tok-00000000", ""},
+	}
+	for _, p := range probes {
+		var bodyReader io.Reader
+		if p.body != "" {
+			bodyReader = strings.NewReader(p.body)
+		}
+		req, _ := http.NewRequest(p.method, srv.URL+p.path, bodyReader)
+		if p.body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", p.method, p.path, err)
+		}
+		raw, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusConflict {
+			t.Errorf("%s %s: want 409, got %d\n%s", p.method, p.path, resp.StatusCode, raw)
+			continue
+		}
+		var e api.Error
+		if err := json.Unmarshal(raw, &e); err != nil {
+			t.Fatalf("decode error: %v\n%s", err, raw)
+		}
+		if e.Code != "auth_disabled" {
+			t.Errorf("%s %s: code = %q, want auth_disabled", p.method, p.path, e.Code)
+		}
+	}
+}

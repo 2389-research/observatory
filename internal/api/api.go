@@ -86,6 +86,9 @@ func New(st *store.Store, eng *situation.Engine, mgr *runtime.Manager, ac AuthCo
 		{"POST", "/auth/login", "auth", s.handleAuthLogin},
 		{"POST", "/auth/logout", "auth", s.handleAuthLogout},
 		{"GET", "/auth/session", "auth", s.handleAuthSession},
+		{"POST", "/auth/tokens", "auth", s.handleTokenCreate},
+		{"GET", "/auth/tokens", "auth", s.handleTokenList},
+		{"DELETE", "/auth/tokens/{id}", "auth", s.handleTokenRevoke},
 	}
 
 	s.features = map[string]bool{}

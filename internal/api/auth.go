@@ -409,6 +409,225 @@ func (s *Server) appendAuthEvent(r *http.Request, kind string, data map[string]a
 	return err
 }
 
+// handleTokenCreate handles POST /auth/tokens.
+func (s *Server) handleTokenCreate(w http.ResponseWriter, r *http.Request) {
+	if !s.auth.ac.Enabled {
+		writeError(w, http.StatusConflict, Error{
+			Code:      "auth_disabled",
+			Message:   "authentication is not required in this configuration; all requests run as local_operator",
+			Retryable: false,
+			Cause:     "auth_disabled",
+			Remediation: []Remediation{{
+				Action:    "get",
+				Params:    map[string]any{"path": basePath + "/auth/session"},
+				Rationale: "check the current identity",
+			}},
+		})
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+	var body struct {
+		Name       string `json:"name"`
+		TTLMinutes *int   `json:"ttl_minutes"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, Error{
+			Code:      "malformed_request",
+			Message:   "body must be {\"name\": ..., \"ttl_minutes\": ...}",
+			Retryable: false,
+			Cause:     "body_invalid",
+		})
+		return
+	}
+
+	// Validate name: required, max 128 bytes.
+	if body.Name == "" {
+		writeError(w, http.StatusBadRequest, Error{
+			Code:    "validation_failed",
+			Message: "name is required",
+			Cause:   "name_required",
+		})
+		return
+	}
+	if len(body.Name) > 128 {
+		writeError(w, http.StatusBadRequest, Error{
+			Code:    "validation_failed",
+			Message: "name must be 128 bytes or fewer",
+			Cause:   "name_too_long",
+			Remediation: []Remediation{{
+				Action:    "shorten_name",
+				Rationale: "token names are bounded to 128 bytes",
+			}},
+		})
+		return
+	}
+
+	// Owner comes from the authenticated identity — never from the request body.
+	id, ok := auth.IdentityFrom(r.Context())
+	if !ok {
+		writeError(w, http.StatusInternalServerError, Error{
+			Code:      "internal",
+			Message:   "no identity in context",
+			Retryable: false,
+			Cause:     "no_identity",
+		})
+		return
+	}
+
+	// ttl_minutes ≤ 0 or absent → no expiry.
+	var ttl time.Duration
+	if body.TTLMinutes != nil && *body.TTLMinutes > 0 {
+		ttl = time.Duration(*body.TTLMinutes) * time.Minute
+	}
+
+	secret, rec, err := s.auth.ac.Creds.CreateToken(body.Name, id.Owner, ttl)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, Error{
+			Code:      "internal",
+			Message:   "failed to create token",
+			Retryable: true,
+			Cause:     "storage_failure",
+		})
+		return
+	}
+
+	_ = s.appendAuthEvent(r, "auth.token_created", map[string]any{
+		"token_id": rec.ID,
+		"name":     rec.Name,
+		"owner":    rec.Owner,
+	})
+
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"token": map[string]any{
+			"id":         rec.ID,
+			"name":       rec.Name,
+			"owner":      rec.Owner,
+			"created_at": rec.CreatedAt,
+			"expires_at": rec.ExpiresAt,
+		},
+		"secret": secret,
+	})
+}
+
+// handleTokenList handles GET /auth/tokens.
+func (s *Server) handleTokenList(w http.ResponseWriter, r *http.Request) {
+	if !s.auth.ac.Enabled {
+		writeError(w, http.StatusConflict, Error{
+			Code:      "auth_disabled",
+			Message:   "authentication is not required in this configuration; all requests run as local_operator",
+			Retryable: false,
+			Cause:     "auth_disabled",
+			Remediation: []Remediation{{
+				Action:    "get",
+				Params:    map[string]any{"path": basePath + "/auth/session"},
+				Rationale: "check the current identity",
+			}},
+		})
+		return
+	}
+
+	records, err := s.auth.ac.Creds.ListTokens()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, Error{
+			Code:      "internal",
+			Message:   "failed to list tokens",
+			Retryable: true,
+			Cause:     "storage_failure",
+		})
+		return
+	}
+
+	// Build wire tokens — metadata only, never the secret or hash.
+	type wireToken struct {
+		ID        string `json:"id"`
+		Name      string `json:"name"`
+		Owner     string `json:"owner"`
+		CreatedAt string `json:"created_at"`
+		ExpiresAt string `json:"expires_at"`
+		RevokedAt string `json:"revoked_at"`
+	}
+	out := make([]wireToken, 0, len(records))
+	for _, rec := range records {
+		out = append(out, wireToken{
+			ID:        rec.ID,
+			Name:      rec.Name,
+			Owner:     rec.Owner,
+			CreatedAt: rec.CreatedAt,
+			ExpiresAt: rec.ExpiresAt,
+			RevokedAt: rec.RevokedAt,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"tokens": out})
+}
+
+// handleTokenRevoke handles DELETE /auth/tokens/{id}.
+func (s *Server) handleTokenRevoke(w http.ResponseWriter, r *http.Request) {
+	if !s.auth.ac.Enabled {
+		writeError(w, http.StatusConflict, Error{
+			Code:      "auth_disabled",
+			Message:   "authentication is not required in this configuration; all requests run as local_operator",
+			Retryable: false,
+			Cause:     "auth_disabled",
+			Remediation: []Remediation{{
+				Action:    "get",
+				Params:    map[string]any{"path": basePath + "/auth/session"},
+				Rationale: "check the current identity",
+			}},
+		})
+		return
+	}
+
+	tokenID := r.PathValue("id")
+	if tokenID == "" {
+		writeError(w, http.StatusBadRequest, Error{
+			Code:    "bad_request",
+			Message: "token id is required in the path",
+			Cause:   "id_missing",
+		})
+		return
+	}
+
+	id, ok := auth.IdentityFrom(r.Context())
+	if !ok {
+		writeError(w, http.StatusInternalServerError, Error{
+			Code:      "internal",
+			Message:   "no identity in context",
+			Retryable: false,
+			Cause:     "no_identity",
+		})
+		return
+	}
+
+	err := s.auth.ac.Creds.RevokeToken(tokenID)
+	if errors.Is(err, auth.ErrTokenNotFound) {
+		writeError(w, http.StatusNotFound, Error{
+			Code:      "not_found",
+			Message:   "token not found",
+			Retryable: false,
+			Cause:     "token_not_found",
+		})
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, Error{
+			Code:      "internal",
+			Message:   "failed to revoke token",
+			Retryable: true,
+			Cause:     "storage_failure",
+		})
+		return
+	}
+
+	_ = s.appendAuthEvent(r, "auth.token_revoked", map[string]any{
+		"token_id": tokenID,
+		"owner":    id.Owner,
+	})
+
+	writeJSON(w, http.StatusOK, map[string]any{"revoked": true})
+}
+
 func initAuthState(ac AuthConfig) authState {
 	return authState{
 		ac:         ac,
