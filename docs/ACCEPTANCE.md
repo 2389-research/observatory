@@ -18,6 +18,60 @@ Use a dedicated controlled network fixture for deterministic HTTP, HTTPS, DNS, p
 | AT-002 | R-01, R-11 | Change a runtime/image hash or make a privileged path writable by an ordinary account. Startup rejects the unsafe configuration. |
 | AT-003 | R-05, R-12 | Boot a guest missing a required sensor feature. Report the exact missing capability and refuse strict-observation launch. No false healthy state. |
 | AT-004 | R-01, R-11 | Boot a real jailed VM; inspect actual identity, cgroup, namespace, approved disks and socket ownership. Capture evidence from the host. |
+
+<!-- L0 M0 status notes (2026-09-01)
+
+AT-001: TESTED_PASS (partial — M0 scope only; doctor-gated launch admission completes in M1).
+  What M0 demonstrates:
+  - arch_kvm check reports EACCES honestly on aibox03 with `re-login for kvm group` remediation.
+    Test: internal/preflight/checks_linux_test.go:TestArchKVMHonest (linux, aibox03; PASS — verified
+    pre-kvm-group, EACCES branch accepted; both branches covered, test does not skip).
+  - Launch refusal names the failed preflight check per L0-R12: UnavailableError reason appends
+    "; preflight: <overall> (<first failing check ID>)" when a non-pass report exists.
+    Test: internal/preflight/preflight_test.go:TestReportSummaryFail (unit).
+  - internal/api integration: preflight block present in /host/status when runner wired.
+  Doctor-gated launch admission (full AT-001 flow: doctor runs + refuses launch + names check) is M1.
+
+AT-002: TESTED_PASS.
+  - Hash mismatch at startup: cmd/vmobsd/lock_startup_test.go:TestServeRefusesHashMismatch —
+    daemon startup returns error naming the mismatched subject when runtime.lock.json hash is wrong.
+  - Unit: internal/lock/lock_test.go:TestVerifyBinariesHashMismatch — flip one byte → exactly
+    one Mismatch naming the subject and carrying correct want/got values.
+  - Also: TestVerifyBinariesAbsentFile (absent binary → Mismatch with Got="absent"),
+    TestServeBothMismatchesListed (both fc+jailer mismatches listed in one error).
+
+AT-003: SPECIFIED.
+  Capability report exists (vmobs-guestd ProbeCapabilities, guest agent capabilities round-trip —
+  see tests in internal/guest). Strict-observation launch refusal when a required feature is missing
+  is M1/M2 work; no launch path exists yet. The guest_channel doctor check is permanently
+  not_implemented in M0 (TestGuestChannelAlwaysNotImplemented).
+
+AT-004: SPECIFIED (fixture implemented; gate run deferred pending scripts/aibox03/setup.sh).
+  Fixture: tests/integration/boot_test.go:TestM0Boot — four assertions: vsock handshake + identity
+  isolation, capability report (btf/fanotify/vsock/virtio_blk/virtio_net/cgroup_v2/ext4 Present),
+  independent disk ownership (per-VM uid stats, inodes distinct, socket uid), teardown (no leaks).
+  Evidence file: tests/integration/evidence/m0-boot-<hostname>.txt (does not exist yet).
+  Gate deferred: scripts/aibox03/setup.sh not yet run on aibox03 (password sudo — Doctor Biz handoff).
+  Gate command when ready: scripts/linux 'VMOBS_FIXTURE=1 go test ./tests/integration/ -v -timeout 600s'
+  Status flips to TESTED_PASS after the gate runs and evidence is committed.
+
+AT-009: SPECIFIED (fixture seeds partial evidence; execution deferred with the gate).
+  TestM0Boot boots two simultaneous VMs with distinct VM IDs, UIDs (20000/20001), CIDs (3/4),
+  and network namespaces — identity isolation is asserted at the vsock level. Full four-VM
+  simultaneous launch is M1 scope.
+
+AT-011: SPECIFIED (fixture seeds partial evidence; execution deferred with the gate).
+  TestM0Boot assertion 4 (teardown): stops VM A while VM B still runs, asserts B still answers ping,
+  then stops both and asserts no m0-* entries remain in the jail dir or netns. The independent
+  teardown seed is the first evidence for this row; broader multi-VM stop/delete testing is M1.
+
+AT-018: SPECIFIED (fixture seeds partial evidence; execution deferred with the gate).
+  TestM0Boot teardown asserts netns and jail dirs contain no m0-* entries after both VMs stop —
+  the seed assertion for leak detection. Repeat create/stop/delete cycles with baseline comparison
+  is M1 scope.
+
+-->
+
 | AT-005 | R-01, R-10 | Inject a failure after every provisioning side effect. Cleanup removes only owned resources and releases reservations or reports a retryable cleanup backlog. |
 | AT-006 | R-01, R-10 | Retry the same create request across a timeout. Exactly the original VM/operation is returned; a changed payload with the same key conflicts. |
 | AT-007 | R-01, R-05 | Verify user jobs cannot start before guestd readiness, workspace seeding, baseline creation and required sensor checks. |
