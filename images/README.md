@@ -52,7 +52,7 @@ Re-pinning: run the above two commands on the target host, update `BASE_IMAGE_RE
 apt-get -S <snapshot-timestamp> install ...
 ```
 
-`ca-certificates` is installed first via the live archive (needed to reach `snapshot.ubuntu.com` over TLS) — this is an acceptable deviation because the TLS certificate infrastructure is not part of the guest software stack; only `ca-certificates` itself comes from the live archive before we switch to the snapshot.
+`ca-certificates` is installed first via the live archive (needed to reach `snapshot.ubuntu.com` over TLS) — this is an acceptable deviation because the TLS certificate infrastructure is not part of the guest software stack; only `ca-certificates` itself comes from the live archive before we switch to the snapshot. The deviation is bounded to the software stack, not to the artifact: that step is unpinned, so `rootfs.ext4`'s sha256 can still move between builds (reproducibility caveat 5 below).
 
 ### Kernel source
 
