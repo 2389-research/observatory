@@ -1324,6 +1324,101 @@ func TestNotifyVMMExitRunningToStopped(t *testing.T) {
 	}
 }
 
+// TestNotifyVMMExitPausedToStopped verifies that a paused VM reporting a
+// graceful exit still reaches stopped with its compute reservation released.
+// §5.2 has no direct paused→stopped edge, so this rides the same
+// through-stopping path the running case uses; a paused VM holds its compute
+// until it goes terminal (AT-013), which is why the release is asserted and not
+// just the state.
+func TestNotifyVMMExitPausedToStopped(t *testing.T) {
+	st := openStoreForManager(t)
+	fk := runtimetest.NewFake()
+	mgr := newManager(t, st, fk)
+
+	vm, _, _, err := mgr.CreateVM(t.Context(), "local_operator", createReq("notify-paused-stopped"))
+	if err != nil {
+		t.Fatalf("CreateVM: %v", err)
+	}
+	mgr.Close() // wait for launch
+
+	paused, _, err := mgr.Action(t.Context(), vm.VMID, "pause", nil)
+	if err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	if paused.ObservedState != "paused" {
+		t.Fatalf("pre-condition: want paused, got %q", paused.ObservedState)
+	}
+
+	if err := mgr.NotifyVMMExit(t.Context(), vm.VMID, "clean shutdown while paused", true); err != nil {
+		t.Fatalf("NotifyVMMExit graceful: %v", err)
+	}
+
+	after, err := st.GetVM(t.Context(), vm.VMID)
+	if err != nil {
+		t.Fatalf("GetVM after graceful notify: %v", err)
+	}
+	if after.ObservedState != "stopped" {
+		t.Errorf("state after graceful exit from paused: want stopped, got %q", after.ObservedState)
+	}
+	res, err := st.GetReservation(t.Context(), vm.VMID)
+	if err != nil {
+		t.Fatalf("GetReservation: %v", err)
+	}
+	if !res.ComputeReleased {
+		t.Error("compute_released should be true once the VM stopped — a stopped VM holds no compute")
+	}
+}
+
+// TestNotifyVMMExitPausedToFailed verifies that a paused VM whose VMM exit was
+// not graceful reaches failed with the stage and reason recorded, and its
+// compute released. The failure stage is what tells an operator the VM died at
+// the VMM rather than during provisioning, so it is part of the contract.
+func TestNotifyVMMExitPausedToFailed(t *testing.T) {
+	st := openStoreForManager(t)
+	fk := runtimetest.NewFake()
+	mgr := newManager(t, st, fk)
+
+	vm, _, _, err := mgr.CreateVM(t.Context(), "local_operator", createReq("notify-paused-failed"))
+	if err != nil {
+		t.Fatalf("CreateVM: %v", err)
+	}
+	mgr.Close() // wait for launch
+
+	paused, _, err := mgr.Action(t.Context(), vm.VMID, "pause", nil)
+	if err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	if paused.ObservedState != "paused" {
+		t.Fatalf("pre-condition: want paused, got %q", paused.ObservedState)
+	}
+
+	reason := "vmm_exited observed by runner: pid gone while paused"
+	if err := mgr.NotifyVMMExit(t.Context(), vm.VMID, reason, false); err != nil {
+		t.Fatalf("NotifyVMMExit non-graceful: %v", err)
+	}
+
+	after, err := st.GetVM(t.Context(), vm.VMID)
+	if err != nil {
+		t.Fatalf("GetVM after non-graceful notify: %v", err)
+	}
+	if after.ObservedState != "failed" {
+		t.Errorf("state after non-graceful exit from paused: want failed, got %q", after.ObservedState)
+	}
+	if after.FailureStage == nil || *after.FailureStage != "vmm_exit" {
+		t.Errorf("failure_stage: want vmm_exit, got %v", after.FailureStage)
+	}
+	if after.FailureReason == nil || *after.FailureReason != reason {
+		t.Errorf("failure_reason: want %q, got %v", reason, after.FailureReason)
+	}
+	res, err := st.GetReservation(t.Context(), vm.VMID)
+	if err != nil {
+		t.Fatalf("GetReservation: %v", err)
+	}
+	if !res.ComputeReleased {
+		t.Error("compute_released should be true once the VM failed — a failed VM holds no compute")
+	}
+}
+
 // TestNotifyVMMExitSecondCallNoOp verifies that a second NotifyVMMExit on an
 // already-terminal VM returns nil and does not change state.
 func TestNotifyVMMExitSecondCallNoOp(t *testing.T) {
