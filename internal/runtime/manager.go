@@ -170,9 +170,11 @@ func (m *Manager) Close() {
 	m.cancel()
 }
 
-// operationSlack is the non-grace part of a lifecycle mutation's budget: the
+// operationSlack is the non-grace part of a stop-shaped mutation's budget: the
 // fixed timeouts the real (jailer) runtime can burn around the graceful poll,
-// worst case, plus room for the store writes that record the outcome.
+// worst case, plus room for the store writes that record the outcome. Every
+// row below is a step of the stop path, so this is the wrong budget for
+// anything that is not one — a start action derives its own from launchBudget.
 //
 //	runner ctl shutdown_guest:  5s dial + grace + 5s reply ceiling  = G + 10s
 //	graceful exit poll:         grace + 5s                          = G +  5s
@@ -199,7 +201,10 @@ func (m *Manager) Close() {
 // worst case grows twice as fast as the budget does.
 const operationSlack = 120 * time.Second
 
-// OperationContext derives the context a lifecycle mutation runs on.
+// OperationContext derives the context a stop-shaped lifecycle mutation runs
+// on: stop, restart, and the delete path that stops first. A start action takes
+// the same shape from detachedContext with launchBudget instead, because its
+// worst case is file IO rather than the guest's patience.
 //
 // A lifecycle mutation has host side effects — signals delivered, a chroot
 // released, a reservation freed — and the store writes that record them. Once

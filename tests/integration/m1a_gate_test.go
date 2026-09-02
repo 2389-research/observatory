@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -135,8 +136,10 @@ type m1aDaemon struct {
 	stateDir   string
 	runtimeDir string
 	cancel     context.CancelFunc
-	// label names this daemon in log lines and is the post-mortem subdirectory,
-	// so a rescue triggered from a VM teardown lands beside the daemon's own logs.
+	// label is the post-mortem subdirectory this daemon's rescued files land in
+	// (its only reader is the savePostmortem call in disposeVM), so a rescue
+	// triggered from a VM teardown lands beside the daemon's own logs. Log lines
+	// name the daemon through startDaemon's own label argument, not this field.
 	label string
 
 	// vmMu guards createdVMs, the vm_ids this daemon has created via POST /vms.
@@ -866,10 +869,13 @@ func (d *m1aDaemon) disposeSubtestVMs(t *testing.T) {
 		d.vmMu.Lock()
 		ids := append([]string(nil), d.createdVMs[mark:]...)
 		d.vmMu.Unlock()
-		// One deadline for the whole loop, for the reason the daemon teardown gives:
-		// a wedged daemon costs disposeVM its full per-VM timeout, and six of those in
-		// one cleanup can outrun go test's own timeout, whose panic aborts the binary
-		// before the remaining cleanups run.
+		// A pre-check before each iteration, not a cap on the loop: disposeVM
+		// carries its own 60s context, so the last VM can start at 89s and run to
+		// 149s. It exists for the reason the daemon teardown gives — a wedged
+		// daemon costs disposeVM its full per-VM timeout, and six of those in one
+		// cleanup can outrun go test's own timeout, whose panic aborts the binary
+		// before the remaining cleanups run — and it bounds the pile-up rather
+		// than the last delete.
 		deadline := time.Now().Add(90 * time.Second)
 		for i, id := range ids {
 			if time.Now().After(deadline) {
@@ -999,14 +1005,22 @@ func firecrackerProcCount(t *testing.T) int {
 	if err != nil {
 		t.Fatalf("leak observable firecracker processes: %v — a count that cannot read /proc would report 0, which is indistinguishable from no leak", err)
 	}
-	if unreadable > 0 {
-		// Not fatal: a host normally carries a few processes whose /proc entries
-		// this user may not read. Logged because "fc_procs=0, unreadable=<large>"
-		// is a blind count, and the run's log should say so rather than imply zero.
+	// Not fatal: a host normally carries a few processes whose /proc entries this
+	// user may not read. Logged because "fc_procs=0, unreadable=<large>" is a
+	// blind count, and the run's log should say so rather than imply zero.
+	//
+	// Only when the number changes. at018 recaptures the baseline on a 500ms
+	// poll for up to 60s, and on a hidepid host the same line would otherwise be
+	// written about 120 times per poll, burying the counts it sits between.
+	if prev := lastUnreadablePids.Swap(int64(unreadable)); unreadable > 0 && int64(unreadable) != prev {
 		t.Logf("firecrackerProcCount: %d pid(s) unreadable; count=%d is a floor, not a total", unreadable, count)
 	}
 	return count
 }
+
+// lastUnreadablePids is the unreadable-pid count firecrackerProcCount last
+// logged. A steady count is not news; only a change is.
+var lastUnreadablePids atomic.Int64
 
 // stateDirEntries counts entries in stateDir/vms (number of VM state dirs).
 func stateDirEntries(t *testing.T, stateDir string) int {
