@@ -67,7 +67,7 @@ func TestNetArgvConstruction(t *testing.T) {
 	id := "vm-test-001"
 	cidr := "10.0.0.0/30"
 	ns := "vmobs-" + id
-	veth := "veth-" + id
+	veth := "veth-f1d5718dac" // sha256("vm-test-001")[:10], pinned — see network.VethName
 
 	setup := privd.NetSetupCommands(id, cidr)
 	teardown := privd.NetTeardownCommands(id)
@@ -157,7 +157,7 @@ func TestNetArgvConstruction(t *testing.T) {
 func TestNetProbeCommands(t *testing.T) {
 	id := "vm-probe-001"
 	ns := "vmobs-" + id
-	veth := "veth-" + id
+	veth := "veth-1fed5eb0b3" // sha256("vm-probe-001")[:10], pinned — see network.VethName
 
 	probes := privd.NetProbeCommands(id)
 

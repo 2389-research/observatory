@@ -10,10 +10,14 @@ RUN_BASE=/run/vmobs-fixture
 die() { echo "vmobs-root-helper: $*" >&2; exit 1; }
 
 valid_id() {
+  # Matches privd's ValidVMID (internal/privd/proto.go): charset [a-z0-9-],
+  # first char [a-z0-9], max 63 chars total. The case pattern below enforces
+  # charset + leading char; length is checked separately since `case` cannot
+  # bound repetition counts.
   case "$1" in
-    ''|-*|*[!a-z0-9-]*) die "invalid id '$1' (want ^[a-z0-9][a-z0-9-]{0,23}$)";;
+    ''|-*|*[!a-z0-9-]*) die "invalid id '$1' (want ^[a-z0-9][a-z0-9-]{0,62}$)";;
   esac
-  [ ${#1} -le 24 ] || die "id too long"
+  [ ${#1} -le 63 ] || die "id too long (want ^[a-z0-9][a-z0-9-]{0,62}$)"
 }
 
 valid_uid() {
@@ -36,12 +40,16 @@ case "$cmd" in
 net-setup)
   id="$1"; cidr="$2"; valid_id "$id"; valid_cidr "$cidr"
   ns="vmobs-$id"
+  # veth names must fit the kernel's IFNAMSIZ limit (15 usable chars); real
+  # ids are UUIDs (36 chars), so "veth-$id" would overflow it. Derive a
+  # fixed-length digest name instead — matches internal/network.VethName.
+  veth="veth-$(printf '%s' "$id" | sha256sum | cut -c1-10)"
   ip netns add "$ns"
   ip netns exec "$ns" ip link set lo up
   ip netns exec "$ns" ip tuntap add dev tap0 mode tap
   ip netns exec "$ns" ip link set tap0 up
-  ip link add "veth-$id" type veth peer name eth-up netns "$ns"
-  ip link set "veth-$id" up
+  ip link add "$veth" type veth peer name eth-up netns "$ns"
+  ip link set "$veth" up
   ip netns exec "$ns" ip link set eth-up up
   # Default deny inside the namespace: no forwarding, drop all routed traffic.
   ip netns exec "$ns" nft -f - <<EOF
@@ -54,7 +62,8 @@ EOF
   ;;
 net-teardown)
   id="$1"; valid_id "$id"
-  ip link del "veth-$id" 2>/dev/null || true
+  veth="veth-$(printf '%s' "$id" | sha256sum | cut -c1-10)"
+  ip link del "$veth" 2>/dev/null || true
   ip netns del "vmobs-$id" 2>/dev/null || true
   ;;
 jail-start)
