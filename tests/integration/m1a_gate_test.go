@@ -396,12 +396,22 @@ performance_targets:
 		//	stop, force_stop, delete, create   Manager.OperationContext:
 		//	                                   stop_grace_seconds + operationSlack
 		//	                                   = 30 + 120                      150s
+		//	  ...and then failing              + recoveryBudget = 150 + 75     225s
 		//	start                              Manager.launchBudget            240s
+		//	  ...and then failing              + recoveryBudget = 240 + 75     315s
 		//
-		// 300s clears the larger of the two. Both constants live in
+		// The failing rows are the ones easy to miss. recoveryContext is derived
+		// with context.WithoutCancel, so it does not share the budget that just ran
+		// out: a launch that burns all 240s and then fails starts a fresh 75s for
+		// failLaunch, the cleanup ForceStop and the operation read-back. A client
+		// priced at the 240s alone gives up 75s early on precisely the request whose
+		// answer matters most -- and on a host whose staging IO drops below the
+		// assumed floor, that is the request that happens.
+		//
+		// 330s clears the largest row. All three constants live in
 		// internal/runtime/manager.go with their derivations; re-derive this whenever
-		// either moves, or whenever stop_grace_seconds does.
-		httpClient: &http.Client{Timeout: 300 * time.Second},
+		// any of them moves, or whenever stop_grace_seconds does.
+		httpClient: &http.Client{Timeout: 330 * time.Second},
 		cmd:        cmd,
 		configPath: configPath,
 		stateDir:   stateDir,
@@ -902,7 +912,12 @@ func (d *m1aDaemon) disposeVM(t *testing.T, vmID string) {
 	if t.Failed() {
 		savePostmortem(t, d.label, vmRunnerFiles(d.stateDir, vmID))
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	// The daemon gives a force delete Manager.OperationContext (150s) and, when it
+	// fails, a fresh recoveryBudget on top -- 225s. Teardown runs after a red
+	// subtest, which is when a delete is most likely to be slow, so a client that
+	// gives up first abandons a VM the daemon was still cleaning up and hands
+	// AT-018 a leak the test caused. 240s clears the daemon.
+	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, d.baseURL+"/vms/"+vmID+"?force=true", nil)
 	if err != nil {
