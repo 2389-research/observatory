@@ -213,7 +213,7 @@ func TestServeHTTPS(t *testing.T) {
 	plainURL := fmt.Sprintf("http://%s/api/v1/meta", addr)
 	plainResp, plainErr := http.DefaultClient.Get(plainURL)
 	if plainErr == nil {
-		plainResp.Body.Close()
+		drainAndClose(t, plainResp)
 		if plainResp.StatusCode >= 200 && plainResp.StatusCode < 300 {
 			t.Errorf("plain HTTP to TLS listener: want non-2xx or error, got %d", plainResp.StatusCode)
 		}
@@ -254,6 +254,11 @@ func TestServeHTTPS(t *testing.T) {
 // Dialing raw first makes its acceptance provable: the accept queue is FIFO, so
 // a completed handshake on the later connection means the earlier one has been
 // accepted and tracked.
+//
+// Expected stderr on every run: raw's handshake timing out logs "http: TLS
+// handshake error from ...: read tcp ...: i/o timeout" -- serve builds
+// http.Server internally with no ErrorLog hook, so the test cannot capture or
+// assert that line; it is the timeout firing as designed, not a leak.
 func TestShutdownOutlastsParkedConnection(t *testing.T) {
 	dir := t.TempDir()
 	cfg, _ := httpsConfig(t, dir)
@@ -297,11 +302,19 @@ func TestShutdownOutlastsParkedConnection(t *testing.T) {
 	}
 	defer parked.Close()
 
+	// net/http's StateNew reclaim compares whole seconds against a 5s
+	// threshold, so it cannot fire before ~5.0s; observed shutdowns here land
+	// at 5.05-5.38s. A 4s floor is a safe margin below that, not a tight one --
+	// it catches a shutdown that returned fast because the connections never
+	// actually parked.
+	start := time.Now()
 	cancel()
 	select {
 	case err := <-errCh:
 		if err != nil {
 			t.Errorf("serve returned %v shutting down with parked connections", err)
+		} else if d := time.Since(start); d < 4*time.Second {
+			t.Errorf("shutdown returned in %s — the parked connections did not park", d)
 		}
 	case <-time.After(shutdownWait):
 		t.Fatal("daemon did not shut down")
