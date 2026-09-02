@@ -27,7 +27,7 @@ const m1aPrivdSock = "/run/vmobs/privd.sock"
 
 // m1aRuntimeRoot is the primary gate daemon's Paths.Runtime. It must be exactly
 // /srv/vmobs: the daemon derives StageRoot = Paths.Runtime + "/stage" and
-// JailBase = Paths.Runtime + "/jail" (cmd/vmobsd/runtime_linux.go:34-35), and
+// JailBase = Paths.Runtime + "/jail" (config.Paths.StageRoot/JailBase), and
 // JailBase is load-bearing — the runner's --uds flag and the stop path both build
 // <JailBase>/firecracker/<id>/root/v.sock from it (internal/jailer/launch.go:179,196;
 // internal/jailer/stop.go:368) and dial it host-side. privd creates the real chroot
@@ -52,6 +52,22 @@ const m1aJailBase = m1aRuntimeRoot + "/jail"
 // m1aPrivdLabel is checked in vmobsd's AT-001 refusal body.
 // The jailer adapter names the failing preflight check ID: "guest_channel".
 const m1aPrivdLabel = "guest_channel"
+
+// m1aBadPrivdSocket is the AT-001 daemon's privileged_socket: a path that cannot
+// exist, so the guest_channel dial must fail. The refusal body has to name it —
+// that is the proof the daemon actually reached out and was refused.
+const m1aBadPrivdSocket = "/nonexistent/privd.sock"
+
+// m1aPrivdDialFailure is the guest_channel dial-branch summary
+// (internal/preflight/checks_linux.go). AT-001 requires this branch and not the
+// not_configured branch: a daemon that never learned its socket path would fail
+// too, but it would prove nothing about privd being unreachable.
+const m1aPrivdDialFailure = "cannot reach privd socket"
+
+// m1aPrivdNotConfigured is the guest_channel not_configured-branch wording. Its
+// presence in an AT-001 refusal means the daemon never dialed anything, so the
+// subtest would be vacuous.
+const m1aPrivdNotConfigured = "not configured"
 
 // m1aGateEnv is the guard env — the same one TestM0Boot uses.
 // We inherit the full set of gateSkipChecks from boot_test.go via the shared package.
@@ -961,7 +977,7 @@ paths:
   runtime: %q
   approved_templates: %q
   runtime_lock: %q
-  privileged_socket: "/nonexistent/privd.sock"
+  privileged_socket: %q
 runtime:
   mode: firecracker
   lock_file: %q
@@ -1063,6 +1079,7 @@ performance_targets:
 			badRuntimeDir,
 			filepath.Join(badStateDir, "templates"),
 			badLockPath,
+			m1aBadPrivdSocket,
 			badLockPath,
 			badDB,
 		)
@@ -1119,7 +1136,7 @@ performance_targets:
 		}
 
 		// POST /vms must fail with 501 missing_capability / cause runtime_unavailable.
-		// The reason must name "guest_channel".
+		// The reason must name the unreachable socket the daemon actually dialed.
 		resp, err := badClient.Post(badBase+"/vms", "application/json",
 			bytes.NewBufferString(`{"name":"at001-test","template_id":"standard","vcpu_count":1,"memory_mib":512,"root_disk_mib":8192,"workspace_disk_mib":64}`))
 		if err != nil {
@@ -1149,14 +1166,36 @@ performance_targets:
 				msg, reason, m1aPrivdLabel)
 		}
 
+		// The refusal must come from the dial branch: the daemon read its config,
+		// reached for the socket, and was refused. A refusal that only says
+		// "guest_channel" would also be produced by a daemon that never dialed at
+		// all, which is what shipped before the preflight wiring fix.
+		dialFailureFound := strings.Contains(msg, m1aPrivdDialFailure) || strings.Contains(reason, m1aPrivdDialFailure)
+		if !dialFailureFound {
+			t.Errorf("AT-001: neither message %q nor details.reason %q contains %q; the daemon did not dial privd",
+				msg, reason, m1aPrivdDialFailure)
+		}
+		socketNamed := strings.Contains(msg, m1aBadPrivdSocket) || strings.Contains(reason, m1aBadPrivdSocket)
+		if !socketNamed {
+			t.Errorf("AT-001: neither message %q nor details.reason %q names the configured socket %q",
+				msg, reason, m1aBadPrivdSocket)
+		}
+		notConfiguredFound := strings.Contains(msg, m1aPrivdNotConfigured) || strings.Contains(reason, m1aPrivdNotConfigured)
+		if notConfiguredFound {
+			t.Errorf("AT-001: refusal says %q (message %q, details.reason %q); the daemon never received its privd socket and stage root",
+				m1aPrivdNotConfigured, msg, reason)
+		}
+
 		// Token must not appear anywhere in the error body.
 		assertNoToken(t, respBody)
 
 		badCancel() // shut the bad daemon down promptly
 
 		evidenceSubtest(t, &evidence, "2_at001_privd_refusal", fmt.Sprintf(
-			"POST /vms on bad-privd daemon: status=%d cause=%q message=%q details.reason=%q guest_channel_found=%v",
-			resp.StatusCode, cause, msg, reason, guestChannelFound,
+			"POST /vms on bad-privd daemon: status=%d cause=%q message=%q details.reason=%q "+
+				"guest_channel_found=%v dial_failure_found=%v socket_named=%v not_configured_found=%v",
+			resp.StatusCode, cause, msg, reason,
+			guestChannelFound, dialFailureFound, socketNamed, notConfiguredFound,
 		))
 	})
 
