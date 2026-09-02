@@ -90,3 +90,4 @@ The C toolchain (gcc, binutils) comes from the pinned `ubuntu:24.04` container's
 2. **APT snapshot**: rootfs packages are frozen at `APT_SNAPSHOT`. A newer snapshot will produce different package versions and a different `rootfs.ext4` sha256.
 3. **Kernel sha256**: kernel.org source tarball sha256 is pinned in `runtime.lock.json`. The tarball is immutable for a given version.
 4. **Build toolchain** (kernel only): not pinned beyond the docker image digest. Same image, same gcc version; different image, potentially different output.
+5. **Live apt bootstrap** (rootfs only): `images/rootfs/build.sh:88-90` runs a live `apt-get update` and installs `ca-certificates` before switching to the pinned apt snapshot, because reaching `snapshot.ubuntu.com` needs TLS first. That step is not pinned, so `rootfs.ext4`'s sha256 can move between builds for reasons unrelated to any input we control. Not fixed in this rebuild; fixing the bootstrap is M1b work.

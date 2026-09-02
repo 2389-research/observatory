@@ -31,14 +31,25 @@ type Agent struct {
 
 	// PoweroffFunc is called after the agent sends shutdown_ack. Tests override
 	// this to avoid actually powering off the machine. Production default execs
-	// "systemctl poweroff". Must not be nil.
+	// "systemctl reboot", not poweroff — see defaultPoweroff below for why.
+	// Must not be nil.
 	PoweroffFunc func()
 }
 
-// defaultPoweroff is the production implementation: exec systemctl poweroff.
+// defaultPoweroff is the production implementation. It runs "systemctl
+// reboot", not poweroff, despite the name — this guest has no working
+// poweroff path. Firecracker v1.16.1 hands it ACPI tables that advertise only
+// S0, never S5 (soft-off), so "systemctl poweroff" runs a complete, clean
+// systemd shutdown and then halts: no power-off handler is registered, so the
+// vCPU parks in HLT and the VMM never exits. No grace period fixes that.
+// Firecracker cannot reboot a guest, so a guest-initiated restart is the only
+// exit door that exists: reboot=k (boot args) makes the kernel write the
+// i8042 reset byte directly, which Firecracker catches and exits on. So this
+// is the power-off path, not a restart — PoweroffFunc keeps its name because
+// it describes what happens to the VM, not the mechanism.
 func defaultPoweroff() {
-	if err := exec.Command("systemctl", "poweroff").Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "guestd: poweroff exec failed: %v\n", err)
+	if err := exec.Command("systemctl", "reboot").Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "guestd: systemctl reboot failed: %v\n", err)
 	}
 }
 
