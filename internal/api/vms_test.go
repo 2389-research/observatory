@@ -621,6 +621,28 @@ func TestVMActionUnknownAction(t *testing.T) {
 	requireTeaching(t, e, "malformed_request")
 }
 
+// TestVMActionStopWithRevisionSucceeds: the wire shape every stop takes —
+// GET for the revision, then POST the stop action pinned to it. The pin is
+// spent on the running→stopping transition; re-spending it on the stopped
+// transition answered 409 revision_mismatch for a VM that had really stopped.
+func TestVMActionStopWithRevisionSucceeds(t *testing.T) {
+	srv, _, fake := newTemplateServer(t)
+	vmID := createRunningVM(t, srv.URL, fake)
+
+	var vm map[string]any
+	getJSON(t, srv.URL+"/api/v1/vms/"+vmID, http.StatusOK, &vm)
+
+	doRequest(t, http.MethodPost, srv.URL+"/api/v1/vms/"+vmID+"/actions",
+		map[string]any{"action": "stop", "expected_revision": vm["revision"]},
+		http.StatusOK, nil)
+
+	var after map[string]any
+	getJSON(t, srv.URL+"/api/v1/vms/"+vmID, http.StatusOK, &after)
+	if state, _ := after["observed_state"].(string); state != "stopped" {
+		t.Errorf("observed_state after stop = %q, want stopped", state)
+	}
+}
+
 // --- delete ---
 
 func TestDeleteVMNotFound(t *testing.T) {

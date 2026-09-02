@@ -415,6 +415,73 @@ func TestManagerStopRecordsGracefulVsForced(t *testing.T) {
 	}
 }
 
+// TestManagerStopSpendsRevisionPinOnce: a stop carrying the caller's revision
+// pin must succeed. The pin belongs to the first transition (running→stopping);
+// once that transition has bumped the revision, re-checking the same pin on the
+// stopped transition can only ever fail. Every stop issued over HTTP carries a
+// pin (internal/api/vms.go), so a double-spend turns a VM that really stopped
+// into a 409 revision_mismatch and a failed operation.
+func TestManagerStopSpendsRevisionPinOnce(t *testing.T) {
+	cases := []struct {
+		action string
+		reason string
+	}{
+		{"stop", "graceful_stop"},
+		{"force_stop", "forced_stop"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.action, func(t *testing.T) {
+			st := openStoreForManager(t)
+			fk := runtimetest.NewFake()
+			mgr := newManager(t, st, fk)
+
+			vm, _, _, err := mgr.CreateVM(t.Context(), "local_operator", createReq(tc.action+"-pinned"))
+			if err != nil {
+				t.Fatalf("CreateVM: %v", err)
+			}
+			mgr.Close() // drain the launch goroutine so the VM is settled in running
+
+			// The caller reads the current revision, then pins it — exactly what
+			// GET /vms/{id} followed by POST /vms/{id}/actions does.
+			current, err := st.GetVM(t.Context(), vm.VMID)
+			if err != nil {
+				t.Fatalf("GetVM: %v", err)
+			}
+			rev := current.Revision
+
+			stopped, op, err := mgr.Action(t.Context(), vm.VMID, tc.action, &rev)
+			if err != nil {
+				t.Fatalf("%s pinned at revision %d: %v", tc.action, rev, err)
+			}
+			if stopped.ObservedState != "stopped" {
+				t.Errorf("state = %q, want stopped", stopped.ObservedState)
+			}
+			if op == nil {
+				t.Fatalf("%s returned no operation", tc.action)
+			}
+			if op.State != "succeeded" {
+				t.Errorf("operation state = %q, want succeeded (error: %v)", op.State, op.ErrorMessage)
+			}
+
+			evts, err := queryEvents(t, st, "vm.state_changed", 20)
+			if err != nil {
+				t.Fatalf("query events: %v", err)
+			}
+			found := false
+			for _, e := range evts {
+				to, _ := e.Data["to"].(string)
+				reason, _ := e.Data["reason"].(string)
+				if to == "stopped" && reason == tc.reason {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("no vm.state_changed event with to=stopped reason=%s", tc.reason)
+			}
+		})
+	}
+}
+
 func TestManagerForceStopFromPaused(t *testing.T) {
 	// §5.2: force-stop from paused must not wait for guest cooperation.
 	st := openStoreForManager(t)

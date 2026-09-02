@@ -508,6 +508,16 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 		releaseC bool
 	)
 
+	// The caller's revision pin is an optimistic-concurrency precondition, and a
+	// precondition is checked once: on the first transition this action makes.
+	// Actions that pass through an intermediate state (stop, force_stop →
+	// stopping) hand that first transition the pin and clear tailRevision, so the
+	// tail transition below runs unpinned — the store still validates from→to.
+	// Re-pinning the tail to the bumped revision would fail every time; re-pinning
+	// to a freshly read one would re-open a race against anything that
+	// legitimately touches the VM while rt.Stop runs.
+	tailRevision := expectedRevision
+
 	switch action {
 	case "start":
 		if vm.ObservedState != "stopped" {
@@ -590,6 +600,7 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 			}); err != nil {
 				return m.failAction(ctx, vmID, opID, action, err)
 			}
+			tailRevision = nil // pin spent on running/paused→stopping
 		}
 		forced, err := m.rt.Stop(ctx, vmID, grace)
 		if err != nil {
@@ -619,6 +630,7 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 			}); err != nil {
 				return m.failAction(ctx, vmID, opID, action, err)
 			}
+			tailRevision = nil // pin spent on running/paused→stopping
 		}
 		if err := m.rt.ForceStop(ctx, vmID); err != nil {
 			return m.failAction(ctx, vmID, opID, action, err)
@@ -628,7 +640,7 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 
 	updVM, err := m.st.TransitionVM(ctx, store.TransitionInput{
 		VMID:             vmID,
-		ExpectedRevision: expectedRevision,
+		ExpectedRevision: tailRevision,
 		To:               newState,
 		Reason:           reason,
 		OperationID:      opID,
