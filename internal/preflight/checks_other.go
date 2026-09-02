@@ -10,6 +10,18 @@ import (
 	"syscall"
 )
 
+// guestChannelCheck is not_implemented on non-Linux (vsock + privd require Linux).
+func guestChannelCheck(_ Config) Check {
+	return Check{
+		ID:      "guest_channel",
+		Status:  StatusNotImplemented,
+		Summary: "guest channel not implemented on non-Linux (vsock + privd require Linux/KVM)",
+		Evidence: []string{
+			fmt.Sprintf("GOOS=%s: guest_channel requires Linux", runtime.GOOS),
+		},
+	}
+}
+
 // checkArchKVM fails honestly on non-Linux hosts: KVM requires Linux.
 func (r *Runner) checkArchKVM() Check {
 	return Check{

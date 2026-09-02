@@ -1,5 +1,5 @@
-// ABOUTME: Adapter implements runtime.Runtime via the §5.3 launch transaction.
-// ABOUTME: One-at-a-time launches (launch mutex); Task 11 adds Stop/ForceStop/Reconcile.
+// ABOUTME: Adapter implements runtime.Runtime via the §5.3 launch transaction and lifecycle ops.
+// ABOUTME: One-at-a-time launches (launch mutex); Stop/ForceStop/Release/Reconcile in stop.go.
 package jailer
 
 import (
@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/2389-research/observatory-v2/internal/network"
 	"github.com/2389-research/observatory-v2/internal/preflight"
@@ -35,6 +34,10 @@ type Config struct {
 	RunnerBin     string // absolute path to the vmobs-runner binary
 	RepoImagesDir string // directory containing vmlinux and rootfs.ext4
 	LockPath      string // path to runtime.lock.json
+
+	// PrivdSocket is the path to the vmobs-privd unix socket. Used by the
+	// guest_channel preflight check (connect + close with a 1s timeout).
+	PrivdSocket string
 
 	JailUIDBase int    // UID = JailUIDBase + Slot
 	JailGID     int    // shared GID for all jail processes
@@ -76,16 +79,23 @@ func New(cfg Config, pc privdClient) (*Adapter, error) {
 }
 
 // Availability checks whether the host can launch a VM right now.
-// Delegates to the Preflight func; Task 11 adds full doctor-gated logic.
+// AT-001: the first check with Status=="fail" becomes the UnavailableError reason,
+// formatted as "<check.ID>: <check.Summary>" so the operator knows exactly what failed.
 func (a *Adapter) Availability(ctx context.Context) error {
 	if a.cfg.Preflight == nil {
 		return nil
 	}
 	rep := a.cfg.Preflight(ctx, false)
-	if rep.Overall == preflight.StatusFail {
-		return &runtime.UnavailableError{Reason: "preflight failed: " + rep.Summary()}
+	if rep.Overall != preflight.StatusFail {
+		return nil
 	}
-	return nil
+	for _, c := range rep.Checks {
+		if c.Status == preflight.StatusFail {
+			return &runtime.UnavailableError{Reason: c.ID + ": " + c.Summary}
+		}
+	}
+	// No individual fail check found (shouldn't happen if Overall=fail) — use summary.
+	return &runtime.UnavailableError{Reason: "preflight failed: " + rep.Summary()}
 }
 
 // Pause returns a typed error: VMM pause is not supported in M1a.
@@ -99,16 +109,6 @@ func (a *Adapter) Resume(_ context.Context, _ string) error {
 	return &runtime.UnavailableError{Reason: "resume not supported in M1a (paired with Pause)"}
 }
 
-// Stop is not implemented until Task 11.
-// Returns a typed error — never a fake success.
-func (a *Adapter) Stop(_ context.Context, _ string, _ time.Duration) (bool, error) {
-	return false, &runtime.UnavailableError{Reason: "Stop not implemented until Task 11"}
-}
-
-// ForceStop is not implemented until Task 11.
-func (a *Adapter) ForceStop(_ context.Context, _ string) error {
-	return &runtime.UnavailableError{Reason: "ForceStop not implemented until Task 11"}
-}
-
-// Note: Launch is implemented in launch.go (//go:build linux).
-// The runtime.Runtime compile-time check lives there.
+// Note: Stop, ForceStop, Release, and Reconcile are implemented in stop.go (//go:build linux).
+// Launch is in launch.go (//go:build linux). The runtime.Runtime compile-time check lives there.
+// Non-linux stubs for Stop/ForceStop/Release live in stop_other.go.

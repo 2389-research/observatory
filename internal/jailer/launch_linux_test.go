@@ -308,10 +308,13 @@ func makeTestImagesDir(t *testing.T) (imagesDir, lockPath string) {
 
 // guestdServer serves a guestd-style handshake on a UDS path, reading the capability token
 // from tokenFile before accepting each connection so it matches the adapter-generated token.
+// If poweroffFunc is non-nil it is called when the agent receives a shutdown command (simulating
+// the guest powering off). Nil → default no-op (test guestd never shuts down).
 type guestdServer struct {
-	tokenFile string
-	vmID      string
-	bootID    string
+	tokenFile    string
+	vmID         string
+	bootID       string
+	poweroffFunc func() // nil = no-op
 }
 
 func (g *guestdServer) serve(ctx context.Context, ln net.Listener) {
@@ -377,8 +380,13 @@ func (g *guestdServer) handleConn(ctx context.Context, conn net.Conn) {
 		Features:      []proto.Feature{{ID: "btf", Present: true}},
 	}
 	agent := guest.NewAgent(cfg, manifest)
-	// We need to stop calling systemctl poweroff in tests.
-	agent.PoweroffFunc = func() {} // no-op in test
+	// Use the caller's poweroff func if provided; default to no-op so the test guestd
+	// never actually powers off the test machine.
+	if g.poweroffFunc != nil {
+		agent.PoweroffFunc = g.poweroffFunc
+	} else {
+		agent.PoweroffFunc = func() {} // no-op in test
+	}
 
 	// Wrap the already-connected conn as a single-connection listener.
 	scl := &singleConnListener{conn: conn, ch: make(chan struct{})}
@@ -469,7 +477,7 @@ func TestLaunchTransactionAgainstFakePrivd(t *testing.T) {
 		guestLn.Close()
 	})
 
-	gs := &guestdServer{tokenFile: tokenFile, vmID: vmID, bootID: bootID}
+	gs := &guestdServer{tokenFile: tokenFile, vmID: vmID, bootID: bootID, poweroffFunc: nil}
 	go gs.serve(agentCtx, guestLn)
 
 	// Build a simple network allocator (no host routes to exclude in the test).

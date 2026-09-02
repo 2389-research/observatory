@@ -53,6 +53,14 @@ type Config struct {
 	ProcRoot    string     // root for /proc reads; defaults to "/proc" if empty
 	APIMode     string     // "loopback_only" or "https"
 	RequireAuth bool       // from config.Auth.RequireAuthentication
+
+	// PrivdSocket is the unix socket path for vmobs-privd. Empty → guest_channel fails.
+	// On Linux, the guest_channel check connects (1s timeout) + closes to verify reachability.
+	PrivdSocket string
+
+	// StageRoot is the staging directory root. Empty → guest_channel fails.
+	// On Linux, stat'd for existence and write access.
+	StageRoot string
 }
 
 // Runner holds pre-resolved config and runs checks on demand.
@@ -81,7 +89,7 @@ func (r *Runner) Run(ctx context.Context) Report {
 	checks = append(checks, r.checkResources())
 	checks = append(checks, r.checkDirPermissions())
 	checks = append(checks, r.checkAPIBinding())
-	checks = append(checks, guestChannelCheck())
+	checks = append(checks, r.checkGuestChannel())
 
 	overall := aggregateOverall(checks)
 

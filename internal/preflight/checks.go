@@ -433,15 +433,9 @@ func (r *Runner) checkAPIBinding() Check {
 
 // --- guest_channel ---
 
-// guestChannelCheck always returns not_implemented in M0. The fixture that
-// will flip this to a real check is the L0 integration fixture.
-func guestChannelCheck() Check {
-	return Check{
-		ID:      "guest_channel",
-		Status:  StatusNotImplemented,
-		Summary: "guest channel not exercised in M0 (vsock + guestd); will pass when the L0 integration fixture runs",
-		Evidence: []string{
-			"M0: guest_channel check requires the L0 integration fixture (Task 6: boot fixture + guestd handshake)",
-		},
-	}
+// checkGuestChannel is the platform-dispatched guest_channel check.
+// On Linux: dials the privd socket and stats the stage root (see checks_linux.go).
+// On non-Linux: returns not_implemented honestly.
+func (r *Runner) checkGuestChannel() Check {
+	return guestChannelCheck(r.cfg)
 }

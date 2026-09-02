@@ -203,10 +203,7 @@ func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (retErr error
 		"--ping-interval", "5s",
 	}
 
-	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd := buildRunnerCmd(argv, logFile)
 
 	if err := cmd.Start(); err != nil {
 		logFile.Close()

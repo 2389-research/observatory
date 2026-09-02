@@ -5,6 +5,8 @@
 package preflight_test
 
 import (
+	"net"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -111,6 +113,90 @@ func TestCgroupV2OnLinux(t *testing.T) {
 		t.Logf("cgroup_v2: FAIL (honest) — %s", cg.Summary)
 	default:
 		t.Errorf("cgroup_v2 status = %q; want pass or fail", cg.Status)
+	}
+}
+
+// TestGuestChannelPassWithLiveTempSocket verifies that guest_channel passes when
+// the privd socket is reachable (connect + close succeeds within 1s) and the stage
+// root exists and is writable.
+func TestGuestChannelPassWithLiveTempSocket(t *testing.T) {
+	// Listen on a temp unix socket to act as the "privd" endpoint.
+	sockPath := filepath.Join(t.TempDir(), "privd.sock")
+	stageRoot := t.TempDir()
+
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	// Accept and close connections (we just need connect+close to succeed).
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+
+	r := preflight.New(preflight.Config{
+		DataDir:     t.TempDir(),
+		PrivdSocket: sockPath,
+		StageRoot:   stageRoot,
+	})
+	report := r.Run(t.Context())
+
+	gc := findCheck(report.Checks, "guest_channel")
+	if gc == nil {
+		t.Fatal("guest_channel not in report")
+	}
+	if gc.Status != preflight.StatusPass {
+		t.Errorf("guest_channel = %q, want pass (summary: %s, evidence: %v)", gc.Status, gc.Summary, gc.Evidence)
+	}
+}
+
+// TestGuestChannelFailWhenSocketAbsent verifies that guest_channel fails with
+// remediation naming setup.sh when the privd socket does not exist.
+func TestGuestChannelFailWhenSocketAbsent(t *testing.T) {
+	r := preflight.New(preflight.Config{
+		DataDir:     t.TempDir(),
+		PrivdSocket: filepath.Join(t.TempDir(), "no-such-socket.sock"),
+		StageRoot:   t.TempDir(),
+	})
+	report := r.Run(t.Context())
+
+	gc := findCheck(report.Checks, "guest_channel")
+	if gc == nil {
+		t.Fatal("guest_channel not in report")
+	}
+	if gc.Status != preflight.StatusFail {
+		t.Errorf("guest_channel = %q, want fail", gc.Status)
+	}
+	if gc.Remediation == nil {
+		t.Fatal("guest_channel fail: remediation must be set")
+	}
+	if !strings.Contains(gc.Remediation.Action, "setup.sh") {
+		t.Errorf("remediation must name setup.sh: %q", gc.Remediation.Action)
+	}
+}
+
+// TestGuestChannelFailWhenNotConfigured verifies that empty PrivdSocket → fail.
+func TestGuestChannelFailWhenNotConfigured(t *testing.T) {
+	r := preflight.New(preflight.Config{
+		DataDir:     t.TempDir(),
+		PrivdSocket: "", // not configured
+		StageRoot:   "",
+	})
+	report := r.Run(t.Context())
+
+	gc := findCheck(report.Checks, "guest_channel")
+	if gc == nil {
+		t.Fatal("guest_channel not in report")
+	}
+	if gc.Status != preflight.StatusFail {
+		t.Errorf("guest_channel = %q, want fail when not configured", gc.Status)
 	}
 }
 

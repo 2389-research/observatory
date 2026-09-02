@@ -6,7 +6,10 @@ package preflight
 
 import (
 	"fmt"
+	"net"
+	"os"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -329,6 +332,99 @@ func kernelRelease() string {
 		b = append(b, byte(c))
 	}
 	return string(b)
+}
+
+// guestChannelCheck dials the privd socket (1s timeout) and stats the stage root.
+// Pass: connect succeeds and stage root is an existing writable directory.
+// Fail: socket absent/unreachable, or stage root not configured/missing.
+// Remediation always names scripts/aibox03/setup.sh.
+func guestChannelCheck(cfg Config) Check {
+	id := "guest_channel"
+
+	if cfg.PrivdSocket == "" || cfg.StageRoot == "" {
+		return Check{
+			ID:      id,
+			Status:  StatusFail,
+			Summary: "guest_channel not configured: PrivdSocket and StageRoot are required",
+			Evidence: []string{
+				fmt.Sprintf("privd_socket: %q (empty)", cfg.PrivdSocket),
+				fmt.Sprintf("stage_root: %q (empty)", cfg.StageRoot),
+			},
+			Remediation: &Remediation{
+				Cause:  "not_configured",
+				Action: "run scripts/aibox03/setup.sh to install vmobs-privd and configure the adapter",
+			},
+		}
+	}
+
+	var evidence []string
+
+	// Dial the privd socket with a 1s timeout (connect + close, no request).
+	conn, err := net.DialTimeout("unix", cfg.PrivdSocket, 1*time.Second)
+	if err != nil {
+		return Check{
+			ID:       id,
+			Status:   StatusFail,
+			Summary:  fmt.Sprintf("cannot reach privd socket: %v", err),
+			Evidence: append(evidence, fmt.Sprintf("dial %s: %v", cfg.PrivdSocket, err)),
+			Remediation: &Remediation{
+				Cause:  "privd_unreachable",
+				Action: "run scripts/aibox03/setup.sh to install and start vmobs-privd",
+			},
+		}
+	}
+	conn.Close()
+	evidence = append(evidence, fmt.Sprintf("privd_socket: %s (reachable)", cfg.PrivdSocket))
+
+	// Stat stage root for existence and writability.
+	info, err := os.Stat(cfg.StageRoot)
+	if err != nil {
+		return Check{
+			ID:       id,
+			Status:   StatusFail,
+			Summary:  fmt.Sprintf("stage root not accessible: %v", err),
+			Evidence: append(evidence, fmt.Sprintf("stat %s: %v", cfg.StageRoot, err)),
+			Remediation: &Remediation{
+				Cause:  "stage_root_absent",
+				Action: "run scripts/aibox03/setup.sh to create the stage root directory",
+			},
+		}
+	}
+	if !info.IsDir() {
+		return Check{
+			ID:       id,
+			Status:   StatusFail,
+			Summary:  "stage root is not a directory",
+			Evidence: append(evidence, fmt.Sprintf("stat %s: not a directory", cfg.StageRoot)),
+			Remediation: &Remediation{
+				Cause:  "stage_root_not_dir",
+				Action: "run scripts/aibox03/setup.sh to set up the stage root directory correctly",
+			},
+		}
+	}
+	evidence = append(evidence, fmt.Sprintf("stage_root: %s (exists, is dir)", cfg.StageRoot))
+
+	// Check writability by accessing with W_OK.
+	if err := unix.Access(cfg.StageRoot, unix.W_OK); err != nil {
+		return Check{
+			ID:       id,
+			Status:   StatusFail,
+			Summary:  fmt.Sprintf("stage root not writable: %v", err),
+			Evidence: append(evidence, fmt.Sprintf("access %s W_OK: %v", cfg.StageRoot, err)),
+			Remediation: &Remediation{
+				Cause:  "stage_root_not_writable",
+				Action: "run scripts/aibox03/setup.sh to fix stage root permissions",
+			},
+		}
+	}
+	evidence = append(evidence, fmt.Sprintf("stage_root: %s (writable)", cfg.StageRoot))
+
+	return Check{
+		ID:       id,
+		Status:   StatusPass,
+		Summary:  "privd socket reachable; stage root accessible and writable",
+		Evidence: evidence,
+	}
 }
 
 // diskFreeStatfs returns free disk in MiB using unix.Statfs.

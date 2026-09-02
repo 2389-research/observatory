@@ -13,6 +13,21 @@ import (
 // ErrSlotsExhausted is returned by allocateSlot when no free slot < MaxSlots exists.
 var ErrSlotsExhausted = errors.New("jailer: all VM slots exhausted")
 
+// Finding is one entry from Reconcile: the adapter's verdict on a VM it found
+// in <StateDir>/vms/ at startup. Outcome ∈ adopted | vmm_gone | ambiguous.
+// Consumed by Task 12's startup wiring.
+type Finding struct {
+	VMID    string
+	Outcome string // "adopted" | "vmm_gone" | "ambiguous"
+	Detail  string // human-readable explanation for log/debug
+}
+
+// WriteManifestExported is exported for tests that need to create manifest fixtures.
+// Internal code uses writeManifest directly.
+func WriteManifestExported(stateDir string, m Manifest) error {
+	return writeManifest(stateDir, m)
+}
+
 // Manifest tracks the resources provisioned for one VM launch. Written
 // to <StateDir>/vms/<id>/manifest.json before each external side effect so
 // rollback can target exactly the owned resources.
