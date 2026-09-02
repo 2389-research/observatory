@@ -14,6 +14,11 @@ import (
 type Call struct {
 	Method string
 	VMID   string
+
+	// Deadline is the deadline carried by the context the call was handed, zero
+	// if it had none. It is the only way a test can see which budget a manager
+	// gave a runtime call; the alternative is waiting the budget out.
+	Deadline time.Time
 }
 
 // Fake is the SPEC §18-sanctioned test double. It records every call, returns
@@ -33,6 +38,10 @@ type Fake struct {
 	// returns. Tests hold a reference to each channel and close it when ready.
 	blocks map[string]chan struct{}
 
+	// uninterruptible holds the keys whose block ignores context cancellation.
+	// Consumed with the block itself.
+	uninterruptible map[string]bool
+
 	// failCalls maps method → {n, err}: the nth call of method (1-based, any
 	// vmID, counted from Fake creation) returns err. For call sites where the
 	// VM ID is server-generated and unknowable at injection time.
@@ -48,10 +57,11 @@ type callFailure struct {
 // NewFake returns an idle fake with no injected failures or blocks.
 func NewFake() *Fake {
 	return &Fake{
-		failNext:  map[string]error{},
-		blocks:    map[string]chan struct{}{},
-		failCalls: map[string]callFailure{},
-		counts:    map[string]int{},
+		failNext:        map[string]error{},
+		blocks:          map[string]chan struct{}{},
+		uninterruptible: map[string]bool{},
+		failCalls:       map[string]callFailure{},
+		counts:          map[string]int{},
 	}
 }
 
@@ -82,9 +92,25 @@ func (f *Fake) Block(method, vmID string) chan struct{} {
 	return ch
 }
 
-func (f *Fake) record(method, vmID string) (block chan struct{}, err error) {
+// BlockUninterruptible is Block for a call whose work no context can interrupt:
+// it returns its own result when the test releases it even if the context died
+// while it ran. The real launch path is built that way — most of it is file IO
+// through helpers that take no context at all (internal/jailer/launch.go
+// copyFile) — so this is the shape that exercises bookkeeping which has to run
+// after the call's own budget is spent.
+func (f *Fake) BlockUninterruptible(method, vmID string) chan struct{} {
 	f.mu.Lock()
-	f.Calls = append(f.Calls, Call{Method: method, VMID: vmID})
+	defer f.mu.Unlock()
+	ch := make(chan struct{})
+	f.blocks[key(method, vmID)] = ch
+	f.uninterruptible[key(method, vmID)] = true
+	return ch
+}
+
+func (f *Fake) record(ctx context.Context, method, vmID string) (block chan struct{}, ignoreCtx bool, err error) {
+	deadline, _ := ctx.Deadline()
+	f.mu.Lock()
+	f.Calls = append(f.Calls, Call{Method: method, VMID: vmID, Deadline: deadline})
 	f.counts[method]++
 	k := key(method, vmID)
 	err = f.failNext[k]
@@ -97,13 +123,19 @@ func (f *Fake) record(method, vmID string) (block chan struct{}, err error) {
 	}
 	block = f.blocks[k]
 	delete(f.blocks, k)
+	ignoreCtx = f.uninterruptible[k]
+	delete(f.uninterruptible, k)
 	f.mu.Unlock()
-	return block, err
+	return block, ignoreCtx, err
 }
 
-// wait blocks until ch is closed or ctx is done.
-func wait(ctx context.Context, ch chan struct{}) error {
+// wait blocks until ch is closed, or until ctx is done unless ignoreCtx.
+func wait(ctx context.Context, ch chan struct{}, ignoreCtx bool) error {
 	if ch == nil {
+		return nil
+	}
+	if ignoreCtx {
+		<-ch
 		return nil
 	}
 	select {
@@ -139,30 +171,30 @@ func (f *Fake) MethodCalls() []string {
 }
 
 // Availability always returns nil — the fake host can always launch.
-func (f *Fake) Availability(_ context.Context) error {
-	_, err := f.record("Availability", "")
+func (f *Fake) Availability(ctx context.Context) error {
+	_, _, err := f.record(ctx, "Availability", "")
 	return err
 }
 
 func (f *Fake) Launch(ctx context.Context, spec runtime.VMSpec) error {
-	ch, err := f.record("Launch", spec.VMID)
-	if waitErr := wait(ctx, ch); waitErr != nil {
+	ch, ignoreCtx, err := f.record(ctx, "Launch", spec.VMID)
+	if waitErr := wait(ctx, ch, ignoreCtx); waitErr != nil {
 		return waitErr
 	}
 	return err
 }
 
 func (f *Fake) Pause(ctx context.Context, vmID string) error {
-	ch, err := f.record("Pause", vmID)
-	if waitErr := wait(ctx, ch); waitErr != nil {
+	ch, ignoreCtx, err := f.record(ctx, "Pause", vmID)
+	if waitErr := wait(ctx, ch, ignoreCtx); waitErr != nil {
 		return waitErr
 	}
 	return err
 }
 
 func (f *Fake) Resume(ctx context.Context, vmID string) error {
-	ch, err := f.record("Resume", vmID)
-	if waitErr := wait(ctx, ch); waitErr != nil {
+	ch, ignoreCtx, err := f.record(ctx, "Resume", vmID)
+	if waitErr := wait(ctx, ch, ignoreCtx); waitErr != nil {
 		return waitErr
 	}
 	return err
@@ -171,8 +203,8 @@ func (f *Fake) Resume(ctx context.Context, vmID string) error {
 // Stop returns (forced, err) where forced is controlled by FailNext("Stop", vmID).
 // Inject a *ForcedStop sentinel to signal that the grace period elapsed.
 func (f *Fake) Stop(ctx context.Context, vmID string, _ time.Duration) (bool, error) {
-	ch, err := f.record("Stop", vmID)
-	if waitErr := wait(ctx, ch); waitErr != nil {
+	ch, ignoreCtx, err := f.record(ctx, "Stop", vmID)
+	if waitErr := wait(ctx, ch, ignoreCtx); waitErr != nil {
 		return false, waitErr
 	}
 	if err != nil {
@@ -185,8 +217,8 @@ func (f *Fake) Stop(ctx context.Context, vmID string, _ time.Duration) (bool, er
 }
 
 func (f *Fake) ForceStop(ctx context.Context, vmID string) error {
-	ch, err := f.record("ForceStop", vmID)
-	if waitErr := wait(ctx, ch); waitErr != nil {
+	ch, ignoreCtx, err := f.record(ctx, "ForceStop", vmID)
+	if waitErr := wait(ctx, ch, ignoreCtx); waitErr != nil {
 		return waitErr
 	}
 	return err
@@ -195,8 +227,8 @@ func (f *Fake) ForceStop(ctx context.Context, vmID string) error {
 // Release records the call and returns the injected error (or nil).
 // Idempotent: unknown vmID returns nil in the real adapter; the fake does the same.
 func (f *Fake) Release(ctx context.Context, vmID string) error {
-	ch, err := f.record("Release", vmID)
-	if waitErr := wait(ctx, ch); waitErr != nil {
+	ch, ignoreCtx, err := f.record(ctx, "Release", vmID)
+	if waitErr := wait(ctx, ch, ignoreCtx); waitErr != nil {
 		return waitErr
 	}
 	return err

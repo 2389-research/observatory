@@ -3,6 +3,7 @@
 package runtime_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -352,6 +353,77 @@ func TestManagerActionPauseKeepsReservation(t *testing.T) {
 	}
 	if res.ComputeReleased {
 		t.Error("compute_released should be false after pause — paused VMs retain compute")
+	}
+}
+
+// TestManagerActionRecordsFailureAfterCallerContextDies: every non-launch branch
+// of doAction routes its errors through failAction on the context the action was
+// already running, and the commonest reason an action fails is that this very
+// context expired. Writing the verdict onto it records nothing: the operation
+// stays "running" for ever, describing work that is over.
+//
+// The launch branch derives its own recovery context at the call site and is
+// covered by TestStartRecordsFailureAfterOperationContextDies. This covers the
+// seven other branches at the one place they share — failAction itself — through
+// pause, which reaches it straight off the runtime call.
+func TestManagerActionRecordsFailureAfterCallerContextDies(t *testing.T) {
+	st := openStoreForManager(t)
+	fk := runtimetest.NewFake()
+	mgr := newManager(t, st, fk)
+
+	vm := launchedVM(t, st, mgr, "pause-bookkeeping")
+
+	// Pause blocks; cancelling the caller is what ends it, and the fake then
+	// returns ctx.Err(). The channel is deliberately never closed: if both it and
+	// the context were ready the fake's select would pick a winner at random, and
+	// this test would assert on a coin flip.
+	fk.Block("Pause", vm.VMID)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type actionResult struct {
+		op  *store.Operation
+		err error
+	}
+	done := make(chan actionResult, 1)
+	go func() {
+		_, op, err := mgr.Action(ctx, vm.VMID, "pause", nil)
+		done <- actionResult{op: op, err: err}
+	}()
+
+	waitForFakeCallCount(t, fk, vm.VMID, "Pause", 1)
+	cancel()
+	res := <-done
+
+	if res.err == nil {
+		t.Fatal("pause returned no error after its caller's context was cancelled")
+	}
+	if res.op == nil {
+		t.Fatal("pause returned no operation: failAction wrote nothing and read nothing back")
+	}
+	if res.op.State != "failed" {
+		t.Errorf("returned operation state = %q, want failed", res.op.State)
+	}
+
+	// The stored row is what an operator sees, so assert on it directly rather
+	// than trusting the value handed back.
+	stored, err := st.GetOperation(context.Background(), res.op.OperationID)
+	if err != nil {
+		t.Fatalf("GetOperation %d: %v", res.op.OperationID, err)
+	}
+	if stored.State != "failed" {
+		t.Errorf("stored operation %d state = %q, want failed", stored.OperationID, stored.State)
+	}
+
+	// And nothing may be left stranded mid-flight for this VM.
+	running, err := st.ListOperationsByState(context.Background(), "running")
+	if err != nil {
+		t.Fatalf("ListOperationsByState(running): %v", err)
+	}
+	for _, op := range running {
+		if op.VMID != nil && *op.VMID == vm.VMID {
+			t.Errorf("operation %d (%s) left in %q after the action returned", op.OperationID, op.Phase, op.State)
+		}
 	}
 }
 

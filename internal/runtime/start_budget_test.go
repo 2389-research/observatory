@@ -1,5 +1,5 @@
-// ABOUTME: Tests that a start action survives the death of its caller's context.
-// ABOUTME: A launch is bounded by launch work, and a failure is recorded whatever happens.
+// ABOUTME: Tests the contexts a start action runs on: the launch budget it gets
+// ABOUTME: instead of the caller's, and the bookkeeping that outlives that budget.
 package runtime_test
 
 import (
@@ -65,13 +65,15 @@ func TestStartRecordsFailureAfterOperationContextDies(t *testing.T) {
 	}
 }
 
-// TestStartLaunchOutlivesTheStopDerivedBudget: the operation budget is derived
-// from the stop path — a grace period plus fixed ctl and signal timeouts. A
-// launch copies and hashes gigabytes and then waits up to 60s for the guest to
-// attach, so it needs its own budget. Riding the stop budget aborts a launch
-// that is doing exactly what it should, and the VM lands in "starting" with
-// staging already on disk.
-func TestStartLaunchOutlivesTheStopDerivedBudget(t *testing.T) {
+// TestStartLaunchOutlivesCallerCancellation: a start action's launch runs on a
+// context detached from the caller's, so an HTTP client that hangs up mid-launch
+// does not abort a launch that is behaving perfectly and leave the VM in
+// "starting" with staging already on disk.
+//
+// This observes cancellation only. That the launch also gets a *longer* budget
+// than the caller's stop-derived one is a separate claim with its own test
+// below: this one would pass with launchBudget set to 50ms.
+func TestStartLaunchOutlivesCallerCancellation(t *testing.T) {
 	st := openStoreForManager(t)
 	fk := runtimetest.NewFake()
 	mgr := newManager(t, st, fk)
@@ -96,6 +98,95 @@ func TestStartLaunchOutlivesTheStopDerivedBudget(t *testing.T) {
 		t.Errorf("start failed after its caller's context died: %v", err)
 	}
 	waitForVMState(t, st, vmID, "running")
+}
+
+// TestStartLaunchGetsMoreBudgetThanTheStopDerivedOne: the operation budget is
+// derived from the stop path — a grace period plus fixed ctl and signal
+// timeouts. A launch copies and hashes gigabytes and then waits up to 60s for
+// the guest to attach, so it needs its own, larger budget. Riding the stop
+// budget aborts a launch that is doing exactly what it should.
+//
+// The deadline the launch actually runs under is the claim, and the fake
+// records it: asserting the launch merely survives the caller proves nothing
+// about how long it gets.
+func TestStartLaunchGetsMoreBudgetThanTheStopDerivedOne(t *testing.T) {
+	st := openStoreForManager(t)
+	fk := runtimetest.NewFake()
+	mgr := newManager(t, st, fk)
+
+	vmID := stoppedVM(t, st, mgr, "start-budget-deadline")
+
+	// The production shape: the HTTP handler hands Action the stop-derived
+	// operation context (internal/api/vms.go), so that is what the start branch
+	// has to beat.
+	opCtx, cancelOp := mgr.OperationContext(context.Background())
+	defer cancelOp()
+	opDeadline, ok := opCtx.Deadline()
+	if !ok {
+		t.Fatal("OperationContext carries no deadline; there is no budget to compare against")
+	}
+
+	if _, _, err := mgr.Action(opCtx, vmID, "start", nil); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	launch := lastCallFor(t, fk, vmID, "Launch")
+	if launch.Deadline.IsZero() {
+		t.Fatal("the launch ran on a context with no deadline: unbounded, not budgeted")
+	}
+	// launchBudget is 240s against a 125s operation budget in this config, so the
+	// gap is ~115s. A floor well under that still fails when the launch is handed
+	// the operation context itself (gap 0), and does not pin the test to either
+	// constant.
+	if gap := launch.Deadline.Sub(opDeadline); gap < 30*time.Second {
+		t.Errorf("the launch ran only %v past the stop-derived operation deadline; that is not a budget of its own", gap)
+	}
+}
+
+// TestStartRecordsLaunchFailureAfterTheLaunchContextDies: when a launch fails
+// with its own context already gone, the branch that records the failure and
+// cleans up must not ride that context — it would write nothing, leaving a dead
+// VM reading "starting" behind an operation that reads "running" for ever.
+//
+// The launch context dies two ways: launchBudget expires, or the manager
+// closes. This test uses the second because a unit test cannot wait out four
+// minutes; the branch under test cannot tell them apart. The launch itself is
+// uninterruptible, as the real one largely is, so it returns its own failure
+// rather than the context's.
+func TestStartRecordsLaunchFailureAfterTheLaunchContextDies(t *testing.T) {
+	st := openStoreForManager(t)
+	fk := runtimetest.NewFake()
+	mgr := newManager(t, st, fk)
+
+	vmID := stoppedVM(t, st, mgr, "start-launch-ctx-dead")
+
+	release := fk.BlockUninterruptible("Launch", vmID)
+	fk.FailNext("Launch", vmID, errors.New("staging disk full"))
+
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := mgr.Action(context.Background(), vmID, "start", nil)
+		done <- err
+	}()
+
+	waitForFakeCallCount(t, fk, vmID, "Launch", 2) // 1 = the create-path launch
+	mgr.Close()                                    // cancels the manager context, and with it the launch's
+	close(release)
+
+	if err := <-done; err == nil {
+		t.Error("start returned no error after the launch failed")
+	}
+	waitForVMState(t, st, vmID, "failed")
+
+	running, err := st.ListOperationsByState(context.Background(), "running")
+	if err != nil {
+		t.Fatalf("ListOperationsByState(running): %v", err)
+	}
+	for _, op := range running {
+		if op.VMID != nil && *op.VMID == vmID {
+			t.Errorf("operation %d (%s) left in %q after the launch failed", op.OperationID, op.Phase, op.State)
+		}
+	}
 }
 
 // stoppedVM creates a VM, waits for the create-path launch to finish, then
@@ -128,4 +219,16 @@ func waitForFakeCallCount(t *testing.T, fk *runtimetest.Fake, vmID, method strin
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
+}
+
+// lastCallFor returns the most recent recorded call of method for vmID.
+func lastCallFor(t *testing.T, fk *runtimetest.Fake, vmID, method string) runtimetest.Call {
+	t.Helper()
+	calls := slices.DeleteFunc(fk.CallsFor(vmID), func(c runtimetest.Call) bool {
+		return c.Method != method
+	})
+	if len(calls) == 0 {
+		t.Fatalf("runtime saw no %s call for vm %s", method, vmID)
+	}
+	return calls[len(calls)-1]
 }
