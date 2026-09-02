@@ -190,19 +190,33 @@ func (a *Adapter) doStop(ctx context.Context, vmID string, grace time.Duration, 
 	// Release the jail chroot dir (privd removes <JailBase>/firecracker/<id>).
 	// Keep network + slot + manifest: a stopped VM can be restarted.
 	//
-	// The error is discarded on purpose. doStop's error reaches Manager.doAction
-	// ("stop" and "force_stop"), which routes any error into failAction: that
-	// records the operation as failed and leaves the VM row in stopping for a VM
-	// that is genuinely dead. A stop that did stop the VM but could not free its
-	// chroot must not be recorded as a failed stop -- a wrong verdict on the VM is
-	// worse than the leak. What that costs: a release that fails for any reason
-	// other than the retried invalid_state (privd unreachable, exec_failed on the
-	// jail dir) still leaks <JailBase>/firecracker/<vmID> and pins its privd ledger
-	// entry, silently, while Manager.Delete goes on to write "deleted". A cleanup
-	// backlog that would settle those is M1b work.
+	// The error is logged and then discarded on purpose, and what the discard
+	// costs is worth stating plainly: doStop does not know the VM is dead. The
+	// graceful poll above is the only path that observes the VMM exit. On the
+	// forced path SignalVM's errors are dropped and forced is set unconditionally,
+	// and SIGKILL cannot reap a task in uninterruptible sleep -- privd then answers
+	// invalid_state "vm process is still alive" for the whole retry window. So this
+	// stop may not have stopped anything, and doAction still writes "stopped" with
+	// ReleaseCompute, handing the VM's RAM back to admission while the process runs.
+	//
+	// It is recorded that way because the alternative is worse. Any error returned
+	// here reaches Manager.doAction, which routes it into failAction: the operation
+	// is recorded failed and the VM row is left in "stopping". Every release
+	// failure that says nothing about the VM's liveness -- privd unreachable,
+	// exec_failed on the jail dir -- would then produce a wrong verdict on a VM
+	// that really did stop. A false "failed" on a dead VM is worse than a leak on a
+	// live one, so the verdict stands and the error goes to stderr instead, where
+	// the daemon log and savePostmortem will carry it. What is left behind when it
+	// fires: <JailBase>/firecracker/<vmID>, a pinned privd ledger entry, and
+	// possibly a running VM behind a "stopped" row. Settling those needs a cleanup
+	// backlog, which is M1b work.
 	releaseCtx, releaseCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer releaseCancel()
-	_ = a.releaseVMWhenDead(releaseCtx, vmID)
+	if err := a.releaseVMWhenDead(releaseCtx, vmID); err != nil {
+		fmt.Fprintf(os.Stderr,
+			"jailer: stop: warn: release jail chroot for %s: %v; chroot and privd ledger entry retained, and the VM may still be running\n",
+			vmID, err)
+	}
 
 	return forced, nil
 }
