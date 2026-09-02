@@ -833,7 +833,11 @@ func (m *Manager) Delete(ctx context.Context, vmID string, force bool, expectedR
 	// R1: call Release before flipping the row to "deleted" so jail resources
 	// are always freed before the VM is considered gone. Tolerate UnavailableError
 	// (runtime absent on startup reconcile is normal) but fail on real errors so a
-	// VM row never reads "deleted" while jail resources remain.
+	// VM row never reads "deleted" while the resources this call owns -- network,
+	// stage dir, state dir -- remain. The jail chroot is not one of them: the stop
+	// path releases it and deliberately logs-and-discards a failure there
+	// (internal/jailer/stop.go), so a "deleted" row can still have a leaked chroot
+	// behind it.
 	if err := m.rt.Release(ctx, vmID); err != nil {
 		var ue *UnavailableError
 		if !errors.As(err, &ue) {
