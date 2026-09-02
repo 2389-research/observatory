@@ -381,27 +381,24 @@ performance_targets:
 	d := &m1aDaemon{
 		addr:    listenAddr,
 		baseURL: "http://" + listenAddr + "/api/v1",
-		// 90s. Derivation, walking internal/jailer/stop.go at stop_grace_seconds=30 --
-		// only the two grace-derived rows move when stop_grace_seconds changes, and both
-		// of them do, so re-derive this whenever it does:
+		// This client must outlive every budget the daemon gives itself, so it is
+		// tied to those budgets rather than re-derived from the runtime's timeouts.
+		// A gate client that gives up first converts a slow-but-legal operation into
+		// a gate failure and blames the wrong component: the daemon is doing exactly
+		// what it is supposed to, the test reports a timeout, and nothing in the
+		// evidence says which of the two ran out. Lifecycle mutations stopped riding
+		// r.Context() (internal/api/vms.go), so giving up here costs this test the
+		// answer, not the VM -- which is precisely why the answer must not be lost.
 		//
-		//	dialCtl(shutdown_guest)      5s dial + 30s reply deadline   35s
-		//	graceful exit poll           grace + 5s                     35s
-		//	SIGTERM, wait, SIGKILL       10s signal ctx + 5s wait       15s
-		//	dialCtl(finalize)            5s dial + 30s reply deadline   35s
-		//	release the jail chroot      10s retry window               10s
+		//	stop, force_stop, delete, create   Manager.OperationContext:
+		//	                                   stop_grace_seconds + operationSlack
+		//	                                   = 30 + 120                      150s
+		//	start                              Manager.launchBudget            240s
 		//
-		// The first two are alternatives, not a sum: the runner answers shutdown_guest
-		// only after grace+5s = 35s (internal/runner/runner.go), which is past dialCtl's
-		// own fixed 30s deadline, so at grace 30 the adapter always takes the ctl-timeout
-		// branch and never reaches the poll. That is the path live run 5 measured -- 30s
-		// to the ctl timeout, then the forced escalation and a finalize against a dying
-		// runner -- and 90s covers it with margin on a loaded host.
-		//
-		// It deliberately does not cover the 130s ceiling where both dialCtl calls burn
-		// their full deadline. Since lifecycle mutations stopped riding r.Context()
-		// (internal/api/vms.go), a client timeout costs this test the answer, not the VM.
-		httpClient: &http.Client{Timeout: 90 * time.Second},
+		// 300s clears the larger of the two. Both constants live in
+		// internal/runtime/manager.go with their derivations; re-derive this whenever
+		// either moves, or whenever stop_grace_seconds does.
+		httpClient: &http.Client{Timeout: 300 * time.Second},
 		cmd:        cmd,
 		configPath: configPath,
 		stateDir:   stateDir,
