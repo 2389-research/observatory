@@ -23,12 +23,26 @@ const (
 	uidMax = 60000
 )
 
+// applyProcessUmask sets vmobs-privd's process-wide umask to 0002 and returns the
+// previous umask. Go has no per-child umask (syscall.SysProcAttr has no umask field),
+// so this process-wide setting is the only way to reach the jailer: the jailer, and
+// firecracker exec'd beneath it, inherit it across exec. Firecracker binds v.sock as
+// uid 20000+slot, gid 36000, mode 0777 & ~umask; the daemon's own uid is a member of
+// gid 36000 but never the owner, so v.sock must be group-writable or every connect()
+// from the daemon fails with EACCES. This mirrors the M0 root helper's own
+// `umask 0002` (scripts/aibox03/vmobs-root-helper:97).
+func applyProcessUmask() int {
+	return syscall.Umask(0o002)
+}
+
 func main() {
 	flags, err := parseFlags(os.Args[1:])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "vmobs-privd: %v\n", err)
 		os.Exit(2)
 	}
+
+	applyProcessUmask()
 
 	// Remove a stale socket from a previous run so Listen doesn't fail with EADDRINUSE.
 	_ = os.Remove(flags.socket)
