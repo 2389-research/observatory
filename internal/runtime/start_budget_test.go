@@ -189,6 +189,113 @@ func TestStartRecordsLaunchFailureAfterTheLaunchContextDies(t *testing.T) {
 	}
 }
 
+// TestStartRecordsSuccessAfterTheLaunchContextDies: a launch that returns nil
+// with its own context already spent has left a live, healthy VM behind, and
+// the writes that record it must not ride that context. They would do nothing,
+// and Firecracker would be running underneath a row that reads "starting" with
+// an operation that reads "running".
+//
+// Nothing repairs that while the daemon is up, and reconcile makes it worse on
+// the next start: it marks a "starting" VM failed and releases its compute, for
+// a VM that is up.
+func TestStartRecordsSuccessAfterTheLaunchContextDies(t *testing.T) {
+	st := openStoreForManager(t)
+	fk := runtimetest.NewFake()
+	mgr := newManager(t, st, fk)
+
+	vmID := stoppedVM(t, st, mgr, "start-success-ctx-dead")
+
+	// Uninterruptible, like the real launch: it finishes the work it started and
+	// returns success whatever its context did meanwhile.
+	release := fk.BlockUninterruptible("Launch", vmID)
+
+	type actionResult struct {
+		op  *store.Operation
+		err error
+	}
+	done := make(chan actionResult, 1)
+	go func() {
+		_, op, err := mgr.Action(context.Background(), vmID, "start", nil)
+		done <- actionResult{op: op, err: err}
+	}()
+
+	waitForFakeCallCount(t, fk, vmID, "Launch", 2) // 1 = the create-path launch
+	mgr.Close()                                    // cancels the manager context, and with it the launch's
+	close(release)
+
+	res := <-done
+	if res.err != nil {
+		t.Errorf("start returned an error after the launch succeeded: %v", res.err)
+	}
+	waitForVMState(t, st, vmID, "running")
+	if res.op == nil {
+		t.Fatal("start returned no operation")
+	}
+	if res.op.State != "succeeded" {
+		t.Errorf("operation state = %q, want succeeded", res.op.State)
+	}
+}
+
+// TestStopRecordsOutcomeAfterTheOperationContextDies: the shared tail of every
+// non-start action has the same shape on the operation context. Its budget is
+// sized for the runtime call plus these writes, but only just — at the
+// documented stop grace the worst case leaves 5s of it (see operationSlack) —
+// and a host slower than that model spends the lot.
+//
+// What the tail writes is the terminal state *and* the compute release, so
+// losing it strands the VM in "stopping" with its memory still reserved against
+// admission until the next controller restart.
+func TestStopRecordsOutcomeAfterTheOperationContextDies(t *testing.T) {
+	st := openStoreForManager(t)
+	fk := runtimetest.NewFake()
+	mgr := newManager(t, st, fk)
+
+	vm := launchedVM(t, st, mgr, "stop-tail-ctx-dead")
+
+	release := fk.BlockUninterruptible("Stop", vm.VMID)
+
+	// The production caller shape: the handler hands Action the operation
+	// context, which dies with the manager.
+	opCtx, cancelOp := mgr.OperationContext(context.Background())
+	defer cancelOp()
+
+	type actionResult struct {
+		op  *store.Operation
+		err error
+	}
+	done := make(chan actionResult, 1)
+	go func() {
+		_, op, err := mgr.Action(opCtx, vm.VMID, "stop", nil)
+		done <- actionResult{op: op, err: err}
+	}()
+
+	waitForFakeCallCount(t, fk, vm.VMID, "Stop", 1)
+	mgr.Close()
+	close(release)
+
+	res := <-done
+	if res.err != nil {
+		t.Errorf("stop returned an error after the runtime stopped the VM: %v", res.err)
+	}
+	waitForVMState(t, st, vm.VMID, "stopped")
+	if res.op == nil {
+		t.Fatal("stop returned no operation")
+	}
+	if res.op.State != "succeeded" {
+		t.Errorf("operation state = %q, want succeeded", res.op.State)
+	}
+
+	// The release is the half that leaks: a reservation held for a VM that is
+	// gone is capacity admission will never hand out again.
+	resv, err := st.GetReservation(context.Background(), vm.VMID)
+	if err != nil {
+		t.Fatalf("GetReservation: %v", err)
+	}
+	if !resv.ComputeReleased {
+		t.Error("compute_released is false after a completed stop: the reservation is stranded")
+	}
+}
+
 // stoppedVM creates a VM, waits for the create-path launch to finish, then
 // stops it — the only state a start action is legal from.
 func stoppedVM(t *testing.T, st *store.Store, mgr *runtime.Manager, name string) string {

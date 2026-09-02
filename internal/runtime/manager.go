@@ -279,18 +279,26 @@ func (m *Manager) detachedContext(parent context.Context, budget time.Duration) 
 // launching.
 const launchBudget = 240 * time.Second
 
-// recoveryBudget bounds the work that records a mutation's failure once the
-// mutation's own context is gone: the cleanup ForceStop behind a failed launch
-// (10s signal + 35s finalize ctl + 10s chroot release = 55s worst case against
-// the jailer runtime) plus the store writes that say what happened.
+// recoveryBudget bounds the work that records how a mutation ended once the
+// mutation's own context is gone. It is sized by the largest such job, the
+// cleanup ForceStop behind a failed launch (10s signal + 35s finalize ctl + 10s
+// chroot release = 55s worst case against the jailer runtime), plus the store
+// writes that say what happened; the paths that only write are far inside it.
 const recoveryBudget = 75 * time.Second
 
-// recoveryContext derives the context for bookkeeping that runs *because* the
-// caller's context is dying or already dead — the branch that records a failed
-// launch, the cleanup behind it, the operation row that carries the verdict.
-// Running those on the context whose expiry caused the failure guarantees they
-// do nothing: the VM stays in a transitional state and the operation stays
-// "running" forever, which is worse than the failure they were meant to record.
+// recoveryContext derives the context for the writes that record how a mutation
+// ended, when the context the mutation ran on may already be spent. Both
+// outcomes need it, not just the unhappy one. A failure usually *is* that
+// context expiring — the branch that records a failed launch, the cleanup
+// behind it, the operation row that carries the verdict. A success can outrun
+// its budget just as easily, because what fills the budget is largely work no
+// timeout interrupts: jailer copies gigabytes through helpers that take no
+// context, and returns nil with nothing left on the clock.
+//
+// Writes on a spent context do nothing at all. The VM is left in a transitional
+// state and the operation stays "running" for ever, which is worse than either
+// verdict they were meant to carry — and worse on the success path than the
+// failure one, because the VM behind that row is alive.
 //
 // Unlike detachedContext this is not tied to m.ctx. The work is synchronous
 // inside a call the caller is still blocked on, so it cannot outlive the
@@ -706,19 +714,25 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 			op, _ := m.st.GetOperation(recCtx, opID)
 			return updVM, op, fmt.Errorf("launch: %w", err)
 		}
-		updVM, err = m.st.TransitionVM(startCtx, store.TransitionInput{
+		// The launch worked, and everything below is the record of that. It must
+		// not ride startCtx either: a launch that returns nil with its budget
+		// spent would leave these writes doing nothing, and a live VM sitting
+		// behind a row that still reads "starting".
+		okCtx, okCancel := m.recoveryContext(startCtx)
+		defer okCancel()
+		updVM, err = m.st.TransitionVM(okCtx, store.TransitionInput{
 			VMID:        vmID,
 			To:          "running",
 			Reason:      "start_complete",
 			OperationID: opID,
 		})
 		if err != nil {
-			return m.failAction(startCtx, vmID, opID, action, err)
+			return m.failAction(okCtx, vmID, opID, action, err)
 		}
 		// Hook: pending run → running when VM starts.
-		m.onVMRunning(startCtx, vmID)
+		m.onVMRunning(okCtx, vmID)
 		// start never reaches the shared tail below, so its pin is spent on the →starting transition; a future edit that lets it fall through would re-introduce the double-spend.
-		return m.succeedAction(startCtx, vmID, opID, "running", updVM)
+		return m.succeedAction(okCtx, vmID, opID, "running", updVM)
 
 	case "pause":
 		if vm.ObservedState != "running" {
@@ -793,7 +807,18 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 		newState, reason, releaseC = "stopped", "forced_stop", true
 	}
 
-	updVM, err := m.st.TransitionVM(ctx, store.TransitionInput{
+	// The runtime call is over; everything below records what it did, and it
+	// gets its own context for the same reason the start path does. The
+	// operation budget is sized for the runtime call plus these writes, but at
+	// the documented stop grace the worst case leaves 5s of it (see
+	// operationSlack) and a host slower than that model spends the lot. This
+	// transition carries the compute release as well as the terminal state, so
+	// losing it strands the VM in "stopping" with its memory still held against
+	// admission until the next reconcile.
+	tailCtx, tailCancel := m.recoveryContext(ctx)
+	defer tailCancel()
+
+	updVM, err := m.st.TransitionVM(tailCtx, store.TransitionInput{
 		VMID:             vmID,
 		ExpectedRevision: tailRevision,
 		To:               newState,
@@ -802,16 +827,16 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 		ReleaseCompute:   releaseC,
 	})
 	if err != nil {
-		return m.failAction(ctx, vmID, opID, action, err)
+		return m.failAction(tailCtx, vmID, opID, action, err)
 	}
 	// VM lifecycle hooks: conclude active runs on terminal transitions.
 	switch newState {
 	case "stopped":
-		m.onVMTerminal(ctx, vmID)
+		m.onVMTerminal(tailCtx, vmID)
 	case "running":
-		m.onVMRunning(ctx, vmID)
+		m.onVMRunning(tailCtx, vmID)
 	}
-	return m.succeedAction(ctx, vmID, opID, action, updVM)
+	return m.succeedAction(tailCtx, vmID, opID, action, updVM)
 }
 
 // failAction records a failed action on the operation row and reads the VM back.
