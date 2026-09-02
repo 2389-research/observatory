@@ -238,7 +238,7 @@ vm_defaults:
   network_policy_id: ""
   disk_allocation: ""
   max_terminal_sessions: 0
-  stop_grace_seconds: 10
+  stop_grace_seconds: 30
 network:
   ipv4_only_guest_boundary: false
   drop_guest_ipv6_on_host: false
@@ -1055,7 +1055,7 @@ vm_defaults:
   network_policy_id: ""
   disk_allocation: ""
   max_terminal_sessions: 0
-  stop_grace_seconds: 10
+  stop_grace_seconds: 30
 network:
   ipv4_only_guest_boundary: false
   drop_guest_ipv6_on_host: false
