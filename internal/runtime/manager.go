@@ -316,9 +316,40 @@ const recoveryBudget = 75 * time.Second
 // terminal record at all. Reconcile settles those on the next start — in-flight
 // operations become failed and transitional VMs are resolved — which is why
 // losing the write is survivable and switching the bookkeeping off is not.
+//
+// One budget per mutation tail, not one per derivation. Two of the four call
+// sites hand their recovery context on to failAction, which asks for one of its
+// own: the shared tail below and the start path's success branch. Stacking a
+// second recoveryBudget there priced a stop at 150 + 75 + 75 and a start at
+// 240 + 75 + 75, against a gate client sized for 315 — and contradicted the
+// sizing above, which covers the largest single such job plus its writes, not
+// two of them end to end. So a context this function already made is returned
+// unchanged, with a no-op cancel: the caller that made it owns the cancel.
+//
+// The cost is real and small. failAction's writes no longer get a guaranteed
+// budget of their own; they run on whatever the caller's tail has left. What
+// spends that tail is one TransitionVM, and the failure that reaches failAction
+// is nearly always a fast one — an invalid transition, a refused revision pin —
+// with the whole 75s still on the clock. The case that loses is a store wedged
+// badly enough that a single write burns 75s, and a store in that state does not
+// answer a second 75s either; Reconcile settles the record on the next start.
+//
+// The marker rides context values, and values survive both WithoutCancel and
+// WithTimeout. Anything that derives a *new* mutation budget from a recovery
+// context — detachedContext, OperationContext — would carry the marker into it
+// and silently deny that mutation a tail of its own. Nothing does today: every
+// such derivation starts from a caller's request context.
 func (m *Manager) recoveryContext(parent context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.WithoutCancel(parent), recoveryBudget)
+	if parent.Value(recoveryTail{}) != nil {
+		return parent, func() {}
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), recoveryBudget)
+	return context.WithValue(ctx, recoveryTail{}, true), cancel
 }
+
+// recoveryTail is the private key recoveryContext stamps on the contexts it
+// makes, so a later derivation on the same tail can recognise one.
+type recoveryTail struct{}
 
 // SetReportGen installs the run-report generation callback. It is called once
 // per terminal run with the runID. Task 7 wires the real generator; tests use
