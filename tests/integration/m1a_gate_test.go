@@ -470,7 +470,11 @@ performance_targets:
 
 	t.Cleanup(func() {
 		cancel()
-		// Give the daemon a moment to shut down gracefully.
+		// cancel() kills the daemon, not a graceful shutdown: cmd comes from
+		// exec.CommandContext with no Cancel override, so ctx.Done() runs Go's
+		// default Cancel, cmd.Process.Kill() (SIGKILL). If this teardown is ever
+		// made graceful, the 5s wait below sits under the daemon's 10s shutdown
+		// budget and must be raised too.
 		done := make(chan struct{})
 		go func() {
 			_ = cmd.Wait()
