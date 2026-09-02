@@ -693,9 +693,11 @@ func TestDeleteVMForceWithRevisionSucceeds(t *testing.T) {
 	}
 }
 
-// TestDeleteVMForceStalePinRefused: the pin stays a precondition. A revision
-// that has moved on is refused with 409 revision_mismatch — the typed store
-// error must survive the manager's wrapping and reach writeVMError intact.
+// TestDeleteVMForceStalePinRefused: the pin stays a precondition, and a
+// precondition is checked before the VM is killed. A revision that has moved on
+// is refused with 409 revision_mismatch — the typed store error survives the
+// manager's wrapping and reaches writeVMError intact — with the runtime never
+// asked to force-stop and the VM still running.
 func TestDeleteVMForceStalePinRefused(t *testing.T) {
 	srv, _, fake := newTemplateServer(t)
 	vmID := createRunningVM(t, srv.URL, fake)
@@ -712,6 +714,18 @@ func TestDeleteVMForceStalePinRefused(t *testing.T) {
 		fmt.Sprintf("%s/api/v1/vms/%s?force=true&expected_revision=%d", srv.URL, vmID, rev-1),
 		nil, http.StatusConflict, &e)
 	requireTeaching(t, e, "revision_mismatch")
+
+	for _, c := range fake.CallsFor(vmID) {
+		if c.Method == "ForceStop" {
+			t.Errorf("runtime was asked to ForceStop despite the refused pin; calls: %v", fake.CallsFor(vmID))
+			break
+		}
+	}
+	var after map[string]any
+	getJSON(t, srv.URL+"/api/v1/vms/"+vmID, http.StatusOK, &after)
+	if state, _ := after["observed_state"].(string); state != "running" {
+		t.Errorf("observed_state after refused delete = %q, want running", state)
+	}
 }
 
 func TestDeleteVMNotFound(t *testing.T) {

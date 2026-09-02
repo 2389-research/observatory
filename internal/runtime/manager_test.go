@@ -721,8 +721,10 @@ func TestManagerForceDeleteSpendsRevisionPinOnce(t *testing.T) {
 }
 
 // TestManagerForceDeleteStalePinRefused: the pin must stay a precondition, not
-// decoration. A revision that has already moved on is refused with a typed
-// *store.RevisionMismatchError, reachable through whatever wrapping Delete adds.
+// decoration — and a precondition is checked before the destructive act, not
+// after. A revision that has already moved on is refused with a typed
+// *store.RevisionMismatchError, the runtime is never asked to force-stop, and
+// the VM row is left exactly as it was.
 func TestManagerForceDeleteStalePinRefused(t *testing.T) {
 	st := openStoreForManager(t)
 	fk := runtimetest.NewFake()
@@ -749,6 +751,55 @@ func TestManagerForceDeleteStalePinRefused(t *testing.T) {
 	}
 	if mismatch.Current != current.Revision {
 		t.Errorf("mismatch.Current = %d, want %d", mismatch.Current, current.Revision)
+	}
+
+	for _, c := range fk.CallsFor(vm.VMID) {
+		if c.Method == "ForceStop" {
+			t.Errorf("runtime was asked to ForceStop despite the refused pin; calls: %v", fk.CallsFor(vm.VMID))
+			break
+		}
+	}
+	after, err := st.GetVM(t.Context(), vm.VMID)
+	if err != nil {
+		t.Fatalf("GetVM after refusal: %v", err)
+	}
+	if after.ObservedState != "running" || after.Revision != current.Revision {
+		t.Errorf("after refusal: state %q revision %d, want running at revision %d",
+			after.ObservedState, after.Revision, current.Revision)
+	}
+}
+
+// TestManagerForceDeleteRuntimeFailureLeavesStopping: when rt.ForceStop fails
+// for real, the row is already at "stopping" — the honest record of "we asked
+// the VM to die and do not know how it ended". Deliberate, per the ordering
+// rule: the state transition precedes the runtime side effect, exactly as
+// doAction's stop does. Reconcile owns the recovery.
+func TestManagerForceDeleteRuntimeFailureLeavesStopping(t *testing.T) {
+	st := openStoreForManager(t)
+	fk := runtimetest.NewFake()
+	mgr := newManager(t, st, fk)
+
+	vm, _, _, err := mgr.CreateVM(t.Context(), "local_operator", createReq("delete-rtfail"))
+	if err != nil {
+		t.Fatalf("CreateVM: %v", err)
+	}
+	mgr.Close()
+
+	fk.FailNext("ForceStop", vm.VMID, errors.New("kvm said no"))
+
+	if _, err = mgr.Delete(t.Context(), vm.VMID, true, nil); err == nil {
+		t.Fatalf("force delete with failing ForceStop: got nil error, want failure")
+	}
+	if !strings.Contains(err.Error(), "force-stop before delete") {
+		t.Errorf("error = %v, want it to name the force-stop step", err)
+	}
+
+	after, err := st.GetVM(t.Context(), vm.VMID)
+	if err != nil {
+		t.Fatalf("GetVM after failed force-stop: %v", err)
+	}
+	if after.ObservedState != "stopping" {
+		t.Errorf("state after failed force-stop = %q, want stopping", after.ObservedState)
 	}
 }
 

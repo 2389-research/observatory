@@ -694,7 +694,8 @@ func (m *Manager) succeedAction(ctx context.Context, vmID string, opID int64, ph
 // whichever of those runs first and every later transition goes unpinned — the
 // store still validates from→to on each. Re-pinning a later transition to the
 // caller's revision would fail every time, because the earlier transitions
-// already bumped it.
+// already bumped it. The first transition also precedes rt.ForceStop, so a
+// refused pin costs the caller nothing.
 func (m *Manager) Delete(ctx context.Context, vmID string, force bool, expectedRevision *int64) (*store.VM, error) {
 	vm, err := m.st.GetVM(ctx, vmID)
 	if err != nil {
@@ -717,21 +718,21 @@ func (m *Manager) Delete(ctx context.Context, vmID string, force bool, expectedR
 		if !force {
 			return vm, store.ErrVMLive
 		}
-		// Force-stop, then fall through to deletion.
-		if err := m.rt.ForceStop(ctx, vmID); err != nil {
-			var ue *UnavailableError
-			if !errors.As(err, &ue) { // unavailable runtime is fine — VM not running
-				return vm, fmt.Errorf("force-stop before delete: %w", err)
-			}
-		}
 		// §5.2: running/paused→stopping→stopped (no direct live→stopped transition).
+		// The transition runs BEFORE rt.ForceStop, the order doAction's stop
+		// already uses: the caller's precondition is then checked before anything
+		// is destroyed, so a refused delete leaves the VM alone instead of killing
+		// it and answering 409. If ForceStop then fails, the row stays at
+		// "stopping" — the honest record of "we asked the VM to die and do not
+		// know how it ended"; Reconcile owns the recovery.
+		//
 		// A transition refused as invalid is tolerated — the reconciler or a
 		// concurrent stop may have moved the row already — and consumes nothing,
 		// so the pin travels on to the next transition. A stale pin is refused
-		// with *store.RevisionMismatchError, which the tolerance below does not
-		// match and which reaches the API as 409 through the %w wrapping.
+		// with *store.RevisionMismatchError, which the tolerance does not match
+		// and which reaches the API as 409 through the %w wrapping.
 		if vm.ObservedState != "stopping" {
-			_, stopErr := m.st.TransitionVM(ctx, store.TransitionInput{
+			stopping, stopErr := m.st.TransitionVM(ctx, store.TransitionInput{
 				VMID:             vmID,
 				ExpectedRevision: pin,
 				To:               "stopping",
@@ -740,9 +741,16 @@ func (m *Manager) Delete(ctx context.Context, vmID string, force bool, expectedR
 			})
 			switch {
 			case stopErr == nil:
+				vm = stopping
 				pin = nil // spent on live→stopping
 			case !errors.Is(stopErr, new(store.InvalidTransitionError)):
 				return vm, fmt.Errorf("stopping before delete: %w", stopErr)
+			}
+		}
+		if err := m.rt.ForceStop(ctx, vmID); err != nil {
+			var ue *UnavailableError
+			if !errors.As(err, &ue) { // unavailable runtime is fine — VM not running
+				return vm, fmt.Errorf("force-stop before delete: %w", err)
 			}
 		}
 		_, stopErr := m.st.TransitionVM(ctx, store.TransitionInput{
