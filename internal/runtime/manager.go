@@ -217,13 +217,74 @@ const operationSlack = 120 * time.Second
 // returns — deferring it at the top of a handler is correct, because the
 // mutation is synchronous within the handler.
 func (m *Manager) OperationContext(parent context.Context) (context.Context, context.CancelFunc) {
-	budget := time.Duration(m.cfg.VMDefaults.StopGraceSeconds)*time.Second + operationSlack
+	return m.detachedContext(parent, time.Duration(m.cfg.VMDefaults.StopGraceSeconds)*time.Second+operationSlack)
+}
+
+// detachedContext builds a context that keeps parent's values, drops its
+// cancellation and deadline, carries the given budget, and dies when the
+// manager closes. It is the shape every lifecycle mutation runs on; the budget
+// is what tells the shapes apart.
+func (m *Manager) detachedContext(parent context.Context, budget time.Duration) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), budget)
 	stop := context.AfterFunc(m.ctx, cancel)
 	return ctx, func() {
 		stop()
 		cancel()
 	}
+}
+
+// launchBudget is a start action's budget. A launch is not a stop with the
+// arrow reversed: nothing in it waits on the guest's patience, and almost all
+// of it is file IO that no timeout interrupts (jailer copyFile takes no
+// context at all).
+//
+// Every staged byte is read five times and written twice — hashed against the
+// lock, copied into the stage dir, hashed again for privd, hashed once more by
+// privd, then copied into the jail (internal/jailer/launch.go doStage and
+// computeStagedFiles, internal/privd/vmops.go StartVM). The shipped rootfs is
+// 1 GiB (images/rootfs/build.sh:158) and the workspace image is created at the
+// VM's configured size, so a default VM moves roughly 12 GiB of file IO.
+//
+//	staging + jail copy: ~12 GiB at an assumed 100 MiB/s          = 120s
+//	firecracker start through privd: jailer exec, API, boot       =  15s
+//	runner spawn and guest attach (jailer readyTimeout, :34)      =  60s
+//	store writes recording starting → running                     =  15s
+//	                                                                ----
+//	                                                                210s
+//
+// Rounded up to 240s. The host assumption is the load-bearing part: 100 MiB/s
+// of sustained staging IO, which is a floor well under this host's NVMe and
+// leaves room for the parallel provisions admission allows. Two things make it
+// wrong rather than merely tight — a workspace_disk_mib far above the default
+// (the copy scales with it), and a host whose disk is slower than the floor.
+// Both are deployment facts, so a deployment that has either needs this number
+// recomputed, not raised by feel.
+//
+// This is deliberately not operationSlack: that budget is derived from the stop
+// path — grace, ctl deadlines, signal escalation — and nothing in it is about
+// launching.
+const launchBudget = 240 * time.Second
+
+// recoveryBudget bounds the work that records a mutation's failure once the
+// mutation's own context is gone: the cleanup ForceStop behind a failed launch
+// (10s signal + 35s finalize ctl + 10s chroot release = 55s worst case against
+// the jailer runtime) plus the store writes that say what happened.
+const recoveryBudget = 75 * time.Second
+
+// recoveryContext derives the context for bookkeeping that runs *because* the
+// caller's context is dying or already dead — the branch that records a failed
+// launch, the cleanup behind it, the operation row that carries the verdict.
+// Running those on the context whose expiry caused the failure guarantees they
+// do nothing: the VM stays in a transitional state and the operation stays
+// "running" forever, which is worse than the failure they were meant to record.
+//
+// Unlike detachedContext this is not tied to m.ctx. The work is synchronous
+// inside a call the caller is still blocked on, so it cannot outlive the
+// manager unless that caller does; tying it to m.ctx would switch the
+// bookkeeping off exactly during shutdown, when mutations are most likely to be
+// interrupted mid-flight.
+func (m *Manager) recoveryContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(parent), recoveryBudget)
 }
 
 // SetReportGen installs the run-report generation callback. It is called once
@@ -579,8 +640,15 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 		if vm.ObservedState != "stopped" {
 			return m.failAction(ctx, vmID, opID, action, &store.InvalidTransitionError{From: vm.ObservedState, To: "starting"})
 		}
+		// The whole start runs on a launch-derived budget, not the caller's
+		// stop-derived one (see launchBudget). Staging copies gigabytes and the
+		// guest then gets 60s to attach, so the operation budget would abort a
+		// launch that is behaving perfectly and leave the VM in "starting" with
+		// its stage dir already written.
+		startCtx, startCancel := m.detachedContext(ctx, launchBudget)
+		defer startCancel()
 		bootID := uuid.NewString()
-		updVM, err := m.st.TransitionVM(ctx, store.TransitionInput{
+		updVM, err := m.st.TransitionVM(startCtx, store.TransitionInput{
 			VMID:             vmID,
 			ExpectedRevision: expectedRevision,
 			To:               "starting",
@@ -589,9 +657,9 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 			BootID:           &bootID,
 		})
 		if err != nil {
-			return m.failAction(ctx, vmID, opID, action, err)
+			return m.failAction(startCtx, vmID, opID, action, err)
 		}
-		if err := m.rt.Launch(ctx, VMSpec{
+		if err := m.rt.Launch(startCtx, VMSpec{
 			VMID:             vmID,
 			BootID:           bootID,
 			VCPUCount:        vm.VCPUCount,
@@ -603,24 +671,29 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 			TemplateID:       vm.TemplateID,
 			TemplateDigest:   vm.TemplateDigest,
 		}); err != nil {
-			m.failLaunch(ctx, vmID, opID, "launch", err.Error())
-			_ = m.rt.ForceStop(ctx, vmID)
-			op, _ := m.st.GetOperation(ctx, opID)
+			// A launch fails most often because its budget ran out, so this
+			// branch must assume startCtx is already dead. Recording the failure
+			// and cleaning up on that context would do neither.
+			recCtx, recCancel := m.recoveryContext(startCtx)
+			defer recCancel()
+			m.failLaunch(recCtx, vmID, opID, "launch", err.Error())
+			_ = m.rt.ForceStop(recCtx, vmID)
+			op, _ := m.st.GetOperation(recCtx, opID)
 			return updVM, op, fmt.Errorf("launch: %w", err)
 		}
-		updVM, err = m.st.TransitionVM(ctx, store.TransitionInput{
+		updVM, err = m.st.TransitionVM(startCtx, store.TransitionInput{
 			VMID:        vmID,
 			To:          "running",
 			Reason:      "start_complete",
 			OperationID: opID,
 		})
 		if err != nil {
-			return m.failAction(ctx, vmID, opID, action, err)
+			return m.failAction(startCtx, vmID, opID, action, err)
 		}
 		// Hook: pending run → running when VM starts.
-		m.onVMRunning(ctx, vmID)
+		m.onVMRunning(startCtx, vmID)
 		// start never reaches the shared tail below, so its pin is spent on the →starting transition; a future edit that lets it fall through would re-introduce the double-spend.
-		return m.succeedAction(ctx, vmID, opID, "running", updVM)
+		return m.succeedAction(startCtx, vmID, opID, "running", updVM)
 
 	case "pause":
 		if vm.ObservedState != "running" {
@@ -716,7 +789,17 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 	return m.succeedAction(ctx, vmID, opID, action, updVM)
 }
 
+// failAction records a failed action on the operation row and reads the VM back.
+//
+// Its writes run on a recovery context because the commonest reason an action
+// fails is that its own context expired — a stop whose runtime call ran out of
+// budget, a launch that outlived its own. Recording that on the expired context
+// writes nothing, and the operation is then stranded at "running" describing
+// work that is over.
 func (m *Manager) failAction(ctx context.Context, vmID string, opID int64, action string, cause error) (*store.VM, *store.Operation, error) {
+	ctx, cancel := m.recoveryContext(ctx)
+	defer cancel()
+
 	causeStr := "action_failed"
 	msg := cause.Error()
 	op, _ := m.st.UpdateOperation(ctx, store.OperationUpdate{
