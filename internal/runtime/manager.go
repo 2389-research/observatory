@@ -1021,11 +1021,14 @@ func (m *Manager) Delete(ctx context.Context, vmID string, force bool, expectedR
 	// -- a runtime absent on startup reconcile is normal and must not wedge
 	// deletes.
 	//
-	// Release owns neither the jail chroot nor privd's ledger entry. The stop path
-	// frees both and deliberately logs-and-discards a failure there, so a
-	// "deleted" row can still have <JailBase>/firecracker/<vmID> on disk and a
-	// pinned privd ledger entry behind it. Sweeping those needs the M1b cleanup
-	// backlog, not this call.
+	// Release owns neither the jail chroot nor privd's ledger entry, and nothing
+	// on this path establishes that the VM died. The force-stop above returns nil
+	// whether or not it killed anything: doStop's forced path drops its SignalVM
+	// errors, and it logs-and-discards the final ReleaseVM failure rather than
+	// report a genuinely-dead VM's stop as failed (internal/jailer/stop.go). So
+	// three things can outlive a "deleted" row -- <JailBase>/firecracker/<vmID> on
+	// disk, a pinned privd ledger entry, and the VM process itself. Sweeping those
+	// needs the M1b cleanup backlog, not this call.
 	if err := m.rt.Release(ctx, vmID); err != nil {
 		var ue *UnavailableError
 		if !errors.As(err, &ue) {

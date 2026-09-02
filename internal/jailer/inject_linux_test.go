@@ -245,6 +245,14 @@ func assertRecoveryLaunch(t *testing.T, h *injectHarness, vmID string) {
 	defer cancel()
 	if err := h.adapter.Launch(ctx, defaultSpec(vmID)); err != nil {
 		t.Errorf("recovery Launch for %s: %v", vmID, err)
+		// No wait here, and nothing recorded to wait with. A failed Launch has
+		// already run doRollback, which SIGKILLs the runner and then removes the
+		// manifest along with the whole VM state dir (launch.go:469-511) -- so the
+		// pid is gone from the record, and the kill happened synchronously inside
+		// the Launch call that just returned. The window this helper exists to
+		// close is the other one: a runner that was never signalled, shutting
+		// itself down a tick at a time after its VMM dies. That only happens when
+		// the launch succeeded.
 		h.backend.killAll()
 		return
 	}
@@ -276,9 +284,12 @@ func assertRecoveryLaunch(t *testing.T, h *injectHarness, vmID string) {
 func waitRunnerExit(t *testing.T, pid int) {
 	t.Helper()
 	if pid <= 0 {
-		return
+		t.Fatalf("waitRunnerExit: no runner pid to wait on (got %d); a successful "+
+			"launch always records one in the manifest, so waiting on this would "+
+			"return green without observing anything", pid)
 	}
-	deadline := time.Now().Add(30 * time.Second)
+	const timeout = 30 * time.Second
+	deadline := time.Now().Add(timeout)
 	for {
 		// Signal 0 checks liveness without delivering anything; ESRCH means the
 		// process is gone and reaped.
@@ -286,7 +297,7 @@ func waitRunnerExit(t *testing.T, pid int) {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Errorf("runner pid %d still alive 30s after its VMM was killed", pid)
+			t.Errorf("runner pid %d still alive %s after its VMM was killed", pid, timeout)
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
