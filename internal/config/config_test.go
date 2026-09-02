@@ -382,3 +382,30 @@ func TestPathsRuntimeDerivations(t *testing.T) {
 		})
 	}
 }
+
+// The lock file records its artifact paths relative to the tree it was written
+// from ("images/dist/vmlinux"), so the root they resolve against is the lock's
+// own directory. Resolving them anywhere else makes every launch fail its
+// artifact hash check with Got:absent.
+func TestRuntimeArtifactRoot(t *testing.T) {
+	cases := []struct {
+		name     string
+		lockFile string
+		want     string
+	}{
+		{"absolute lock path", "/srv/vmobs/repo/runtime.lock.json", "/srv/vmobs/repo"},
+		// The config default is relative, so it resolves against the daemon's
+		// working directory — "." says exactly that.
+		{"relative default", "runtime.lock.json", "."},
+		// Lock verification disabled: no lock, no root.
+		{"empty lock path", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := config.Runtime{LockFile: tc.lockFile}
+			if got := r.ArtifactRoot(); got != tc.want {
+				t.Errorf("ArtifactRoot() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

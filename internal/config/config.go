@@ -115,6 +115,27 @@ func (p Paths) JailBase() string {
 	return filepath.Join(p.Runtime, "jail")
 }
 
+// ArtifactRoot is the directory the lock file's relative artifact paths resolve
+// against: the lock's own directory. runtime.lock.json records its artifacts as
+// paths relative to the tree it was written from ("images/dist/vmlinux"), so
+// only that tree makes them mean anything — resolving them against any other
+// root fails every launch's artifact hash check with Got:absent.
+//
+// LockFile defaults to the relative "runtime.lock.json", which therefore
+// resolves against the daemon's working directory. An operator who wants the
+// artifacts found somewhere else sets an absolute lock_file.
+//
+// Empty when lock verification is disabled (LockFile empty), for the same
+// reason StageRoot is empty on an unset runtime root: jailer.New rejects an
+// empty RepoRoot, and a silent "." would let a launch resolve artifacts against
+// whatever directory the daemon happened to start in.
+func (r Runtime) ArtifactRoot() string {
+	if r.LockFile == "" {
+		return ""
+	}
+	return filepath.Dir(r.LockFile)
+}
+
 type Admission struct {
 	AllowMemoryOvercommit       bool    `yaml:"allow_memory_overcommit"`
 	CPUOvercommitRatio          float64 `yaml:"cpu_overcommit_ratio"`

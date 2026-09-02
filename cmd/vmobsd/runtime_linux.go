@@ -34,8 +34,14 @@ const maxSlotsWiring = 64
 //   - StageRoot = cfg.Paths.StageRoot()  (ephemeral staging under the runtime dir)
 //   - JailBase  = cfg.Paths.JailBase()   (jailer chroot base under the runtime dir)
 //   - SpoolRoot = cfg.Paths.State + "/spool"  (per-VM spool dirs under the state dir)
-//   - RepoRoot  = cfg.Paths.State             (lock artifact paths like "images/dist/vmlinux"
-//     resolve here; the runbook syncs the repo's images/dist tree under the state dir)
+//   - RepoRoot  = cfg.Runtime.ArtifactRoot()  (the lock file's own directory: its artifact
+//     paths, like "images/dist/vmlinux", are recorded relative to the tree the lock was
+//     written from, so that tree is the only root they resolve against)
+//
+// The default lock_file is the relative "runtime.lock.json", so by default the
+// artifacts are looked for under the daemon's working directory. An operator who
+// runs the daemon from somewhere else must set an absolute lock_file pointing at
+// the repo tree that holds images/dist.
 //
 // StageRoot and JailBase are config.Paths methods because the preflight doctor
 // reads the same two paths; a second inline expression here would let the doctor
@@ -87,7 +93,7 @@ func buildFirecrackerRuntime(
 		JailBase:    cfg.Paths.JailBase(),
 		SpoolRoot:   filepath.Join(cfg.Paths.State, "spool"),
 		RunnerBin:   runnerBin,
-		RepoRoot:    cfg.Paths.State,
+		RepoRoot:    cfg.Runtime.ArtifactRoot(),
 		LockPath:    cfg.Runtime.LockFile,
 		PrivdSocket: cfg.Paths.PrivilegedSocket,
 		JailUIDBase: cfg.Runtime.JailUIDBase,
