@@ -33,7 +33,7 @@ type Config struct {
 	JailBase  string // jailer chroot base; vsock path is <JailBase>/firecracker/<id>/root/v.sock
 	SpoolRoot string // spool directories live under <SpoolRoot>/<id>/
 	RunnerBin string // absolute path to the vmobs-runner binary
-	RepoRoot  string // directory the lock's artifact paths resolve against (repo/state root)
+	RepoRoot  string // directory the lock's artifact paths resolve against (the runtime lock file's own directory — config.Runtime.ArtifactRoot())
 	LockPath  string // path to runtime.lock.json
 
 	// PrivdSocket is the path to the vmobs-privd unix socket. Used by the

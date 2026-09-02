@@ -563,6 +563,7 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 		}
 		// Hook: pending run → running when VM starts.
 		m.onVMRunning(ctx, vmID)
+		// start never reaches the shared tail below, so its pin is spent on the →starting transition; a future edit that lets it fall through would re-introduce the double-spend.
 		return m.succeedAction(ctx, vmID, opID, "running", updVM)
 
 	case "pause":
