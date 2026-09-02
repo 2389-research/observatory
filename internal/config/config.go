@@ -91,12 +91,29 @@ type Paths struct {
 // StageRoot is the ephemeral staging directory: <Runtime>/stage. The jailer
 // adapter stages boot files here and the preflight doctor stats it; both must
 // read the same derivation or the doctor reports a host it never looked at.
-func (p Paths) StageRoot() string { return filepath.Join(p.Runtime, "stage") }
+//
+// An unset runtime root derives nothing, so this returns "" rather than the
+// relative "stage": empty keeps the doctor's not_configured branch and
+// jailer.New's empty-path rejection honest, while a relative path would make
+// guest_channel pass off a writable stage/ in the daemon's working directory.
+func (p Paths) StageRoot() string {
+	if p.Runtime == "" {
+		return ""
+	}
+	return filepath.Join(p.Runtime, "stage")
+}
 
 // JailBase is the jailer chroot base: <Runtime>/jail. The privd unit's
 // --jail-base flag (scripts/aibox03/vmobs-privd.service) must point at the same
 // directory, or the runner dials a v.sock in a chroot privd never created.
-func (p Paths) JailBase() string { return filepath.Join(p.Runtime, "jail") }
+//
+// Empty when the runtime root is unset, for the same reason as StageRoot.
+func (p Paths) JailBase() string {
+	if p.Runtime == "" {
+		return ""
+	}
+	return filepath.Join(p.Runtime, "jail")
+}
 
 type Admission struct {
 	AllowMemoryOvercommit       bool    `yaml:"allow_memory_overcommit"`

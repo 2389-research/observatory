@@ -62,10 +62,12 @@ func TestPreflightConfigCarriesGuestChannelFields(t *testing.T) {
 	}
 }
 
-// An operator who copies the shipped example must get a doctor that can see the
-// guest channel. config.Load supplies no default for paths.privileged_socket or
-// paths.runtime, so the example config is what guards these two fields against a
-// future edit that empties them and silently reinstates the 501-on-every-launch bug.
+// config.Load supplies no default for paths.privileged_socket or paths.runtime,
+// so the shipped example is the only place those two operator-facing values are
+// written down. This guards exactly that: both reach the doctor non-empty, so an
+// edit that empties either one fails here instead of reappearing as a red gate.
+// Non-empty is not reachable: whether the example's paths match the installed
+// privd unit's --stage-root is a separate question this assertion cannot answer.
 func TestPreflightConfigFromExampleConfigHasGuestChannelPaths(t *testing.T) {
 	cfg, err := config.Load(exampleConfigPath)
 	if err != nil {

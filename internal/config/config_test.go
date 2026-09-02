@@ -366,7 +366,9 @@ func TestPathsRuntimeDerivations(t *testing.T) {
 		{"aibox03 runtime root", "/srv/vmobs", "/srv/vmobs/stage", "/srv/vmobs/jail"},
 		{"trailing slash cleaned", "/srv/vmobs/", "/srv/vmobs/stage", "/srv/vmobs/jail"},
 		{"relative root", "runtime", "runtime/stage", "runtime/jail"},
-		{"empty root", "", "stage", "jail"},
+		// An unset runtime root derives nothing: a relative "stage"/"jail" would
+		// let guest_channel pass against the daemon's working directory.
+		{"empty root", "", "", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

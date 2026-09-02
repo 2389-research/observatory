@@ -64,10 +64,13 @@ const m1aBadPrivdSocket = "/nonexistent/privd.sock"
 // too, but it would prove nothing about privd being unreachable.
 const m1aPrivdDialFailure = "cannot reach privd socket"
 
-// m1aPrivdNotConfigured is the guest_channel not_configured-branch wording. Its
+// m1aPrivdNotConfigured is the exact prefix of the guest_channel
+// not_configured-branch summary (internal/preflight/checks_linux.go). Its
 // presence in an AT-001 refusal means the daemon never dialed anything, so the
-// subtest would be vacuous.
-const m1aPrivdNotConfigured = "not configured"
+// subtest would be vacuous. Matching the full branch wording rather than a bare
+// "not configured" keeps an unrelated phrase elsewhere in the message from
+// reddening the gate for the wrong cause.
+const m1aPrivdNotConfigured = "guest_channel not configured"
 
 // m1aGateEnv is the guard env — the same one TestM0Boot uses.
 // We inherit the full set of gateSkipChecks from boot_test.go via the shared package.

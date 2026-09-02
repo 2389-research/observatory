@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -112,6 +113,18 @@ func TestServeReportsGuestChannelPassWhenPrivdReachable(t *testing.T) {
 		if c.Status != "pass" {
 			t.Errorf("guest_channel status = %q, want %q: summary=%q evidence=%v",
 				c.Status, "pass", c.Summary, c.Evidence)
+		}
+		// The evidence must name the socket this test is listening on, so a pass
+		// says which socket the doctor dialed rather than merely that one worked.
+		sockNamed := false
+		for _, e := range c.Evidence {
+			if strings.Contains(e, sockPath) {
+				sockNamed = true
+			}
+		}
+		if !sockNamed {
+			t.Errorf("guest_channel evidence %v does not name the configured socket %q",
+				c.Evidence, sockPath)
 		}
 	}
 	if !found {
