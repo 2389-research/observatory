@@ -72,6 +72,37 @@ const m1aPrivdDialFailure = "cannot reach privd socket"
 // reddening the gate for the wrong cause.
 const m1aPrivdNotConfigured = "guest_channel not configured"
 
+// gateRootDiskMiB and gateWorkspaceDiskMiB are the per-VM disk reservation every
+// gate VM asks for. Admission charges root+workspace against UsableDiskMiB
+// (internal/runtime/admission.go), so this pair sets how many gate VMs fit on the
+// host at once.
+//
+// Derived from what a running gate VM actually costs on the state disk:
+//
+//	stage dir <Runtime>/stage/<vm_id>/:
+//	  vmlinux         549 MiB  (PLAN.md, L0 Task 6: Linux 6.1.186 build on aibox03)
+//	  rootfs.ext4    1024 MiB  (images/rootfs/build.sh: mkfs.ext4 ... 1G, exactly)
+//	  config.ext4       1 MiB  (configDiskMiB, internal/jailer/launch.go)
+//	  workspace.ext4   64 MiB  (this pair's workspace figure, which does size the file)
+//	jail chroot <Runtime>/jail/firecracker/<vm_id>/root/:
+//	  the same four files again -- privd copies every staged file in
+//	  (CopyFromPinnedFd, internal/privd/vmops.go)
+//	                 ---------
+//	                  3276 MiB
+//
+// 4096 covers that with room for the per-VM state dir and for a dense copy of a
+// sparse source. RootDiskMiB sizes nothing at launch -- the guest's root disk is
+// the fixed 1 GiB rootfs.ext4 -- so it is purely this admission figure.
+//
+// Run 5 asked for 8192+64 = 8256 MiB. Six of those exactly fill aibox03's 52474 MiB
+// of usable disk, and the run needs six reservations alive at AT-009, so a single VM
+// stranded by an earlier subtest turned straight into insufficient_capacity. 4160
+// MiB per VM fits twelve.
+const (
+	gateRootDiskMiB      = 4096
+	gateWorkspaceDiskMiB = 64
+)
+
 // m1aGateEnv is the guard env — the same one TestM0Boot uses.
 // We inherit the full set of gateSkipChecks from boot_test.go via the shared package.
 // The M1a gate adds its own prerequisite probes on top.
@@ -104,6 +135,9 @@ type m1aDaemon struct {
 	stateDir   string
 	runtimeDir string
 	cancel     context.CancelFunc
+	// label names this daemon in log lines and is the post-mortem subdirectory,
+	// so a rescue triggered from a VM teardown lands beside the daemon's own logs.
+	label string
 
 	// vmMu guards createdVMs, the vm_ids this daemon has created via POST /vms.
 	// Tracked centrally (trackVMID) so t.Cleanup can best-effort remove each VM's
@@ -231,8 +265,8 @@ admission:
 vm_defaults:
   vcpu_count: 1
   memory_mib: 512
-  root_disk_mib: 8192
-  workspace_disk_mib: 64
+  root_disk_mib: %d
+  workspace_disk_mib: %d
   guest_privilege: unprivileged
   network_profile: transport
   network_policy_id: ""
@@ -310,6 +344,8 @@ performance_targets:
 		lockPath,
 		m1aPrivdSock,
 		lockPath,
+		gateRootDiskMiB,
+		gateWorkspaceDiskMiB,
 		dbPath,
 	)
 
@@ -337,6 +373,42 @@ performance_targets:
 	cmd.Stdout = stdoutF
 	cmd.Stderr = stderrF
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	// The handle is built before Start so the post-mortem cleanup registered just
+	// after it can read the tracked VM list. Building it later would force that
+	// cleanup to be registered later too, and the registration order here is
+	// load-bearing: cleanups run last-added-first-called.
+	d := &m1aDaemon{
+		addr:    listenAddr,
+		baseURL: "http://" + listenAddr + "/api/v1",
+		// 90s. Derivation, walking internal/jailer/stop.go at stop_grace_seconds=30 --
+		// only the two grace-derived rows move when stop_grace_seconds changes, and both
+		// of them do, so re-derive this whenever it does:
+		//
+		//	dialCtl(shutdown_guest)      5s dial + 30s reply deadline   35s
+		//	graceful exit poll           grace + 5s                     35s
+		//	SIGTERM, wait, SIGKILL       10s signal ctx + 5s wait       15s
+		//	dialCtl(finalize)            5s dial + 30s reply deadline   35s
+		//	release the jail chroot      10s retry window               10s
+		//
+		// The first two are alternatives, not a sum: the runner answers shutdown_guest
+		// only after grace+5s = 35s (internal/runner/runner.go), which is past dialCtl's
+		// own fixed 30s deadline, so at grace 30 the adapter always takes the ctl-timeout
+		// branch and never reaches the poll. That is the path live run 5 measured -- 30s
+		// to the ctl timeout, then the forced escalation and a finalize against a dying
+		// runner -- and 90s covers it with margin on a loaded host.
+		//
+		// It deliberately does not cover the 130s ceiling where both dialCtl calls burn
+		// their full deadline. Since lifecycle mutations stopped riding r.Context()
+		// (internal/api/vms.go), a client timeout costs this test the answer, not the VM.
+		httpClient: &http.Client{Timeout: 90 * time.Second},
+		cmd:        cmd,
+		configPath: configPath,
+		stateDir:   stateDir,
+		runtimeDir: runtimeDir,
+		cancel:     cancel,
+		label:      label,
+	}
 
 	if err := cmd.Start(); err != nil {
 		stdoutF.Close()
@@ -367,20 +439,27 @@ performance_targets:
 		// disk now is the whole record — and it lives under t.TempDir(), which Go
 		// removes as this test ends. Rescue it before that happens.
 		if t.Failed() {
-			savePostmortem(t, label, stdoutPath, stderrPath, dbPath)
+			files := []postmortemFile{
+				{src: stdoutPath, dst: filepath.Base(stdoutPath)},
+				{src: stderrPath, dst: filepath.Base(stderrPath)},
+				{src: dbPath, dst: filepath.Base(dbPath)},
+				// The WAL and shared-memory sidecars exist only while the DB is open or
+				// after an unclean exit; their absence is normal, not a copy failure.
+				{src: dbPath + "-wal", dst: filepath.Base(dbPath) + "-wal", optional: true},
+				{src: dbPath + "-shm", dst: filepath.Base(dbPath) + "-shm", optional: true},
+			}
+			// Any VM still holding a state dir at this point failed to release: the
+			// teardown above rescues and deletes each VM it can reach, so what survives
+			// to here is a leak, and its runner log is the record of why.
+			d.vmMu.Lock()
+			ids := append([]string(nil), d.createdVMs...)
+			d.vmMu.Unlock()
+			for _, id := range ids {
+				files = append(files, vmRunnerFiles(stateDir, id)...)
+			}
+			savePostmortem(t, label, files)
 		}
 	})
-
-	d := &m1aDaemon{
-		addr:       listenAddr,
-		baseURL:    "http://" + listenAddr + "/api/v1",
-		httpClient: &http.Client{Timeout: 30 * time.Second},
-		cmd:        cmd,
-		configPath: configPath,
-		stateDir:   stateDir,
-		runtimeDir: runtimeDir,
-		cancel:     cancel,
-	}
 
 	// Best-effort per-VM stage cleanup: /srv/vmobs is the shared production layout,
 	// so unlike the old test-private runtime dir this cannot blanket-RemoveAll it.
@@ -411,11 +490,12 @@ performance_targets:
 		ids := append([]string(nil), d.createdVMs...)
 		d.vmMu.Unlock()
 
-		// One deadline for the whole loop. The DELETEs go out serially on a client
-		// with a 30s timeout, so against a daemon that accepts connections but never
-		// answers, ten ids burn about five minutes; go test's own timeout panic then
-		// aborts the binary before the remaining cleanups run, losing the post-mortem
-		// for exactly the failure that most needs it.
+		// One deadline for the whole loop. Every request below is built with
+		// teardownCtx, so this 60s cap binds before the client's own 90s timeout and a
+		// daemon that accepts connections but never answers costs 60s in total rather
+		// than 90s per id. Uncapped, ten ids would outrun go test's own timeout, whose
+		// panic aborts the binary before the remaining cleanups run -- losing the
+		// post-mortem for exactly the failure that most needs it.
 		teardownCtx, cancelTeardown := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancelTeardown()
 
@@ -424,6 +504,14 @@ performance_targets:
 				t.Logf("teardown %s: deadline expired after %d/%d vm(s); not deleted: %v",
 					label, i, len(ids), ids[i:])
 				return
+			}
+			// Rescue the runner's log and state file before the DELETE takes the VM's
+			// state dir with it. Only when the run has already failed: a green run has
+			// nothing to explain, and vmRunnerFiles is silent about VMs already gone.
+			if t.Failed() {
+				if files := vmRunnerFiles(d.stateDir, id); len(files) > 0 {
+					savePostmortem(t, label, files)
+				}
 			}
 			logVMStateBeforeTeardown(teardownCtx, t, d, label, id)
 
@@ -667,42 +755,36 @@ func copyFile(src, dst string, mode os.FileMode) error {
 	return out.Close()
 }
 
-// savePostmortem copies a failed daemon's logs and state DB out of t.TempDir(),
-// which Go deletes as the test ends, into a directory that survives the run, and
-// names that directory in the test log so the path shows up in the run output.
-// The pid keeps concurrent or repeated runs from overwriting each other.
+// savePostmortem copies files that would not survive the run -- a failed daemon's
+// logs and state DB, a VM's runner log -- out of t.TempDir(), which Go deletes as
+// the test ends, into a directory that survives, and names that directory in the
+// test log so the path shows up in the run output. The pid keeps concurrent or
+// repeated runs from overwriting each other. Callers may call it more than once
+// for the same label; the files accumulate in one directory.
 // Best-effort throughout: a copy error is reported, never fatal.
-func savePostmortem(t *testing.T, label, stdoutPath, stderrPath, dbPath string) {
+func savePostmortem(t *testing.T, label string, files []postmortemFile) {
 	t.Helper()
+	if len(files) == 0 {
+		return
+	}
 	dir := filepath.Join("/tmp", fmt.Sprintf("m1a-gate-postmortem-%d", os.Getpid()), label)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Logf("postmortem %s: mkdir %s: %v", label, dir, err)
 		return
 	}
-	// The WAL and shared-memory sidecars exist only while the DB is open or after
-	// an unclean exit; their absence is normal, not a copy failure.
 	var saved []string
-	for _, f := range []struct {
-		path     string
-		optional bool
-	}{
-		{stdoutPath, false},
-		{stderrPath, false},
-		{dbPath, false},
-		{dbPath + "-wal", true},
-		{dbPath + "-shm", true},
-	} {
-		if _, err := os.Stat(f.path); err != nil {
+	for _, f := range files {
+		if _, err := os.Stat(f.src); err != nil {
 			if !f.optional {
-				t.Logf("postmortem %s: %s: %v", label, f.path, err)
+				t.Logf("postmortem %s: %s: %v", label, f.src, err)
 			}
 			continue
 		}
-		if err := copyFile(f.path, filepath.Join(dir, filepath.Base(f.path)), 0o644); err != nil {
+		if err := copyFile(f.src, filepath.Join(dir, f.dst), 0o644); err != nil {
 			t.Logf("postmortem %s: %v", label, err)
 			continue
 		}
-		saved = append(saved, filepath.Base(f.path))
+		saved = append(saved, f.dst)
 	}
 	// Only claim what actually landed. A summary line that says "saved" after every
 	// copy failed is the kind of vacuous evidence this gate exists to catch.
@@ -738,8 +820,8 @@ func (d *m1aDaemon) createVMErr(name string) (string, error) {
 		"template_id":        "standard",
 		"vcpu_count":         1,
 		"memory_mib":         512,
-		"root_disk_mib":      8192,
-		"workspace_disk_mib": 64,
+		"root_disk_mib":      gateRootDiskMiB,
+		"workspace_disk_mib": gateWorkspaceDiskMiB,
 	})
 	if err != nil {
 		return "", fmt.Errorf("createVM %s: %w", name, err)
@@ -764,6 +846,76 @@ func (d *m1aDaemon) createVM(t *testing.T, name string) string {
 		t.Fatalf("%v", err)
 	}
 	return vmID
+}
+
+// disposeSubtestVMs registers a cleanup that force-deletes every VM created after
+// this call. Call it as a subtest's first statement, before anything that can
+// abort: t.Cleanup still runs after a t.Fatalf, so the subtest's reservations are
+// freed however it exits, and t.Run waits for the cleanup before the next subtest
+// starts. In live run 5 at011 aborted between its stop and its delete; vmA's disk
+// reservation was still held two subtests later, and AT-009's third create came
+// back 409 insufficient_capacity ("need 8256 MiB, only 2938 MiB free"), taking
+// at018 and at007 down with it -- three red subtests from one abort.
+//
+// Only for VMs whose life ends with the subtest. A VM a later subtest still needs
+// -- gate-a and gate-b, created by two_real_vms and used by at011 -- stays on the
+// daemon's own teardown instead.
+func (d *m1aDaemon) disposeSubtestVMs(t *testing.T) {
+	t.Helper()
+	d.vmMu.Lock()
+	mark := len(d.createdVMs)
+	d.vmMu.Unlock()
+	t.Cleanup(func() {
+		d.vmMu.Lock()
+		ids := append([]string(nil), d.createdVMs[mark:]...)
+		d.vmMu.Unlock()
+		// One deadline for the whole loop, for the reason the daemon teardown gives:
+		// a wedged daemon costs disposeVM its full per-VM timeout, and six of those in
+		// one cleanup can outrun go test's own timeout, whose panic aborts the binary
+		// before the remaining cleanups run.
+		deadline := time.Now().Add(90 * time.Second)
+		for i, id := range ids {
+			if time.Now().After(deadline) {
+				t.Logf("dispose: deadline expired after %d/%d vm(s); not deleted: %v", i, len(ids), ids[i:])
+				return
+			}
+			d.disposeVM(t, id)
+		}
+	})
+}
+
+// disposeVM force-deletes one VM, rescuing its runner artifacts first when the test
+// has already failed. Deleting an already-deleted VM answers 200 (Manager.Delete
+// returns the row unchanged), so it is safe to call after the subtest deleted the
+// VM itself, and after this the daemon teardown may call it again.
+//
+// Best-effort: every failure is logged, none fails the test. A VM that will not
+// delete is a leak for AT-018 to catch, not for teardown to hide.
+func (d *m1aDaemon) disposeVM(t *testing.T, vmID string) {
+	t.Helper()
+	if vmID == "" {
+		return
+	}
+	if t.Failed() {
+		savePostmortem(t, d.label, vmRunnerFiles(d.stateDir, vmID))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, d.baseURL+"/vms/"+vmID+"?force=true", nil)
+	if err != nil {
+		t.Logf("dispose vm %s: new request: %v", vmID, err)
+		return
+	}
+	resp, err := d.httpClient.Do(req)
+	if err != nil {
+		t.Logf("dispose vm %s: %v", vmID, err)
+		return
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Logf("dispose vm %s: got %d: %s", vmID, resp.StatusCode, body)
+	}
 }
 
 // stopVM posts the stop action for a VM.
@@ -1086,8 +1238,8 @@ admission:
 vm_defaults:
   vcpu_count: 1
   memory_mib: 512
-  root_disk_mib: 8192
-  workspace_disk_mib: 64
+  root_disk_mib: %d
+  workspace_disk_mib: %d
   guest_privilege: unprivileged
   network_profile: transport
   network_policy_id: ""
@@ -1165,6 +1317,8 @@ performance_targets:
 			badLockPath,
 			m1aBadPrivdSocket,
 			badLockPath,
+			gateRootDiskMiB,
+			gateWorkspaceDiskMiB,
 			badDB,
 		)
 		if err := os.WriteFile(badCfgPath, []byte(badCfgContent), 0o600); err != nil {
@@ -1222,7 +1376,9 @@ performance_targets:
 		// POST /vms must fail with 501 missing_capability / cause runtime_unavailable.
 		// The reason must name the unreachable socket the daemon actually dialed.
 		resp, err := badClient.Post(badBase+"/vms", "application/json",
-			bytes.NewBufferString(`{"name":"at001-test","template_id":"standard","vcpu_count":1,"memory_mib":512,"root_disk_mib":8192,"workspace_disk_mib":64}`))
+			bytes.NewBufferString(fmt.Sprintf(
+				`{"name":"at001-test","template_id":"standard","vcpu_count":1,"memory_mib":512,"root_disk_mib":%d,"workspace_disk_mib":%d}`,
+				gateRootDiskMiB, gateWorkspaceDiskMiB)))
 		if err != nil {
 			t.Fatalf("POST /vms on bad daemon: %v", err)
 		}
@@ -1289,6 +1445,9 @@ performance_targets:
 	// start action to issue.
 	var vmAID, vmBID string
 	t.Run("two_real_vms", func(t *testing.T) {
+		// No disposeSubtestVMs here on purpose: both VMs are meant to outlive this
+		// subtest. at011 owns vmA's disposal; vmB stays live to the end of the run so
+		// at011 can show A's stop left it alone, and the daemon teardown disposes it.
 		vmAID = daemon.createVM(t, "gate-a")
 		vmBID = daemon.createVM(t, "gate-b")
 
@@ -1363,6 +1522,11 @@ performance_targets:
 		if vmAID == "" || vmBID == "" {
 			t.Skip("skipping: prior subtest did not produce vmAID/vmBID")
 		}
+
+		// vmA's life ends in this subtest. Register its disposal before the first
+		// assertion so an abort below cannot leave its reservation held for the rest
+		// of the run. vmB is deliberately not disposed here.
+		t.Cleanup(func() { daemon.disposeVM(t, vmAID) })
 
 		// Stop A gracefully.
 		daemon.stopVM(t, vmAID)
@@ -1449,14 +1613,15 @@ performance_targets:
 
 	// ── Subtest 5: AT-006 — idempotent replay + conflict ──────────────────────
 	t.Run("at006_idempotency", func(t *testing.T) {
+		daemon.disposeSubtestVMs(t)
 		iKey := fmt.Sprintf("m1a-gate-at006-%d", os.Getpid())
 		status1, body1 := daemon.apiPost(t, "/vms", map[string]any{
 			"name":               "idem-test",
 			"template_id":        "standard",
 			"vcpu_count":         1,
 			"memory_mib":         512,
-			"root_disk_mib":      8192,
-			"workspace_disk_mib": 64,
+			"root_disk_mib":      gateRootDiskMiB,
+			"workspace_disk_mib": gateWorkspaceDiskMiB,
 			"idempotency_key":    iKey,
 		})
 		if status1 != http.StatusCreated {
@@ -1473,8 +1638,8 @@ performance_targets:
 			"template_id":        "standard",
 			"vcpu_count":         1,
 			"memory_mib":         512,
-			"root_disk_mib":      8192,
-			"workspace_disk_mib": 64,
+			"root_disk_mib":      gateRootDiskMiB,
+			"workspace_disk_mib": gateWorkspaceDiskMiB,
 			"idempotency_key":    iKey,
 		})
 		if status2 != http.StatusCreated {
@@ -1496,8 +1661,8 @@ performance_targets:
 			"template_id":        "standard",
 			"vcpu_count":         2,
 			"memory_mib":         512,
-			"root_disk_mib":      8192,
-			"workspace_disk_mib": 64,
+			"root_disk_mib":      gateRootDiskMiB,
+			"workspace_disk_mib": gateWorkspaceDiskMiB,
 			"idempotency_key":    iKey,
 		})
 		if status3 != http.StatusConflict {
@@ -1526,6 +1691,7 @@ performance_targets:
 		// forbids FailNow there), so createVMErr reports failure through its return
 		// value instead of failing t directly. Once the WaitGroup completes, the
 		// test goroutine reports every failed create by name and fails once.
+		daemon.disposeSubtestVMs(t)
 		var vmIDs [4]string
 		createErrs := make([]error, len(vmIDs))
 		var createWG sync.WaitGroup
@@ -1592,6 +1758,7 @@ performance_targets:
 
 	// ── Subtest 7: AT-018 — resource leak check ────────────────────────────────
 	t.Run("at018_no_resource_leaks", func(t *testing.T) {
+		daemon.disposeSubtestVMs(t)
 		baseline := captureBaseline(t, daemon.stateDir, daemon.runtimeDir)
 
 		for cycle := 0; cycle < 5; cycle++ {
@@ -1712,6 +1879,7 @@ performance_targets:
 	// For one VM: its running-transition timestamp must NOT be earlier than its
 	// guest.channel_established event timestamp. Both from the API.
 	t.Run("at007_ordering", func(t *testing.T) {
+		daemon.disposeSubtestVMs(t)
 		vmID := daemon.createVM(t, "at007-order")
 
 		runCtx, runCancel := context.WithTimeout(context.Background(), 3*time.Minute)
