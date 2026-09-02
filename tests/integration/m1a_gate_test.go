@@ -542,19 +542,6 @@ func (d *m1aDaemon) waitEventKind(ctx context.Context, t *testing.T, vmID, kind 
 	}
 }
 
-// pollEventKind returns the first event matching vm_id + kind, or nil if none yet.
-func (d *m1aDaemon) pollEventKind(t *testing.T, vmID, kind string) map[string]any {
-	t.Helper()
-	result := d.apiGet(t, "/events?vm_id="+vmID+"&kind="+kind)
-	evts, _ := result["events"].([]any)
-	if len(evts) > 0 {
-		if m, ok := evts[0].(map[string]any); ok {
-			return m
-		}
-	}
-	return nil
-}
-
 // findFreePort returns a free loopback TCP port by binding and immediately closing.
 func findFreePort(t *testing.T) int {
 	t.Helper()
@@ -1509,10 +1496,7 @@ performance_targets:
 			// confirming the VM's state dir was cleaned up before the next cycle begins.
 			// Deadline: 30s per cycle (well within aibox03's expected teardown time).
 			cyclePollDeadline := time.Now().Add(30 * time.Second)
-			for {
-				if stateDirEntries(daemon.stateDir) == baseline.StateDirEntries {
-					break
-				}
+			for stateDirEntries(daemon.stateDir) != baseline.StateDirEntries {
 				if time.Now().After(cyclePollDeadline) {
 					t.Fatalf("AT-018 cycle %d: state dir did not return to baseline within 30s", cycle)
 				}
@@ -1653,13 +1637,14 @@ performance_targets:
 		if vmBID != "" {
 			bVM := daemon.apiGet(t, "/vms/"+vmBID)
 			bState, _ := bVM["observed_state"].(string)
-			if bState == "running" {
+			switch bState {
+			case "running":
 				daemon.stopVM(t, vmBID)
 				sc, sc2 := context.WithTimeout(context.Background(), 2*time.Minute)
 				defer sc2()
 				daemon.waitVMState(sc, t, vmBID, "stopped")
 				daemon.deleteVM(t, vmBID)
-			} else if bState == "stopped" {
+			case "stopped":
 				daemon.deleteVM(t, vmBID)
 			}
 		}
@@ -1746,7 +1731,7 @@ func assertNoToken(t *testing.T, body []byte) {
 		candidate := s[i : i+64]
 		isHex := true
 		for _, c := range candidate {
-			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 				isHex = false
 				break
 			}
