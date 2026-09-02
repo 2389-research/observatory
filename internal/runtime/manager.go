@@ -194,8 +194,11 @@ func (m *Manager) Close() {
 // grace + 5s. The two rows are additive, not alternatives — a guest that acks
 // at the last moment still leaves the VMM to exit on its own clock.
 //
-// The other branch is shorter at every grace. When the ctl exchange gets no
-// answer at all the adapter skips the exit poll, so it burns 5s dial + the same
+// The other two branches are shorter at every grace, and for the same reason:
+// neither reaches the exit poll. The ctl exchange can get no answer at all — a
+// dead runner, a stale socket, an expired deadline — or the runner can answer
+// and refuse, which is the guest's account of why it will not go down
+// (internal/jailer/stop.go). Either way the adapter burns 5s dial + the same
 // G + 15s ceiling and then the same 60s tail — G + 80s, which never overtakes
 // 2G + 85.
 //

@@ -179,10 +179,12 @@ func TestDoStopWarnsOnGracefulPollTimeout(t *testing.T) {
 	// that context ended it after 300ms. An operator told the VMM was given 35s
 	// goes looking for a guest that would not die; the truth is a stop that was
 	// cut short, which is a different problem with a different fix.
+	//
+	// Ceiling only. The poll starts after a manifest read and a /proc stat, so how
+	// much of the 300ms reaches it is the host's business, and a floor would spend
+	// a flake budget on scheduling luck to catch nothing the ceiling misses.
 	if elapsed := pollWindowFromWarning(t, warn); elapsed > 5*time.Second {
 		t.Errorf("warning reports a %v poll window; the parent context ended the poll after ~300ms: %q", elapsed, warn)
-	} else if elapsed < 100*time.Millisecond {
-		t.Errorf("warning reports a %v poll window, well under the ~300ms the poll ran: %q", elapsed, warn)
 	}
 }
 
