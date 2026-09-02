@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -172,6 +173,37 @@ func TestDoStopWarnsOnGracefulPollTimeout(t *testing.T) {
 	if !strings.Contains(warn, `""`) {
 		t.Errorf("warning does not report the last observed phase, empty and quoted since no state file was ever written: %q", warn)
 	}
+
+	// The window the warning reports must be the one that elapsed. The poll is
+	// allotted grace+5s, but it is nested inside the operation context, and here
+	// that context ended it after 300ms. An operator told the VMM was given 35s
+	// goes looking for a guest that would not die; the truth is a stop that was
+	// cut short, which is a different problem with a different fix.
+	if elapsed := pollWindowFromWarning(t, warn); elapsed > 5*time.Second {
+		t.Errorf("warning reports a %v poll window; the parent context ended the poll after ~300ms: %q", elapsed, warn)
+	} else if elapsed < 100*time.Millisecond {
+		t.Errorf("warning reports a %v poll window, well under the ~300ms the poll ran: %q", elapsed, warn)
+	}
+}
+
+// pollWindowRE pulls the duration out of the third-arm warning. It matches both
+// the elapsed window and a bare allotted one, so a message that reports the
+// wrong quantity is caught by the value rather than by the wording.
+var pollWindowRE = regexp.MustCompile(`within (\S+) `)
+
+// pollWindowFromWarning returns the window the third-arm warning reports for its
+// poll — the only account an operator gets of how long the VMM was given.
+func pollWindowFromWarning(t *testing.T, warn string) time.Duration {
+	t.Helper()
+	m := pollWindowRE.FindStringSubmatch(warn)
+	if m == nil {
+		t.Fatalf("the warning reports no poll window at all: %q", warn)
+	}
+	d, err := time.ParseDuration(m[1])
+	if err != nil {
+		t.Fatalf("poll window %q in %q is not a duration: %v", m[1], warn, err)
+	}
+	return d
 }
 
 // TestDoStopSilentOnSuccessfulGracefulPoll: a graceful stop that reaches

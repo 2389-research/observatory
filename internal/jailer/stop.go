@@ -213,7 +213,9 @@ func (a *Adapter) doStop(ctx context.Context, vmID string, grace time.Duration, 
 				vmID, ctlRefusalReason(reply))
 		default:
 			// shutdown_guest accepted; poll for vmm_exited or finalized within grace+5s.
-			pollCtx, pollCancel := context.WithTimeout(ctx, grace+5*time.Second)
+			pollWindow := grace + 5*time.Second
+			pollStart := time.Now()
+			pollCtx, pollCancel := context.WithTimeout(ctx, pollWindow)
 			defer pollCancel()
 			s, _ := pollRunnerPhase(pollCtx, stateFile, runner.PhaseVMMExited, runner.PhaseFinalized)
 			if s.Phase == runner.PhaseVMMExited || s.Phase == runner.PhaseFinalized {
@@ -223,9 +225,18 @@ func (a *Adapter) doStop(ctx context.Context, vmID string, grace time.Duration, 
 				// the VMM never reached a terminal phase inside the poll window.
 				// This is the one branch that can tell "the guest never answered"
 				// apart from "the guest answered and then did not go down."
+				//
+				// The elapsed window leads, because the allotted one is often not
+				// what happened: this poll is nested inside the operation context
+				// and dies with it, so it can end long before its allotment runs
+				// out. Reporting "35s" for a poll that lasted 300ms sends an
+				// operator after a guest that would not die, when what they have is
+				// a stop that was cut short. Both are printed because they answer
+				// different questions — how long the VMM actually got, and how long
+				// it was supposed to get.
 				fmt.Fprintf(os.Stderr,
-					"jailer: stop: warn: runner accepted graceful shutdown for %s but the VMM did not reach vmm_exited or finalized within %s (last phase observed: %q); escalating to a forced stop\n",
-					vmID, grace+5*time.Second, s.Phase)
+					"jailer: stop: warn: runner accepted graceful shutdown for %s but the VMM did not reach vmm_exited or finalized within %s of an allotted %s (last phase observed: %q); escalating to a forced stop\n",
+					vmID, time.Since(pollStart).Round(time.Millisecond), pollWindow, s.Phase)
 			}
 		}
 		// If ctl failed or grace expired: fall through to forced path.
