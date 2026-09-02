@@ -521,7 +521,7 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 	switch action {
 	case "start":
 		if vm.ObservedState != "stopped" {
-			return m.failAction(ctx, vmID, opID, action, fmt.Errorf("start requires stopped state, got %s", vm.ObservedState))
+			return m.failAction(ctx, vmID, opID, action, &store.InvalidTransitionError{From: vm.ObservedState, To: "starting"})
 		}
 		bootID := uuid.NewString()
 		updVM, err := m.st.TransitionVM(ctx, store.TransitionInput{
@@ -567,7 +567,7 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 
 	case "pause":
 		if vm.ObservedState != "running" {
-			return m.failAction(ctx, vmID, opID, action, fmt.Errorf("pause requires running state, got %s", vm.ObservedState))
+			return m.failAction(ctx, vmID, opID, action, &store.InvalidTransitionError{From: vm.ObservedState, To: "paused"})
 		}
 		if err := m.rt.Pause(ctx, vmID); err != nil {
 			return m.failAction(ctx, vmID, opID, action, err)
@@ -576,7 +576,7 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 
 	case "resume":
 		if vm.ObservedState != "paused" {
-			return m.failAction(ctx, vmID, opID, action, fmt.Errorf("resume requires paused state, got %s", vm.ObservedState))
+			return m.failAction(ctx, vmID, opID, action, &store.InvalidTransitionError{From: vm.ObservedState, To: "running"})
 		}
 		if err := m.rt.Resume(ctx, vmID); err != nil {
 			return m.failAction(ctx, vmID, opID, action, err)
@@ -587,7 +587,7 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 		switch vm.ObservedState {
 		case "running", "paused", "stopping":
 		default:
-			return m.failAction(ctx, vmID, opID, action, fmt.Errorf("stop requires running/paused/stopping state, got %s", vm.ObservedState))
+			return m.failAction(ctx, vmID, opID, action, &store.InvalidTransitionError{From: vm.ObservedState, To: "stopping"})
 		}
 		// Transition to stopping first (required by §5.2 matrix for running and paused).
 		if vm.ObservedState != "stopping" {
@@ -617,7 +617,7 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 		switch vm.ObservedState {
 		case "running", "paused", "stopping":
 		default:
-			return m.failAction(ctx, vmID, opID, action, fmt.Errorf("force_stop requires running/paused/stopping state, got %s", vm.ObservedState))
+			return m.failAction(ctx, vmID, opID, action, &store.InvalidTransitionError{From: vm.ObservedState, To: "stopping"})
 		}
 		// Transition through stopping first (§5.2 matrix: running/paused→stopping→stopped).
 		if vm.ObservedState != "stopping" {

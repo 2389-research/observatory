@@ -482,6 +482,34 @@ func TestManagerStopSpendsRevisionPinOnce(t *testing.T) {
 	}
 }
 
+// TestManagerActionWrongStateIsInvalidTransition: an action the VM's current
+// state does not allow is a caller-side mistake, so it must carry the state
+// pair that explains it. An untyped error falls through the API's mapping to a
+// 500 with cause storage_failure — a lie about whose fault it is (P-06).
+func TestManagerActionWrongStateIsInvalidTransition(t *testing.T) {
+	st := openStoreForManager(t)
+	fk := runtimetest.NewFake()
+	mgr := newManager(t, st, fk)
+
+	vm, _, _, err := mgr.CreateVM(t.Context(), "local_operator", createReq("already-running"))
+	if err != nil {
+		t.Fatalf("CreateVM: %v", err)
+	}
+	mgr.Close() // drain the launch goroutine so the VM is settled in running
+
+	_, _, err = mgr.Action(t.Context(), vm.VMID, "start", nil)
+	if err == nil {
+		t.Fatal("start on a running VM returned no error")
+	}
+	var txn *store.InvalidTransitionError
+	if !errors.As(err, &txn) {
+		t.Fatalf("error is %T (%v), want *store.InvalidTransitionError", err, err)
+	}
+	if txn.From != "running" || txn.To != "starting" {
+		t.Errorf("transition = %s→%s, want running→starting", txn.From, txn.To)
+	}
+}
+
 func TestManagerForceStopFromPaused(t *testing.T) {
 	// §5.2: force-stop from paused must not wait for guest cooperation.
 	st := openStoreForManager(t)

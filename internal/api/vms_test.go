@@ -643,6 +643,29 @@ func TestVMActionStopWithRevisionSucceeds(t *testing.T) {
 	}
 }
 
+// TestVMActionWrongStateTeaches: starting an already-running VM is the
+// caller's mistake, and the answer must say so — 409 invalid_transition naming
+// the state pair, not a 500 blaming storage.
+func TestVMActionWrongStateTeaches(t *testing.T) {
+	srv, _, fake := newTemplateServer(t)
+	vmID := createRunningVM(t, srv.URL, fake)
+
+	var vm map[string]any
+	getJSON(t, srv.URL+"/api/v1/vms/"+vmID, http.StatusOK, &vm)
+
+	var e api.Error
+	doRequest(t, http.MethodPost, srv.URL+"/api/v1/vms/"+vmID+"/actions",
+		map[string]any{"action": "start", "expected_revision": vm["revision"]},
+		http.StatusConflict, &e)
+	requireTeaching(t, e, "invalid_transition")
+	if from, _ := e.Details["from"].(string); from != "running" {
+		t.Errorf("details.from = %v, want running (details: %v)", e.Details["from"], e.Details)
+	}
+	if to, _ := e.Details["to"].(string); to != "starting" {
+		t.Errorf("details.to = %v, want starting (details: %v)", e.Details["to"], e.Details)
+	}
+}
+
 // --- delete ---
 
 func TestDeleteVMNotFound(t *testing.T) {
