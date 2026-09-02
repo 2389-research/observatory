@@ -32,9 +32,10 @@ type recordingBackend struct {
 	releaseVMCalls []string // vm_ids
 
 	// Injected responses.
-	startResp privd.StartVMResp
-	startErr  error
-	signalErr error
+	allocateErr error
+	startResp   privd.StartVMResp
+	startErr    error
+	signalErr   error
 }
 
 type recordedAllocate struct {
@@ -54,7 +55,7 @@ type recordedSignal struct {
 
 func (b *recordingBackend) AllocateNetwork(entry privd.VMEntry, req privd.AllocateNetworkReq) error {
 	b.allocateCalls = append(b.allocateCalls, recordedAllocate{entry, req})
-	return nil
+	return b.allocateErr
 }
 
 func (b *recordingBackend) ReleaseNetwork(entry privd.VMEntry) error {
@@ -763,5 +764,116 @@ func TestReleaseVMAliveProcess(t *testing.T) {
 	}
 	if len(backend.releaseVMCalls) != 1 {
 		t.Errorf("releaseVMCalls = %d, want 1", len(backend.releaseVMCalls))
+	}
+}
+
+// TestAllocateNetworkRollsBackOnFailure verifies that when the backend's AllocateNetwork
+// call fails partway through setup, the server issues a best-effort ReleaseNetwork to
+// undo any partial host state, writes no ledger entry, and returns the original setup
+// error unchanged — so a subsequent release_network correctly reports not_found rather
+// than the orphan being invisible to privd forever.
+func TestAllocateNetworkRollsBackOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "privd.sock")
+	ledgerDir := filepath.Join(dir, "ledger")
+	if err := os.MkdirAll(ledgerDir, 0o755); err != nil {
+		t.Fatalf("mkdir ledger: %v", err)
+	}
+
+	setupErr := errors.New("exec [ip link add veth-x type veth peer name eth-up netns vmobs-x]: exit status 2")
+	backend := &recordingBackend{allocateErr: setupErr}
+	cfg := privd.ServerCfg{
+		AllowedUID: os.Getuid(),
+		LedgerDir:  ledgerDir,
+		StageRoot:  dir,
+		JailBase:   filepath.Join(dir, "jail"),
+		UIDMin:     1000,
+		UIDMax:     2000,
+		Ops:        backend,
+	}
+	startServer(t, sockPath, cfg)
+
+	vmID := "vm-rollback-001"
+	cidr := "10.3.0.0/30"
+
+	conn := dialPrivd(t, sockPath)
+	resp := sendRecv(t, conn, makeReq(t, "allocate_network", privd.AllocateNetworkReq{VMID: vmID, CIDR: cidr}))
+	conn.Close()
+
+	if resp.OK {
+		t.Fatal("expected allocate_network to fail, got OK")
+	}
+	if resp.Cause != "exec_failed" {
+		t.Errorf("cause = %q, want exec_failed", resp.Cause)
+	}
+	if resp.Message != setupErr.Error() {
+		t.Errorf("message = %q, want original setup error %q", resp.Message, setupErr.Error())
+	}
+
+	// Teardown must have been issued exactly once, for this vmID.
+	if len(backend.releaseCalls) != 1 {
+		t.Fatalf("releaseCalls = %d, want 1 (rollback teardown)\n  calls: %v", len(backend.releaseCalls), backend.releaseCalls)
+	}
+	if backend.releaseCalls[0] != vmID {
+		t.Errorf("releaseCalls[0] = %q, want %q", backend.releaseCalls[0], vmID)
+	}
+
+	// No ledger entry must have been written.
+	ledgerFile := filepath.Join(ledgerDir, vmID+".json")
+	if _, err := os.Stat(ledgerFile); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("ledger file exists after failed allocate (want: absent): err=%v", err)
+	}
+
+	// A subsequent release_network for the same vmID must report not_found — the
+	// server has no record of it, so there is nothing left to release.
+	conn2 := dialPrivd(t, sockPath)
+	resp2 := sendRecv(t, conn2, makeReq(t, "release_network", privd.ReleaseNetworkReq{VMID: vmID}))
+	conn2.Close()
+	if resp2.OK {
+		t.Fatal("expected release_network on unledgered vm to fail, got OK")
+	}
+	if resp2.Cause != "not_found" {
+		t.Errorf("release_network cause = %q, want not_found", resp2.Cause)
+	}
+}
+
+// TestAllocateNetworkHappyPathNoTeardown verifies that a successful allocate_network
+// issues no teardown call — rollback must never run on the success path.
+func TestAllocateNetworkHappyPathNoTeardown(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "privd.sock")
+	ledgerDir := filepath.Join(dir, "ledger")
+	if err := os.MkdirAll(ledgerDir, 0o755); err != nil {
+		t.Fatalf("mkdir ledger: %v", err)
+	}
+
+	backend := &recordingBackend{}
+	cfg := privd.ServerCfg{
+		AllowedUID: os.Getuid(),
+		LedgerDir:  ledgerDir,
+		StageRoot:  dir,
+		JailBase:   filepath.Join(dir, "jail"),
+		UIDMin:     1000,
+		UIDMax:     2000,
+		Ops:        backend,
+	}
+	startServer(t, sockPath, cfg)
+
+	vmID := "vm-happy-001"
+	cidr := "10.4.0.0/30"
+
+	conn := dialPrivd(t, sockPath)
+	resp := sendRecv(t, conn, makeReq(t, "allocate_network", privd.AllocateNetworkReq{VMID: vmID, CIDR: cidr}))
+	conn.Close()
+	if !resp.OK {
+		t.Fatalf("allocate_network: %+v", resp)
+	}
+
+	ledgerFile := filepath.Join(ledgerDir, vmID+".json")
+	if _, err := os.Stat(ledgerFile); err != nil {
+		t.Fatalf("ledger file not created: %v", err)
+	}
+	if len(backend.releaseCalls) != 0 {
+		t.Errorf("releaseCalls = %d, want 0 (no teardown on success)\n  calls: %v", len(backend.releaseCalls), backend.releaseCalls)
 	}
 }

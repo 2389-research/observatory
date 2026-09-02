@@ -184,6 +184,12 @@ func (s *Server) handleAllocateNetwork(raw json.RawMessage) Response {
 		CreatedAtUnix: time.Now().Unix(),
 	}
 	if err := s.cfg.Ops.AllocateNetwork(entry, r); err != nil {
+		// Setup can fail partway through (e.g. the veth step), leaving a netns
+		// or tap on the host with no ledger entry to track it — an orphan that
+		// release_network could never find. Roll back best-effort (mirrors the
+		// jailer's launch-rollback discipline) and surface the original cause
+		// unchanged; the ledger write below never runs, so no entry is recorded.
+		_ = s.cfg.Ops.ReleaseNetwork(entry)
 		return errResp("exec_failed", err.Error())
 	}
 	if err := s.ledger.put(entry); err != nil {
