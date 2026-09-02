@@ -687,11 +687,20 @@ func (m *Manager) succeedAction(ctx context.Context, vmID string, opID int64, ph
 
 // Delete removes VM compute resources. Already-deleted or deleting VMs are
 // idempotent returns. Live VMs require force=true.
+//
+// expectedRevision is an optimistic-concurrency precondition, and a
+// precondition is checked once: on the first transition this call makes. The
+// force path walks running/paused→stopping→stopped→deleting, so the pin rides
+// whichever of those runs first and every later transition goes unpinned — the
+// store still validates from→to on each. Re-pinning a later transition to the
+// caller's revision would fail every time, because the earlier transitions
+// already bumped it.
 func (m *Manager) Delete(ctx context.Context, vmID string, force bool, expectedRevision *int64) (*store.VM, error) {
 	vm, err := m.st.GetVM(ctx, vmID)
 	if err != nil {
 		return nil, err
 	}
+	pin := expectedRevision
 	switch vm.ObservedState {
 	case "deleted":
 		return vm, nil // already done
@@ -716,25 +725,39 @@ func (m *Manager) Delete(ctx context.Context, vmID string, force bool, expectedR
 			}
 		}
 		// §5.2: running/paused→stopping→stopped (no direct live→stopped transition).
+		// A transition refused as invalid is tolerated — the reconciler or a
+		// concurrent stop may have moved the row already — and consumes nothing,
+		// so the pin travels on to the next transition. A stale pin is refused
+		// with *store.RevisionMismatchError, which the tolerance below does not
+		// match and which reaches the API as 409 through the %w wrapping.
 		if vm.ObservedState != "stopping" {
-			if _, err := m.st.TransitionVM(ctx, store.TransitionInput{
-				VMID:        vmID,
-				To:          "stopping",
-				Reason:      "forced_stop_for_delete",
-				OperationID: 0,
-			}); err != nil && !errors.Is(err, new(store.InvalidTransitionError)) {
-				return vm, fmt.Errorf("stopping before delete: %w", err)
+			_, stopErr := m.st.TransitionVM(ctx, store.TransitionInput{
+				VMID:             vmID,
+				ExpectedRevision: pin,
+				To:               "stopping",
+				Reason:           "forced_stop_for_delete",
+				OperationID:      0,
+			})
+			switch {
+			case stopErr == nil:
+				pin = nil // spent on live→stopping
+			case !errors.Is(stopErr, new(store.InvalidTransitionError)):
+				return vm, fmt.Errorf("stopping before delete: %w", stopErr)
 			}
 		}
-		vm, err = m.st.TransitionVM(ctx, store.TransitionInput{
-			VMID:           vmID,
-			To:             "stopped",
-			Reason:         "forced_stop_for_delete",
-			OperationID:    0,
-			ReleaseCompute: true,
+		_, stopErr := m.st.TransitionVM(ctx, store.TransitionInput{
+			VMID:             vmID,
+			ExpectedRevision: pin,
+			To:               "stopped",
+			Reason:           "forced_stop_for_delete",
+			OperationID:      0,
+			ReleaseCompute:   true,
 		})
-		if err != nil && !errors.Is(err, new(store.InvalidTransitionError)) {
-			return vm, fmt.Errorf("stop before delete: %w", err)
+		switch {
+		case stopErr == nil:
+			pin = nil // spent here when the VM was already stopping
+		case !errors.Is(stopErr, new(store.InvalidTransitionError)):
+			return vm, fmt.Errorf("stop before delete: %w", stopErr)
 		}
 		if vm, err = m.st.GetVM(ctx, vmID); err != nil {
 			return nil, err
@@ -745,7 +768,7 @@ func (m *Manager) Delete(ctx context.Context, vmID string, force bool, expectedR
 	if vm.ObservedState == "failed" || vm.ObservedState == "stopped" {
 		vm, err = m.st.TransitionVM(ctx, store.TransitionInput{
 			VMID:             vmID,
-			ExpectedRevision: expectedRevision,
+			ExpectedRevision: pin,
 			To:               "deleting",
 			Reason:           "delete_requested",
 			OperationID:      0,

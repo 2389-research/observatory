@@ -6,11 +6,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	sysruntime "runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -667,6 +669,50 @@ func TestVMActionWrongStateTeaches(t *testing.T) {
 }
 
 // --- delete ---
+
+// TestDeleteVMForceWithRevisionSucceeds: a force delete carrying the VM's
+// current revision must succeed. The pin rides the first transition the delete
+// makes (running→stopping); attaching it to the later →deleting transition,
+// after two transitions already bumped the revision, answers 409 every time.
+func TestDeleteVMForceWithRevisionSucceeds(t *testing.T) {
+	srv, _, fake := newTemplateServer(t)
+	vmID := createRunningVM(t, srv.URL, fake)
+
+	var vm map[string]any
+	getJSON(t, srv.URL+"/api/v1/vms/"+vmID, http.StatusOK, &vm)
+	rev, _ := vm["revision"].(string)
+
+	var resp map[string]any
+	doRequest(t, http.MethodDelete,
+		srv.URL+"/api/v1/vms/"+vmID+"?force=true&expected_revision="+rev,
+		nil, http.StatusOK, &resp)
+
+	deleted, _ := resp["vm"].(map[string]any)
+	if state, _ := deleted["observed_state"].(string); state != "deleted" {
+		t.Errorf("observed_state after force delete = %q, want deleted", state)
+	}
+}
+
+// TestDeleteVMForceStalePinRefused: the pin stays a precondition. A revision
+// that has moved on is refused with 409 revision_mismatch — the typed store
+// error must survive the manager's wrapping and reach writeVMError intact.
+func TestDeleteVMForceStalePinRefused(t *testing.T) {
+	srv, _, fake := newTemplateServer(t)
+	vmID := createRunningVM(t, srv.URL, fake)
+
+	var vm map[string]any
+	getJSON(t, srv.URL+"/api/v1/vms/"+vmID, http.StatusOK, &vm)
+	rev, err := strconv.ParseInt(vm["revision"].(string), 10, 64)
+	if err != nil {
+		t.Fatalf("parse revision %v: %v", vm["revision"], err)
+	}
+
+	var e api.Error
+	doRequest(t, http.MethodDelete,
+		fmt.Sprintf("%s/api/v1/vms/%s?force=true&expected_revision=%d", srv.URL, vmID, rev-1),
+		nil, http.StatusConflict, &e)
+	requireTeaching(t, e, "revision_mismatch")
+}
 
 func TestDeleteVMNotFound(t *testing.T) {
 	srv, _, _ := newTemplateServer(t)

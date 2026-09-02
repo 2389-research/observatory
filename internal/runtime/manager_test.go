@@ -689,6 +689,69 @@ func TestManagerDeleteLiveVMRequiresForce(t *testing.T) {
 	}
 }
 
+// TestManagerForceDeleteSpendsRevisionPinOnce: a force delete carrying the VM's
+// current revision must succeed. The pin is a precondition checked once, on the
+// first transition the call makes (running→stopping); hanging it on the later
+// →deleting transition — after two earlier transitions already bumped the
+// revision — could only ever answer revision_mismatch.
+func TestManagerForceDeleteSpendsRevisionPinOnce(t *testing.T) {
+	st := openStoreForManager(t)
+	fk := runtimetest.NewFake()
+	mgr := newManager(t, st, fk)
+
+	vm, _, _, err := mgr.CreateVM(t.Context(), "local_operator", createReq("delete-pinned"))
+	if err != nil {
+		t.Fatalf("CreateVM: %v", err)
+	}
+	mgr.Close() // drain the launch goroutine so the revision below is settled
+
+	current, err := st.GetVM(t.Context(), vm.VMID)
+	if err != nil {
+		t.Fatalf("GetVM: %v", err)
+	}
+	rev := current.Revision
+
+	del, err := mgr.Delete(t.Context(), vm.VMID, true, &rev)
+	if err != nil {
+		t.Fatalf("force delete pinned at revision %d: %v", rev, err)
+	}
+	if del.ObservedState != "deleted" {
+		t.Errorf("force delete state = %q, want deleted", del.ObservedState)
+	}
+}
+
+// TestManagerForceDeleteStalePinRefused: the pin must stay a precondition, not
+// decoration. A revision that has already moved on is refused with a typed
+// *store.RevisionMismatchError, reachable through whatever wrapping Delete adds.
+func TestManagerForceDeleteStalePinRefused(t *testing.T) {
+	st := openStoreForManager(t)
+	fk := runtimetest.NewFake()
+	mgr := newManager(t, st, fk)
+
+	vm, _, _, err := mgr.CreateVM(t.Context(), "local_operator", createReq("delete-stale"))
+	if err != nil {
+		t.Fatalf("CreateVM: %v", err)
+	}
+	mgr.Close()
+
+	current, err := st.GetVM(t.Context(), vm.VMID)
+	if err != nil {
+		t.Fatalf("GetVM: %v", err)
+	}
+	stale := current.Revision - 1
+
+	if _, err = mgr.Delete(t.Context(), vm.VMID, true, &stale); err == nil {
+		t.Fatalf("force delete pinned at stale revision %d: got nil error, want refusal", stale)
+	}
+	var mismatch *store.RevisionMismatchError
+	if !errors.As(err, &mismatch) {
+		t.Fatalf("error is %T (%v), want *store.RevisionMismatchError", err, err)
+	}
+	if mismatch.Current != current.Revision {
+		t.Errorf("mismatch.Current = %d, want %d", mismatch.Current, current.Revision)
+	}
+}
+
 func TestManagerReconcile(t *testing.T) {
 	// Simulate VMs left in various transitional states by a crashed controller,
 	// then start a new manager and verify Reconcile cleans them up.
