@@ -1247,7 +1247,8 @@ func TestManagerDeleteFailsOnReleaseError(t *testing.T) {
 }
 
 // TestNotifyVMMExitRunningToFailed verifies that NotifyVMMExit on a running VM
-// with graceful=false transitions it to failed with the reason recorded.
+// with graceful=false transitions it to failed with the failure stage, the
+// reason and the compute release all recorded.
 //
 // Pattern: create+launch on one manager, drain workers with Close(), then call
 // NotifyVMMExit on the same manager (synchronous, no goroutines needed — the
@@ -1286,12 +1287,27 @@ func TestNotifyVMMExitRunningToFailed(t *testing.T) {
 	if vm3.ObservedState != "failed" {
 		t.Errorf("state after non-graceful exit: want failed, got %q", vm3.ObservedState)
 	}
-	if vm3.FailureReason == nil || !strings.Contains(*vm3.FailureReason, "reconcile") {
-		t.Errorf("failure_reason should contain reason, got %v", vm3.FailureReason)
+	// The reason is the caller's string stored verbatim — nothing generated in
+	// it, no timestamp or ID — so pin the whole string. A substring match also
+	// accepts a reason the manager wrapped or truncated on the way through.
+	if vm3.FailureReason == nil || *vm3.FailureReason != reason {
+		t.Errorf("failure_reason: want %q, got %s", reason, quoteStr(vm3.FailureReason))
+	}
+	if vm3.FailureStage == nil || *vm3.FailureStage != "vmm_exit" {
+		t.Errorf("failure_stage: want %q, got %s", "vmm_exit", quoteStr(vm3.FailureStage))
+	}
+	res, err := st.GetReservation(t.Context(), vm.VMID)
+	if err != nil {
+		t.Fatalf("GetReservation: %v", err)
+	}
+	if !res.ComputeReleased {
+		t.Error("compute_released should be true once the VM failed — a failed VM holds no compute")
 	}
 }
 
-// TestNotifyVMMExitRunningToStopped verifies that graceful=true transitions to stopped.
+// TestNotifyVMMExitRunningToStopped verifies that graceful=true transitions to
+// stopped and releases the VM's compute reservation — reaching stopped while
+// still holding compute would leak host capacity and is the failure this guards.
 func TestNotifyVMMExitRunningToStopped(t *testing.T) {
 	st := openStoreForManager(t)
 	fk := runtimetest.NewFake()
@@ -1321,6 +1337,13 @@ func TestNotifyVMMExitRunningToStopped(t *testing.T) {
 	}
 	if vm3.ObservedState != "stopped" {
 		t.Errorf("state after graceful exit: want stopped, got %q", vm3.ObservedState)
+	}
+	res, err := st.GetReservation(t.Context(), vm.VMID)
+	if err != nil {
+		t.Fatalf("GetReservation: %v", err)
+	}
+	if !res.ComputeReleased {
+		t.Error("compute_released should be true once the VM stopped — a stopped VM holds no compute")
 	}
 }
 
@@ -1405,10 +1428,10 @@ func TestNotifyVMMExitPausedToFailed(t *testing.T) {
 		t.Errorf("state after non-graceful exit from paused: want failed, got %q", after.ObservedState)
 	}
 	if after.FailureStage == nil || *after.FailureStage != "vmm_exit" {
-		t.Errorf("failure_stage: want vmm_exit, got %v", after.FailureStage)
+		t.Errorf("failure_stage: want %q, got %s", "vmm_exit", quoteStr(after.FailureStage))
 	}
 	if after.FailureReason == nil || *after.FailureReason != reason {
-		t.Errorf("failure_reason: want %q, got %v", reason, after.FailureReason)
+		t.Errorf("failure_reason: want %q, got %s", reason, quoteStr(after.FailureReason))
 	}
 	res, err := st.GetReservation(t.Context(), vm.VMID)
 	if err != nil {
@@ -1506,6 +1529,16 @@ func TestNotifyVMMExitEarlyLifecycleGracefulGoesToFailed(t *testing.T) {
 	// Unblock and drain so the test doesn't leak the goroutine.
 	close(unblock)
 	mgr.Close()
+}
+
+// quoteStr renders a *string for a failure message: the quoted value, or
+// "<nil>". Printing the pointer gives an address, which says nothing about what
+// the manager actually recorded.
+func quoteStr(p *string) string {
+	if p == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("%q", *p)
 }
 
 // waitForFakeCall blocks until the fake records a call of method against vmID.
