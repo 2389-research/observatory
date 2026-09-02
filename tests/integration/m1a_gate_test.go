@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -24,13 +25,29 @@ import (
 // m1aPrivdSock is the socket path installed by scripts/aibox03/setup.sh.
 const m1aPrivdSock = "/run/vmobs/privd.sock"
 
-// m1aStageBaseDir is the installed privd's stage root. The test creates subdirs here.
-// privd validates that every start_vm StageDir resolves under this prefix.
-const m1aStageBaseDir = "/srv/vmobs/stage"
+// m1aRuntimeRoot is the primary gate daemon's Paths.Runtime. It must be exactly
+// /srv/vmobs: the daemon derives StageRoot = Paths.Runtime + "/stage" and
+// JailBase = Paths.Runtime + "/jail" (cmd/vmobsd/runtime_linux.go:34-35), and
+// JailBase is load-bearing — the runner's --uds flag and the stop path both build
+// <JailBase>/firecracker/<id>/root/v.sock from it (internal/jailer/launch.go:179,196;
+// internal/jailer/stop.go:368) and dial it host-side. privd creates the real chroot
+// under ITS OWN --jail-base, which the installed unit sets to /srv/vmobs/jail
+// (scripts/aibox03/vmobs-privd.service); its --stage-root is /srv/vmobs/stage. So
+// /srv/vmobs is the only Paths.Runtime that satisfies both derivations against the
+// installed privd.
+const m1aRuntimeRoot = "/srv/vmobs"
 
-// m1aJailBase is where privd puts jail chroot dirs (from --jail-base in the service unit).
-// This is NOT path-configurable per test — it is privd's fixed server-side value.
-const m1aJailBase = "/srv/vmobs/jail"
+// m1aStageBaseDir is the installed privd's stage root. The test stages each VM's boot
+// files here, one subdir per vm_id. Derived from m1aRuntimeRoot — one source of truth —
+// rather than a second independent literal that could drift from it.
+const m1aStageBaseDir = m1aRuntimeRoot + "/stage"
+
+// m1aJailBase is where privd puts jail chroot dirs (from --jail-base in the service
+// unit). This is NOT path-configurable per test — it is privd's fixed server-side
+// value. Also derived from m1aRuntimeRoot: since Paths.Runtime = /srv/vmobs, the
+// primary daemon's own JailBase derivation lands on this exact path too — that
+// equality is what lets the runner's v.sock dial succeed against privd's real chroot.
+const m1aJailBase = m1aRuntimeRoot + "/jail"
 
 // m1aPrivdLabel is checked in vmobsd's AT-001 refusal body.
 // The jailer adapter names the failing preflight check ID: "guest_channel".
@@ -64,6 +81,21 @@ type m1aDaemon struct {
 	stateDir   string
 	runtimeDir string
 	cancel     context.CancelFunc
+
+	// vmMu guards createdVMs, the vm_ids this daemon has created via POST /vms.
+	// Tracked centrally (trackVMID) so t.Cleanup can best-effort remove each VM's
+	// stage dir: /srv/vmobs is the shared production layout, so cleanup can no longer
+	// blanket-RemoveAll a private per-test runtime dir the way the old layout did.
+	vmMu       sync.Mutex
+	createdVMs []string
+}
+
+// trackVMID records vmID as created by this daemon so t.Cleanup can best-effort
+// remove its stage dir afterward. Safe for concurrent callers.
+func (d *m1aDaemon) trackVMID(vmID string) {
+	d.vmMu.Lock()
+	defer d.vmMu.Unlock()
+	d.createdVMs = append(d.createdVMs, vmID)
 }
 
 // startDaemon starts vmobsd with runtime.mode=firecracker and returns a handle.
@@ -72,25 +104,25 @@ type m1aDaemon struct {
 func startDaemon(t *testing.T, repoRoot, daemonBin, runnerBin, label string) *m1aDaemon {
 	t.Helper()
 
-	// Unique label for this daemon's dirs — avoids any cross-test residue.
-	uniqueID := fmt.Sprintf("%s-%d", label, os.Getpid())
+	// Paths.Runtime is the fixed production layout, not a per-test subdir: it must
+	// equal /srv/vmobs exactly so the daemon's JailBase derivation (Paths.Runtime +
+	// "/jail") matches privd's real --jail-base. See the m1aRuntimeRoot doc comment.
+	runtimeDir := m1aRuntimeRoot
 
-	// Stage root must live under /srv/vmobs/stage so privd accepts start_vm requests.
-	// T12 path derivation: StageRoot = Paths.Runtime + "/stage".
-	// So we need Paths.Runtime such that Runtime+"/stage" is under /srv/vmobs/stage.
-	// Chosen: Paths.Runtime = /srv/vmobs/stage/m1a-gate/<uniqueID>
-	// StageRoot = /srv/vmobs/stage/m1a-gate/<uniqueID>/stage  -- under /srv/vmobs/stage ✓
-	// JailBase  = /srv/vmobs/stage/m1a-gate/<uniqueID>/jail   -- test adapter config only;
-	//             privd's own JailBase is /srv/vmobs/jail (from its service unit).
+	// /srv/vmobs/stage and /srv/vmobs/jail are provisioned by scripts/aibox03/setup.sh,
+	// not by this test: /srv/vmobs/jail is root:root 0755 (traversable, not writable by
+	// this test's uid), and MkdirAll-ing the stage dir here would risk it silently
+	// diverging from the production layout. Skip rather than create.
+	for _, d := range []string{m1aStageBaseDir, m1aJailBase} {
+		if _, err := os.Stat(d); os.IsNotExist(err) {
+			t.Skipf("startDaemon %s: %s absent; run scripts/aibox03/setup.sh to create it", label, d)
+		}
+	}
 
-	runtimeDir := filepath.Join(m1aStageBaseDir, "m1a-gate", uniqueID)
 	stateDir := filepath.Join(t.TempDir(), "state")
 
 	templatesDir := filepath.Join(stateDir, "templates")
 	for _, d := range []string{
-		runtimeDir,
-		filepath.Join(runtimeDir, "stage"),
-		filepath.Join(runtimeDir, "jail"),
 		stateDir,
 		filepath.Join(stateDir, "spool"),
 		templatesDir,
@@ -116,11 +148,6 @@ func startDaemon(t *testing.T, repoRoot, daemonBin, runnerBin, label string) *m1
 	if err := os.WriteFile(filepath.Join(templatesDir, "standard.json"), []byte(standardTemplateJSON), 0o644); err != nil {
 		t.Fatalf("startDaemon %s: write standard.json: %v", label, err)
 	}
-
-	// Clean up our stage subtree after the test.
-	t.Cleanup(func() {
-		_ = os.RemoveAll(runtimeDir)
-	})
 
 	// Find a free loopback port.
 	port := findFreePort(t)
@@ -329,6 +356,21 @@ performance_targets:
 		runtimeDir: runtimeDir,
 		cancel:     cancel,
 	}
+
+	// Best-effort per-VM stage cleanup: /srv/vmobs is the shared production layout,
+	// so unlike the old test-private runtime dir this cannot blanket-RemoveAll it.
+	// Instead remove exactly the stage subdirs this daemon's run created, tracked via
+	// trackVMID wherever POST /vms succeeds. Never remove /srv/vmobs/jail here: privd
+	// owns that lifecycle via ReleaseVM, and a jail dir surviving past this point is a
+	// leak to report, not hide.
+	t.Cleanup(func() {
+		d.vmMu.Lock()
+		ids := append([]string(nil), d.createdVMs...)
+		d.vmMu.Unlock()
+		for _, id := range ids {
+			_ = os.RemoveAll(filepath.Join(m1aStageBaseDir, id))
+		}
+	})
 
 	// Poll until the daemon responds to /meta.
 	deadline := time.Now().Add(30 * time.Second)
@@ -546,6 +588,7 @@ func (d *m1aDaemon) createVM(t *testing.T, name string) string {
 	if vmID == "" {
 		t.Fatalf("createVM %s: no vm_id in response: %v", name, body)
 	}
+	d.trackVMID(vmID)
 	return vmID
 }
 
@@ -728,12 +771,17 @@ func evidenceSubtest(t *testing.T, sb *strings.Builder, name, text string) {
 // Evidence is captured into tests/integration/evidence/m1a-gate-<hostname>.txt.
 //
 // Path reconciliation (verified at runtime, not guessed):
-//   - Paths.Runtime = /srv/vmobs/stage/m1a-gate/<unique>
-//   - StageRoot (T12 derivation) = Paths.Runtime + "/stage"
-//     = /srv/vmobs/stage/m1a-gate/<unique>/stage — under privd's --stage-root /srv/vmobs/stage ✓
-//   - JailBase (T12 derivation) = Paths.Runtime + "/jail"
-//     = /srv/vmobs/stage/m1a-gate/<unique>/jail — in the daemon's config only;
-//     privd uses its own --jail-base /srv/vmobs/jail for actual filesystem ops ✓
+//   - Paths.Runtime = /srv/vmobs (m1aRuntimeRoot) — the exact production path, not a
+//     per-test subdir.
+//   - StageRoot (T12 derivation) = Paths.Runtime + "/stage" = /srv/vmobs/stage, which
+//     is privd's own --stage-root — every start_vm StageDir resolves under it ✓
+//   - JailBase (T12 derivation) = Paths.Runtime + "/jail" = /srv/vmobs/jail, which is
+//     privd's own --jail-base. JailBase is load-bearing, not config-only: the runner's
+//     --uds flag and the stop path both build <JailBase>/firecracker/<id>/root/v.sock
+//     from it (internal/jailer/launch.go:179,196; internal/jailer/stop.go:368) and
+//     dial it host-side — it must equal the chroot privd actually creates ✓
+//   - /srv/vmobs is therefore the only Paths.Runtime that satisfies both derivations
+//     against the installed privd.
 func TestM1aGate(t *testing.T) {
 	// Guard env check with an honest M1a message — the M0 message in gateSkipChecks
 	// says "root-gated" which is wrong for M1a (M1a must NOT run as root). The env var
@@ -806,7 +854,10 @@ func TestM1aGate(t *testing.T) {
 		// Build dirs for the bad daemon without calling startDaemon (which uses the
 		// real privd socket — we want a daemon that uses /nonexistent/privd.sock).
 		badStateDir := filepath.Join(t.TempDir(), "bad-state")
-		badRuntimeDir := filepath.Join(m1aStageBaseDir, "m1a-gate", fmt.Sprintf("bad-privd-%d", os.Getpid()))
+		// This daemon never reaches privd (its socket points at /nonexistent), so the
+		// /srv/vmobs prefix is irrelevant — any writable dir works. t.TempDir() auto-
+		// cleans, so no manual RemoveAll is needed.
+		badRuntimeDir := filepath.Join(t.TempDir(), "runtime")
 		badTemplatesDir := filepath.Join(badStateDir, "templates")
 		for _, d := range []string{
 			badStateDir,
@@ -820,7 +871,6 @@ func TestM1aGate(t *testing.T) {
 				t.Fatalf("AT-001: mkdir %s: %v", d, err)
 			}
 		}
-		t.Cleanup(func() { _ = os.RemoveAll(badRuntimeDir) })
 
 		// Provision the same "standard" template into the bad daemon so its
 		// POST /vms refusal is caused only by the dead privd socket, not a
@@ -1250,6 +1300,7 @@ performance_targets:
 		}
 		vm1, _ := body1["vm"].(map[string]any)
 		id1, _ := vm1["vm_id"].(string)
+		daemon.trackVMID(id1)
 		_, isReplay1 := body1["is_replay"]
 
 		// Same idempotency key → replay (same VM, is_replay: true).
