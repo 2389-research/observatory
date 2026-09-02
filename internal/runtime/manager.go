@@ -1013,14 +1013,19 @@ func (m *Manager) Delete(ctx context.Context, vmID string, force bool, expectedR
 		}
 	}
 
-	// R1: call Release before flipping the row to "deleted" so jail resources
-	// are always freed before the VM is considered gone. Tolerate UnavailableError
-	// (runtime absent on startup reconcile is normal) but fail on real errors so a
-	// VM row never reads "deleted" while the resources this call owns -- network,
-	// stage dir, state dir -- remain. The jail chroot is not one of them: the stop
-	// path releases it and deliberately logs-and-discards a failure there
-	// (internal/jailer/stop.go), so a "deleted" row can still have a leaked chroot
-	// behind it.
+	// R1: release before flipping the row to "deleted". The invariant this keeps
+	// is scoped to what Release owns -- the network allocation, the stage dir, and
+	// <StateDir>/vms/<id>/ (internal/jailer/stop.go): no VM row reads "deleted"
+	// while any of those survive, because a real error here fails the delete and
+	// leaves the row in "deleting". UnavailableError is the one tolerated failure
+	// -- a runtime absent on startup reconcile is normal and must not wedge
+	// deletes.
+	//
+	// Release owns neither the jail chroot nor privd's ledger entry. The stop path
+	// frees both and deliberately logs-and-discards a failure there, so a
+	// "deleted" row can still have <JailBase>/firecracker/<vmID> on disk and a
+	// pinned privd ledger entry behind it. Sweeping those needs the M1b cleanup
+	// backlog, not this call.
 	if err := m.rt.Release(ctx, vmID); err != nil {
 		var ue *UnavailableError
 		if !errors.As(err, &ue) {

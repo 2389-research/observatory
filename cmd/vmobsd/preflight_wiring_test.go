@@ -66,8 +66,9 @@ func TestPreflightConfigCarriesGuestChannelFields(t *testing.T) {
 // so the shipped example is the only place those two operator-facing values are
 // written down. This guards exactly that: both reach the doctor non-empty, so an
 // edit that empties either one fails here instead of reappearing as a red gate.
-// Non-empty is not reachable: whether the example's paths match the installed
-// privd unit's --stage-root is a separate question this assertion cannot answer.
+// Non-empty does not mean reachable: whether the example's paths match the
+// installed privd unit's --stage-root is a separate question this assertion
+// cannot answer.
 func TestPreflightConfigFromExampleConfigHasGuestChannelPaths(t *testing.T) {
 	cfg, err := config.Load(exampleConfigPath)
 	if err != nil {
