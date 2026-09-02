@@ -100,6 +100,18 @@ func dialCtl(sockPath string, req adapterCtlRequest, deadline time.Duration) (ad
 	return reply, nil
 }
 
+// ctlRefusalReason renders a not-OK ctl reply for the log. The runner sends its
+// reason verbatim -- "shutdown_ack timeout" means the guest never answered the
+// shutdown message, and a write error means the channel was already broken --
+// so it is passed through untouched rather than summarised into a verdict this
+// layer has no standing to make.
+func ctlRefusalReason(reply adapterCtlReply) string {
+	if reply.Error == "" {
+		return "no reason given"
+	}
+	return reply.Error
+}
+
 // pollRunnerPhase polls runner-state.json until the phase is one of wantPhases,
 // or ctx expires. Returns the final state seen.
 func pollRunnerPhase(ctx context.Context, stateFile string, wantPhases ...string) (runner.State, error) {
@@ -186,7 +198,20 @@ func (a *Adapter) doStop(ctx context.Context, vmID string, grace time.Duration, 
 			graceS = 1
 		}
 		reply, ctlErr := dialCtlFn(ctlSock, adapterCtlRequest{Cmd: "shutdown_guest", GraceS: graceS}, ctlDeadline(grace))
-		if ctlErr == nil && reply.OK {
+		switch {
+		case ctlErr != nil:
+			// The request never got an answer: the runner is gone, the socket is
+			// stale, or the deadline expired. Nothing here says what the guest did.
+			fmt.Fprintf(os.Stderr,
+				"jailer: stop: warn: graceful shutdown request for %s did not reach the runner: %v; escalating to a forced stop\n",
+				vmID, ctlErr)
+		case !reply.OK:
+			// The runner answered and declined. Its wording is the only account of
+			// what happened inside the guest, and this is where it is recorded.
+			fmt.Fprintf(os.Stderr,
+				"jailer: stop: warn: runner refused graceful shutdown for %s: %s; escalating to a forced stop\n",
+				vmID, ctlRefusalReason(reply))
+		default:
 			// shutdown_guest accepted; poll for vmm_exited or finalized within grace+5s.
 			pollCtx, pollCancel := context.WithTimeout(ctx, grace+5*time.Second)
 			defer pollCancel()
