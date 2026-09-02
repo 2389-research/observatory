@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -318,6 +319,68 @@ func (w *wrongTokenServer) handleConn(ctx context.Context, conn net.Conn) {
 	_ = agent.ServeControl(ctx, scl)
 }
 
+// assertCallsEqual checks that fp.calls is exactly equal to want (same length, same order).
+// On mismatch it logs both slices to aid diagnosis.
+func assertCallsEqual(t *testing.T, want, got []string) {
+	t.Helper()
+	match := len(want) == len(got)
+	if match {
+		for i := range want {
+			if want[i] != got[i] {
+				match = false
+				break
+			}
+		}
+	}
+	if !match {
+		t.Errorf("call sequence mismatch:\n  want: %v\n   got: %v", want, got)
+	}
+}
+
+// assertRunnerGone scans /proc/*/cmdline for entries carrying vmID in the runner argv and
+// asserts zero matches. The runner passes --vm-id=<vmID> on its command line; this scan
+// is scoped to this vmID so concurrent tests with different IDs do not interfere.
+func assertRunnerGone(t *testing.T, vmID string) {
+	t.Helper()
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		t.Errorf("assertRunnerGone: readdir /proc: %v", err)
+		return
+	}
+	var found []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		// Only numeric entries (PIDs).
+		name := e.Name()
+		isPID := len(name) > 0
+		for _, c := range name {
+			if c < '0' || c > '9' {
+				isPID = false
+				break
+			}
+		}
+		if !isPID {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join("/proc", name, "cmdline"))
+		if err != nil {
+			// Process may have exited; skip.
+			continue
+		}
+		// cmdline is NUL-separated; replace NULs with spaces for substring search.
+		cmdline := strings.ReplaceAll(string(data), "\x00", " ")
+		if strings.Contains(cmdline, vmID) {
+			found = append(found, fmt.Sprintf("pid=%s cmdline=%q", name, cmdline))
+		}
+	}
+	if len(found) != 0 {
+		t.Errorf("assertRunnerGone: runner process still alive for vm_id=%q after rollback:\n%s",
+			vmID, strings.Join(found, "\n"))
+	}
+}
+
 // ---------------------------------------------------------------------------
 // TestInject: one subtest per injection point (AT-005)
 // ---------------------------------------------------------------------------
@@ -327,6 +390,11 @@ func TestInject(t *testing.T) {
 	// The vms/ directory is made read-only before Launch so writeManifest fails.
 	// This is before any side effect — backend must see ZERO calls.
 	t.Run("manifest_write_failure", func(t *testing.T) {
+		// chmod 0555 cannot block root's MkdirAll — this subtest requires non-root.
+		if os.Getuid() == 0 {
+			t.Fatal("this subtest requires non-root: chmod 0555 cannot block root's MkdirAll")
+		}
+
 		h := buildInjectHarness(t, "", "10.110.0.0/24", 10, 0)
 		vmID := "vm-inject-1"
 
@@ -344,9 +412,13 @@ func TestInject(t *testing.T) {
 		defer cancel()
 
 		launchErr := h.adapter.Launch(ctx, defaultSpec(vmID))
-		if launchErr == nil {
-			t.Fatal("Launch returned nil; expected failure on read-only state dir")
+
+		// assertCleanup verifies error contains the failed stage and all artifacts are gone.
+		// Stage is "reserved": manifest write is the first operation after allocating the slot.
+		if err := os.Chmod(vmsDir, 0o755); err != nil {
+			t.Fatalf("restore chmod before assertCleanup: %v", err)
 		}
+		assertCleanup(t, h, vmID, "reserved", launchErr)
 		t.Logf("got expected error: %v", launchErr)
 
 		// No backend calls at all — manifest write precedes every side effect.
@@ -354,10 +426,6 @@ func TestInject(t *testing.T) {
 			t.Errorf("expected zero backend calls; got: %v", h.fp.calls)
 		}
 
-		// Restore and run recovery.
-		if err := os.Chmod(vmsDir, 0o755); err != nil {
-			t.Fatalf("restore chmod: %v", err)
-		}
 		assertRecoveryLaunch(t, h, vmID)
 	})
 
@@ -380,11 +448,12 @@ func TestInject(t *testing.T) {
 		launchErr := h.adapter.Launch(ctx, defaultSpec(vmID))
 		assertCleanup(t, h, vmID, "staged", launchErr)
 
-		for _, c := range h.fp.calls {
-			if c == "allocate_network" {
-				t.Errorf("allocate_network was called despite staging failure; calls=%v", h.fp.calls)
-			}
-		}
+		// Exact call sequence: staging fails before any backend verb; doRollback sees
+		// stageSet[staged]=true but nothing past it, so only file cleanup runs (no privd calls).
+		// Source: launch.go doRollback — stageSet[network]=false means ReleaseNetwork is skipped,
+		// stageSet[vmm_started]=false means SignalVM/ReleaseVM are skipped.
+		wantCalls2 := []string{}
+		assertCallsEqual(t, wantCalls2, h.fp.calls)
 		t.Logf("calls after digest mismatch: %v", h.fp.calls)
 
 		// Restore vmlinux and rewrite lock with correct SHA.
@@ -423,12 +492,12 @@ func TestInject(t *testing.T) {
 		launchErr := h.adapter.Launch(ctx, defaultSpec(vmID))
 		assertCleanup(t, h, vmID, "network", launchErr)
 
-		for _, c := range h.fp.calls {
-			switch c {
-			case "release_network", "release_vm", "signal_vm/term", "signal_vm/kill":
-				t.Errorf("unexpected rollback verb after network failure: %q (calls=%v)", c, h.fp.calls)
-			}
-		}
+		// Exact call sequence: allocate_network is attempted (and injected to fail); doRollback
+		// sees stageSet[network]=false (the manifest stage was never written after the failure),
+		// so ReleaseNetwork is skipped. stageSet[vmm_started]=false, stageSet[runner_spawned]=false.
+		// Source: launch.go step 4 — rollback fires before m.Stages appends "network".
+		wantCalls3 := []string{"allocate_network"}
+		assertCallsEqual(t, wantCalls3, h.fp.calls)
 		t.Logf("calls after allocate_network failure: %v", h.fp.calls)
 
 		assertRecoveryLaunch(t, h, vmID)
@@ -448,20 +517,12 @@ func TestInject(t *testing.T) {
 		launchErr := h.adapter.Launch(ctx, defaultSpec(vmID))
 		assertCleanup(t, h, vmID, "vmm_started", launchErr)
 
-		var gotRelNet bool
-		for _, c := range h.fp.calls {
-			switch c {
-			case "release_network":
-				gotRelNet = true
-			case "release_vm":
-				t.Errorf("release_vm called when start_vm failed (VMM never started); calls=%v", h.fp.calls)
-			case "signal_vm/term", "signal_vm/kill":
-				t.Errorf("signal_vm called when start_vm failed (VMM never started); calls=%v", h.fp.calls)
-			}
-		}
-		if !gotRelNet {
-			t.Errorf("expected release_network in rollback; calls=%v", h.fp.calls)
-		}
+		// Exact call sequence: allocate_network succeeds (stageSet[network]=true), then start_vm
+		// is injected to fail. doRollback sees stageSet[vmm_started]=false (manifest never updated),
+		// so SignalVM/ReleaseVM are skipped. stageSet[network]=true → ReleaseNetwork called.
+		// Source: launch.go step 5 — rollback fires before m.Stages appends "vmm_started".
+		wantCalls4 := []string{"allocate_network", "start_vm", "release_network"}
+		assertCallsEqual(t, wantCalls4, h.fp.calls)
 		t.Logf("calls after start_vm failure: %v", h.fp.calls)
 
 		assertRecoveryLaunch(t, h, vmID)
@@ -505,26 +566,22 @@ func TestInject(t *testing.T) {
 		launchErr := brokenAdapter.Launch(ctx, defaultSpec(vmID))
 		assertCleanup(t, h, vmID, "runner_spawned", launchErr)
 
-		var gotKill, gotRelVM, gotRelNet bool
-		for _, c := range h.fp.calls {
-			switch c {
-			case "signal_vm/kill":
-				gotKill = true
-			case "release_vm":
-				gotRelVM = true
-			case "release_network":
-				gotRelNet = true
-			}
+		// Exact call sequence: allocate_network+start_vm succeed; runner exec.Start() fails.
+		// doRollback sees stageSet[runner_spawned]=false (manifest never updated, exec.Start failed),
+		// stageSet[vmm_started]=true → signal_vm/term, 2s sleep, signal_vm/kill, release_vm.
+		// stageSet[network]=true → release_network.
+		// killRunnerByPID is NOT called (stageSet[runner_spawned]=false).
+		// Source: launch.go doRollback — runner block guarded by stageSet[stageRunnerSpawned];
+		// VMM block: SignalVM("term") + sleep + SignalVM("kill") + ReleaseVM (in that order).
+		wantCalls5 := []string{
+			"allocate_network",
+			"start_vm",
+			"signal_vm/term",
+			"signal_vm/kill",
+			"release_vm",
+			"release_network",
 		}
-		if !gotKill {
-			t.Errorf("expected signal_vm/kill in rollback; calls=%v", h.fp.calls)
-		}
-		if !gotRelVM {
-			t.Errorf("expected release_vm in rollback; calls=%v", h.fp.calls)
-		}
-		if !gotRelNet {
-			t.Errorf("expected release_network in rollback; calls=%v", h.fp.calls)
-		}
+		assertCallsEqual(t, wantCalls5, h.fp.calls)
 		t.Logf("calls after runner spawn failure: %v", h.fp.calls)
 
 		// Restore h.adapter to the good runner for recovery.
@@ -574,13 +631,39 @@ func TestInject(t *testing.T) {
 		defer cancel()
 
 		launchErr := h.adapter.Launch(ctx, defaultSpec(vmID))
+
+		// Assert runner process is actually gone BEFORE recovery — doRollback's killRunnerByPID
+		// is synchronous inside rollback (called with launchMu held), so by the time Launch
+		// returns the kill path has completed. Scan /proc/*/cmdline for this vm_id.
+		assertRunnerGone(t, vmID)
+
 		assertCleanup(t, h, vmID, "attached", launchErr)
 
-		// §15.3: token value must not appear in the error string.
+		// §15.3: no 64-char lowercase-hex substring may appear in the error string —
+		// catches any leaked capability token, not just the planted wrongToken value.
+		if hexToken64 := regexp.MustCompile(`[0-9a-f]{64}`); hexToken64.MatchString(launchErr.Error()) {
+			t.Errorf("§15.3 violation: 64-char hex token leaked into error: %q", launchErr.Error())
+		}
+		// Belt-and-suspenders: the specific planted wrong token must not appear either.
 		if strings.Contains(launchErr.Error(), wrongToken) {
 			t.Errorf("§15.3 violation: wrong token leaked into error: %q", launchErr.Error())
 		}
 		t.Logf("got expected timeout error: %v", launchErr)
+
+		// Exact call sequence: allocate_network+start_vm succeed; runner spawns and attaches timeout.
+		// doRollback sees stageSet[runner_spawned]=true → killRunnerByPID (OS signal, not a privd call).
+		// stageSet[vmm_started]=true → signal_vm/term + signal_vm/kill + release_vm.
+		// stageSet[network]=true → release_network.
+		// Source: launch.go doRollback — runner block first (killRunnerByPID), then VMM block, then net.
+		wantCalls6 := []string{
+			"allocate_network",
+			"start_vm",
+			"signal_vm/term",
+			"signal_vm/kill",
+			"release_vm",
+			"release_network",
+		}
+		assertCallsEqual(t, wantCalls6, h.fp.calls)
 
 		// Shut down the wrong-token guestd before recovery.
 		agentCancel()
