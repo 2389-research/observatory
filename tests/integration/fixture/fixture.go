@@ -78,7 +78,7 @@ type VM struct {
 // boot happen in Start() (skip-gated path).
 //
 // repoRoot is the absolute path to the repository root (for lock + artifact paths).
-// id must match ^[a-z0-9][a-z0-9-]{0,23}$.
+// id must match ^[a-z0-9][a-z0-9-]{0,62}$.
 // n is a zero-based index: uid = 20000+n, CID = 3+n.
 // alloc supplies the /30 prefix for this VM's network namespace.
 func PrepareVM(t *testing.T, repoRoot, id string, n int, alloc *network.Allocator) *VM {

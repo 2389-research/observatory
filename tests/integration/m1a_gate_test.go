@@ -65,9 +65,13 @@ func m1aSkipChecks(t *testing.T) {
 	if _, err := os.Stat(m1aPrivdSock); os.IsNotExist(err) {
 		t.Skipf("privd socket absent at %s; run scripts/aibox03/setup.sh to install vmobs-privd", m1aPrivdSock)
 	}
-	// stage dir created and owned by operator by setup.sh.
-	if _, err := os.Stat(m1aStageBaseDir); os.IsNotExist(err) {
-		t.Skipf("stage dir absent at %s; run scripts/aibox03/setup.sh to create it", m1aStageBaseDir)
+	// Stage dir and jail base are created and owned by the operator by setup.sh.
+	// Both derive from m1aRuntimeRoot (one source of truth) and are checked once
+	// here; startDaemon relies on this check instead of repeating it.
+	for _, d := range []string{m1aStageBaseDir, m1aJailBase} {
+		if _, err := os.Stat(d); os.IsNotExist(err) {
+			t.Skipf("dir absent at %s; run scripts/aibox03/setup.sh to create it", d)
+		}
 	}
 }
 
@@ -112,12 +116,8 @@ func startDaemon(t *testing.T, repoRoot, daemonBin, runnerBin, label string) *m1
 	// /srv/vmobs/stage and /srv/vmobs/jail are provisioned by scripts/aibox03/setup.sh,
 	// not by this test: /srv/vmobs/jail is root:root 0755 (traversable, not writable by
 	// this test's uid), and MkdirAll-ing the stage dir here would risk it silently
-	// diverging from the production layout. Skip rather than create.
-	for _, d := range []string{m1aStageBaseDir, m1aJailBase} {
-		if _, err := os.Stat(d); os.IsNotExist(err) {
-			t.Skipf("startDaemon %s: %s absent; run scripts/aibox03/setup.sh to create it", label, d)
-		}
-	}
+	// diverging from the production layout. m1aSkipChecks already verified both exist
+	// before this function runs, so there is no second Stat here.
 
 	stateDir := filepath.Join(t.TempDir(), "state")
 
@@ -409,6 +409,23 @@ func (d *m1aDaemon) apiGet(t *testing.T, path string) map[string]any {
 	return result
 }
 
+// apiGetErr performs a GET request and returns the parsed body, or an error
+// instead of calling t.Fatalf. Unlike apiGet, it is safe to call from a
+// goroutine other than the test goroutine (Go forbids FailNow off it).
+func (d *m1aDaemon) apiGetErr(path string) (map[string]any, error) {
+	resp, err := d.httpClient.Get(d.baseURL + path)
+	if err != nil {
+		return nil, fmt.Errorf("GET %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	var result map[string]any
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("GET %s: unmarshal body: %w\nbody=%s", path, err, body)
+	}
+	return result, nil
+}
+
 // apiGetCode performs a GET and returns status code + body.
 func (d *m1aDaemon) apiGetCode(t *testing.T, path string) (int, map[string]any) {
 	t.Helper()
@@ -443,6 +460,27 @@ func (d *m1aDaemon) apiPost(t *testing.T, path string, reqBody any) (int, map[st
 		t.Fatalf("POST %s: unmarshal: %v\nbody=%s", path, err, respBody)
 	}
 	return resp.StatusCode, result
+}
+
+// apiPostErr performs a POST request and returns status code, parsed body, or
+// an error instead of calling t.Fatalf. Unlike apiPost, it is safe to call
+// from a goroutine other than the test goroutine (Go forbids FailNow off it).
+func (d *m1aDaemon) apiPostErr(path string, reqBody any) (int, map[string]any, error) {
+	data, err := json.Marshal(reqBody)
+	if err != nil {
+		return 0, nil, fmt.Errorf("POST %s: marshal: %w", path, err)
+	}
+	resp, err := d.httpClient.Post(d.baseURL+path, "application/json", bytes.NewReader(data))
+	if err != nil {
+		return 0, nil, fmt.Errorf("POST %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	var result map[string]any
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return 0, nil, fmt.Errorf("POST %s: unmarshal: %w\nbody=%s", path, err, respBody)
+	}
+	return resp.StatusCode, result, nil
 }
 
 // apiDelete performs a DELETE request and returns status code + parsed body.
@@ -592,17 +630,34 @@ func (d *m1aDaemon) createVM(t *testing.T, name string) string {
 	return vmID
 }
 
-// startVM posts the start action for a VM and returns the operation body.
-func (d *m1aDaemon) startVM(t *testing.T, vmID string) {
-	t.Helper()
-	vm := d.apiGet(t, "/vms/"+vmID)
+// startVMErr issues the start action for vmID and reports failure through its
+// return value instead of t.Fatalf, so it is safe to call from a goroutine
+// other than the test goroutine (Go forbids FailNow off it). startVM wraps
+// this for the sequential call sites and fails t on error.
+func (d *m1aDaemon) startVMErr(vmID string) error {
+	vm, err := d.apiGetErr("/vms/" + vmID)
+	if err != nil {
+		return fmt.Errorf("startVM %s: %w", vmID, err)
+	}
 	rev, _ := vm["revision"].(string)
-	status, body := d.apiPost(t, "/vms/"+vmID+"/actions", map[string]any{
+	status, body, err := d.apiPostErr("/vms/"+vmID+"/actions", map[string]any{
 		"action":            "start",
 		"expected_revision": rev,
 	})
+	if err != nil {
+		return fmt.Errorf("startVM %s: %w", vmID, err)
+	}
 	if status != http.StatusOK {
-		t.Fatalf("startVM %s: expected 200, got %d: %v", vmID, status, body)
+		return fmt.Errorf("startVM %s: expected 200, got %d: %v", vmID, status, body)
+	}
+	return nil
+}
+
+// startVM posts the start action for a VM and returns the operation body.
+func (d *m1aDaemon) startVM(t *testing.T, vmID string) {
+	t.Helper()
+	if err := d.startVMErr(vmID); err != nil {
+		t.Fatalf("%v", err)
 	}
 }
 
@@ -1355,12 +1410,39 @@ performance_targets:
 
 	// ── Subtest 6: AT-009 — four VMs with established channels ────────────────
 	t.Run("at009_four_concurrent_vms", func(t *testing.T) {
+		// Creation is sequential: admission is this subtest's precondition, not what
+		// it proves. Concurrent admission under pressure is AT-012's job, not this
+		// test's.
 		var vmIDs [4]string
 		for i := range vmIDs {
 			vmIDs[i] = daemon.createVM(t, fmt.Sprintf("at009-%d", i))
 		}
-		for _, id := range vmIDs {
-			daemon.startVM(t, id)
+
+		// Start is the simultaneous launch AT-009 requires: one goroutine issues each
+		// start request concurrently. t.Fatalf/t.FailNow must never run off the test
+		// goroutine (Go forbids FailNow there), so startVMErr reports failure through
+		// its return value instead of failing t directly. Once the WaitGroup
+		// completes, the test goroutine reports every failed start by vm id and
+		// fails once.
+		startErrs := make([]error, len(vmIDs))
+		var startWG sync.WaitGroup
+		for i, id := range vmIDs {
+			startWG.Add(1)
+			go func(i int, id string) {
+				defer startWG.Done()
+				startErrs[i] = daemon.startVMErr(id)
+			}(i, id)
+		}
+		startWG.Wait()
+		startFailed := false
+		for i, err := range startErrs {
+			if err != nil {
+				startFailed = true
+				t.Errorf("AT-009: simultaneous start of vm %s failed: %v", vmIDs[i], err)
+			}
+		}
+		if startFailed {
+			t.FailNow()
 		}
 		// Wait for all four to reach running.
 		runCtx, runCancel := context.WithTimeout(context.Background(), 5*time.Minute)

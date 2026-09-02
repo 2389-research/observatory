@@ -28,7 +28,7 @@ import (
 
 const (
 	// m0IDA and m0IDB are the identifiers for the two simultaneous fixture VMs.
-	// Both match the root-helper constraint ^[a-z0-9][a-z0-9-]{0,23}$.
+	// Both match the root-helper constraint ^[a-z0-9][a-z0-9-]{0,62}$.
 	m0IDA = "m0-a"
 	m0IDB = "m0-b"
 
