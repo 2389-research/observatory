@@ -120,7 +120,7 @@ func TestServeAbsentLockContinues(t *testing.T) {
 			if err != nil {
 				t.Errorf("serve returned error on shutdown: %v", err)
 			}
-		case <-time.After(5 * time.Second):
+		case <-time.After(shutdownWait):
 			t.Error("daemon did not shut down")
 		}
 	case err := <-errCh:
@@ -155,7 +155,7 @@ func TestServeEmptyLockFilePathSkipsVerification(t *testing.T) {
 			if err != nil {
 				t.Errorf("serve error on shutdown: %v", err)
 			}
-		case <-time.After(5 * time.Second):
+		case <-time.After(shutdownWait):
 			t.Error("daemon did not shut down")
 		}
 	case err := <-errCh:

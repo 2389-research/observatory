@@ -137,7 +137,7 @@ func TestServeReportsGuestChannelPassWhenPrivdReachable(t *testing.T) {
 		if err != nil && !errors.Is(err, context.Canceled) {
 			t.Errorf("serve returned %v on graceful shutdown", err)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(shutdownWait):
 		t.Fatal("daemon did not shut down")
 	}
 }

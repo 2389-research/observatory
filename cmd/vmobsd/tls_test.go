@@ -1,5 +1,5 @@
-// ABOUTME: TLS/https mode tests: self-signed cert helper, TestServeHTTPS
-// ABOUTME: (real HTTPS + bearer auth), TestLoopbackModeStillRefusesNonLoopback.
+// ABOUTME: TLS/https mode tests: self-signed cert helper, TestServeHTTPS (real
+// ABOUTME: HTTPS + bearer auth), shutdown against parked connections, loopback.
 package main
 
 import (
@@ -227,7 +227,83 @@ func TestServeHTTPS(t *testing.T) {
 		if err != nil {
 			t.Errorf("serve returned %v on graceful shutdown", err)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(shutdownWait):
+		t.Fatal("daemon did not shut down")
+	}
+}
+
+// TestShutdownOutlastsParkedConnection pins serve's shutdown budget against
+// net/http's reclaim clocks rather than against handler latency.
+//
+// A connection the server has accepted but read no request byte from sits in
+// http.StateNew, and Server.Shutdown will not close one: closeIdleConns skips
+// it until its StateNew grace expires, up to ~6.5s after the connection
+// appeared. Two connections are parked because a connection can wait in
+// StateNew at two different points inside (*conn).serve:
+//
+//   - raw: TCP established, no ClientHello, so the server waits in the TLS
+//     handshake under tlsHandshakeTimeout().
+//   - parked: handshake finished, no request, so the server waits in
+//     readRequest under ReadHeaderTimeout. This is the shape a browser
+//     pre-connect or any pooled client leaves behind at SIGTERM.
+//
+// Both those deadlines are 5s here and both start before the shutdown budget
+// does, and Shutdown's poll interval has ramped to its 500ms cap by then, so a
+// 5s budget cannot observe either reclaim in time.
+//
+// Dialing raw first makes its acceptance provable: the accept queue is FIFO, so
+// a completed handshake on the later connection means the earlier one has been
+// accepted and tracked.
+func TestShutdownOutlastsParkedConnection(t *testing.T) {
+	dir := t.TempDir()
+	cfg, _ := httpsConfig(t, dir)
+
+	certPEMBytes, err := os.ReadFile(cfg.Server.TLSCertFile)
+	if err != nil {
+		t.Fatalf("read cert: %v", err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(certPEMBytes) {
+		t.Fatal("failed to parse test certificate into pool")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	addrCh := make(chan string, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- serve(ctx, cfg, quietLogger(), func(addr string) { addrCh <- addr })
+	}()
+
+	var addr string
+	select {
+	case addr = <-addrCh:
+	case err := <-errCh:
+		t.Fatalf("serve exited before ready: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("daemon never became ready")
+	}
+
+	raw, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("park pre-handshake connection: %v", err)
+	}
+	defer raw.Close()
+
+	parked, err := tls.Dial("tcp", addr, &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12})
+	if err != nil {
+		t.Fatalf("park post-handshake connection: %v", err)
+	}
+	defer parked.Close()
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Errorf("serve returned %v shutting down with parked connections", err)
+		}
+	case <-time.After(shutdownWait):
 		t.Fatal("daemon did not shut down")
 	}
 }
@@ -281,7 +357,7 @@ func TestLoopbackModeStillRefusesNonLoopback(t *testing.T) {
 			if err != nil {
 				t.Errorf("serve returned %v on graceful shutdown", err)
 			}
-		case <-time.After(10 * time.Second):
+		case <-time.After(shutdownWait):
 			t.Fatal("daemon did not shut down")
 		}
 	})

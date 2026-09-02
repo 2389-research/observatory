@@ -17,6 +17,12 @@ import (
 	"github.com/2389-research/observatory-v2/internal/config"
 )
 
+// shutdownWait bounds how long a test waits for serve to return after the
+// context is cancelled. It must exceed serve's own shutdown budget (main.go),
+// or a hung shutdown and a merely slow one report the same way -- and a guard
+// equal to the budget is a coin flip between them.
+const shutdownWait = 30 * time.Second
+
 func testConfig(t *testing.T, listen string) *config.Config {
 	t.Helper()
 	return &config.Config{
@@ -75,7 +81,7 @@ func TestServeAnswersMetaOverLoopback(t *testing.T) {
 		if err != nil {
 			t.Errorf("serve returned %v on graceful shutdown", err)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(shutdownWait):
 		t.Fatal("daemon did not shut down")
 	}
 }

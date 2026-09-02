@@ -420,7 +420,29 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready f
 		return fmt.Errorf("http server: %w", err)
 	case <-ctx.Done():
 	}
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// This budget is sized against net/http's own reclaim clock, not against how
+	// long a handler runs. Shutdown will not close a connection sitting in
+	// StateNew — accepted, no request byte read — until closeIdleConns releases
+	// it (net/http/server.go, issue 22682):
+	//
+	//	if st == StateNew && unixSec < time.Now().Unix()-5 {
+	//
+	// Three details put that clock out of a 5s budget's reach. It starts when the
+	// connection was created, not when shutdown began. unixSec compares whole
+	// seconds, so the grace runs 5–6s rather than 5s. And Shutdown only re-checks
+	// on an interval that ramps to shutdownPollIntervalMax (500ms), so it can
+	// miss a reclaim it did not cause. Worst case the connection clears ~6.5s
+	// after it appeared, and any client holding an idle pooled connection at
+	// SIGTERM — a browser pre-connect, any pooled Go client — leaves one behind.
+	// A 5s budget was structurally unable to win that race and turned ordinary
+	// shutdowns into "context deadline exceeded".
+	//
+	// 10s clears 6.5s with margin and stays far inside systemd's default 90s
+	// TimeoutStopSec. ReadHeaderTimeout above also reaps such a connection at 5s
+	// today, but it is a separate knob on a separate clock: raise it and only the
+	// grace above is left, so the budget is sized against the grace. Do not tidy
+	// this back down to match it.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		return fmt.Errorf("shutdown: %w", err)
