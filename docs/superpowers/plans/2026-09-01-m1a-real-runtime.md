@@ -62,7 +62,7 @@
 | `internal/jailer/manifest.go` | Provisioning manifest read/write under state dir |
 | `internal/jailer/reconcile.go` | Startup inventory/adoption (§5.5) |
 | `internal/guest/proto/messages.go` | + `KindShutdown`/`KindShutdownAck` control messages |
-| `internal/guest/agent.go` | + shutdown handler (argv `systemctl poweroff`) |
+| `internal/guest/agent.go` | + shutdown handler (argv `systemctl poweroff`; shipped as `systemctl reboot` — deviation M1a-T9-exit-door in PLAN.md) |
 | `internal/events/registry.go` | + runner-emitted kinds |
 | `internal/runtime/manager.go` | + `NotifyVMMExit`; reconcile alignment with real adapter |
 | `internal/config/config.go` | + `runtime.mode`, jail identity bands, validation |
@@ -423,6 +423,8 @@ SourceSeq for spool envelopes: monotonic uint64 per instance, rendered as a deci
 - Produces: guestd that answers `shutdown` and powers off; a control loop that accepts sequential reconnects; a rebuilt, re-pinned rootfs carrying both.
 
 Guestd behavior: on `shutdown` (only on an authenticated connection — after hello accepted), reply `shutdown_ack`, then invoke the poweroff func. Make the poweroff func injectable on the agent for tests; production default execs `systemctl poweroff` as an argv array. Also required: after a control connection closes, `ServeControl` must accept the next connection and allow a fresh authenticated hello — runner redial (Task 8 step 3) and controller-restart adoption depend on it. Read the current accept loop; if it already serves sequential connections, add the regression test anyway.
+
+Shipped deviation (M1a-T9-exit-door, recorded in PLAN.md): the production default execs `systemctl reboot`, not `poweroff` — this guest's ACPI tables carry no S5, so `poweroff` halts and the VMM never exits.
 
 - [ ] **Step 1: Write failing tests** in the existing guest test file style: (a) authenticated conn sends `shutdown` with deadline 10 → receives `shutdown_ack` and the injected poweroff func ran; (b) `shutdown` BEFORE hello → refused, poweroff NOT called; (c) reconnect — complete a hello, close the conn, dial again, hello again succeeds (accept loop still alive).
 - [ ] **Step 2: Run** `go test ./internal/guest/... -v` — FAIL.
