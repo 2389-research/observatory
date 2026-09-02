@@ -176,34 +176,38 @@ func (m *Manager) Close() {
 // row below is a step of the stop path, so this is the wrong budget for
 // anything that is not one — a start action derives its own from launchBudget.
 //
-//	runner ctl shutdown_guest:  5s dial + grace + 5s reply ceiling  = G + 10s
+//	runner ctl shutdown_guest:  5s dial + ctlDeadline (G + 15s)     = G + 20s
 //	graceful exit poll:         grace + 5s                          = G +  5s
 //	SIGTERM/SIGKILL escalation: 10s signal + 5s wait                =     15s
 //	runner ctl finalize:        5s dial + 30s deadline              =     35s
 //	chroot release retry:                                                 10s
 //	                                                                 --------
-//	                                                                2G + 75s
+//	                                                                2G + 85s
 //
-// G is the configured stop grace. Two rows scale with it: the runner answers
-// shutdown_guest only once the guest acks or grace+5s passes
-// (runner.ShutdownReplySlack), and the adapter's own exit poll then gets a
-// fresh grace+5s. They are additive, not alternatives — a guest that acks at
-// the last moment still leaves the VMM to exit on its own clock.
+// G is the configured stop grace. Two rows scale with it, and the first is the
+// one that is easy to get wrong. The runner answers shutdown_guest once the
+// guest acks or grace + runner.ShutdownReplySlack passes, but the client waits
+// ctlDeadline(G) = G + ShutdownReplySlack + ctlTransportSlack — G + 15s at
+// today's constants (internal/jailer/stop.go). A reply that arrives late,
+// having spent that transport slack on a loaded host, is still a reply: the
+// adapter takes the accepted branch and runs the exit poll for a fresh
+// grace + 5s. The two rows are additive, not alternatives — a guest that acks
+// at the last moment still leaves the VMM to exit on its own clock.
 //
-// The other branch is shorter at every grace this repo configures: when the ctl
-// exchange gets no answer at all, the adapter skips the exit poll, so it burns
-// 5s dial + the ctlDeadline ceiling (G + 15s) and then the same 60s tail —
-// G + 80s. That overtakes 2G + 75 only below G = 5.
+// The other branch is shorter at every grace. When the ctl exchange gets no
+// answer at all the adapter skips the exit poll, so it burns 5s dial + the same
+// G + 15s ceiling and then the same 60s tail — G + 80s, which never overtakes
+// 2G + 85.
 //
 // Rounded up to 120s so the transitions that record the terminal state are
 // inside the budget too. This is a backstop against a wedged host, not a
 // service-level target: a healthy stop finishes well inside the grace period.
 //
-// The budget below is G + operationSlack, so it covers 2G + 75 while
-// G <= 45 — true at the documented default of 30 (a 150s budget against a 135s
-// worst case) and at every grace this repo configures. A deployment that raises
-// stop_grace_seconds past that needs this derivation revisited, because the
-// worst case grows twice as fast as the budget does.
+// The budget below is G + operationSlack, so it covers 2G + 85 while G <= 35.
+// The documented default of 30 fits, but not comfortably: a 150s budget against
+// a 145s worst case is 5s of margin. Any deployment that raises
+// stop_grace_seconds needs this derivation redone before it reaches 35, because
+// the worst case grows twice as fast as the budget does.
 const operationSlack = 120 * time.Second
 
 // OperationContext derives the context a stop-shaped lifecycle mutation runs
@@ -293,6 +297,17 @@ const recoveryBudget = 75 * time.Second
 // manager unless that caller does; tying it to m.ctx would switch the
 // bookkeeping off exactly during shutdown, when mutations are most likely to be
 // interrupted mid-flight.
+//
+// That caller can outlive the manager, and an operator should know what it
+// costs. HTTP handlers are not tracked by m.wg and srv.Shutdown stops waiting
+// after 5s (cmd/vmobsd/main.go), after which Manager.Close and then st.Close
+// run on the way out — so bookkeeping started just before shutdown can still be
+// writing up to recoveryBudget later, against a store that is closing under it.
+// sql.DB.Close serialises with statements already in flight, so the cost is a
+// lost write, not a corrupt one: a mutation interrupted by shutdown may leave no
+// terminal record at all. Reconcile settles those on the next start — in-flight
+// operations become failed and transitional VMs are resolved — which is why
+// losing the write is survivable and switching the bookkeeping off is not.
 func (m *Manager) recoveryContext(parent context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(parent), recoveryBudget)
 }
