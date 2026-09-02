@@ -190,6 +190,11 @@ func (m *Manager) Close() {
 // fresh grace+5s. They are additive, not alternatives — a guest that acks at
 // the last moment still leaves the VMM to exit on its own clock.
 //
+// The other branch is shorter at every grace this repo configures: when the ctl
+// exchange gets no answer at all, the adapter skips the exit poll, so it burns
+// 5s dial + the ctlDeadline ceiling (G + 15s) and then the same 60s tail —
+// G + 80s. That overtakes 2G + 75 only below G = 5.
+//
 // Rounded up to 120s so the transitions that record the terminal state are
 // inside the budget too. This is a backstop against a wedged host, not a
 // service-level target: a healthy stop finishes well inside the grace period.
