@@ -68,8 +68,17 @@ type testRecordingBackend struct {
 	signalCalls    []string
 	releaseVMCalls []string
 
-	// sleepCmds tracks spawned sleep processes so tests can kill them.
-	sleepCmds []*exec.Cmd
+	// sleepProcs tracks spawned sleep processes so tests can kill them.
+	sleepProcs []*sleepProc
+}
+
+// sleepProc is one spawned stand-in VMM process together with the channel its
+// reaper closes. Exactly one goroutine ever calls Wait on the command; killAll
+// waits on done instead of calling Wait a second time, because two concurrent
+// Wait calls on the same exec.Cmd race on the command's internal state.
+type sleepProc struct {
+	cmd  *exec.Cmd
+	done chan struct{}
 }
 
 func (b *testRecordingBackend) AllocateNetwork(entry privd.VMEntry, req privd.AllocateNetworkReq) error {
@@ -89,7 +98,12 @@ func (b *testRecordingBackend) StartVM(entry *privd.VMEntry, req privd.StartVMRe
 	if err := cmd.Start(); err != nil {
 		return privd.StartVMResp{}, fmt.Errorf("spawn sleep: %w", err)
 	}
-	b.sleepCmds = append(b.sleepCmds, cmd)
+	proc := &sleepProc{cmd: cmd, done: make(chan struct{})}
+	go func() {
+		defer close(proc.done)
+		_ = cmd.Wait()
+	}()
+	b.sleepProcs = append(b.sleepProcs, proc)
 
 	pid := cmd.Process.Pid
 	statData, err := os.ReadFile(privd.ProcStatPath(pid))
@@ -106,8 +120,6 @@ func (b *testRecordingBackend) StartVM(entry *privd.VMEntry, req privd.StartVMRe
 	// Update the entry with process identity so the server ledger stays consistent.
 	entry.PID = pid
 	entry.StartTime = starttime
-
-	go func() { _ = cmd.Wait() }()
 
 	return privd.StartVMResp{PID: pid, StartTime: starttime}, nil
 }
@@ -128,9 +140,9 @@ func (b *testRecordingBackend) ReleaseVM(entry privd.VMEntry) error {
 }
 
 func (b *testRecordingBackend) killAll() {
-	for _, cmd := range b.sleepCmds {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+	for _, p := range b.sleepProcs {
+		_ = p.cmd.Process.Kill()
+		<-p.done
 	}
 }
 
