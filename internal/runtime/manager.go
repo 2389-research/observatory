@@ -174,16 +174,29 @@ func (m *Manager) Close() {
 // fixed timeouts the real (jailer) runtime can burn around the graceful poll,
 // worst case, plus room for the store writes that record the outcome.
 //
-//	runner ctl shutdown_guest:  5s dial + 30s deadline  = 35s
-//	SIGTERM/SIGKILL escalation: 10s signal + 5s wait     = 15s
-//	runner ctl finalize:        5s dial + 30s deadline  = 35s
-//	chroot release retry:                                 10s
-//	                                                     ----
-//	                                                       95s
+//	runner ctl shutdown_guest:  5s dial + grace + 5s reply ceiling  = G + 10s
+//	graceful exit poll:         grace + 5s                          = G +  5s
+//	SIGTERM/SIGKILL escalation: 10s signal + 5s wait                =     15s
+//	runner ctl finalize:        5s dial + 30s deadline              =     35s
+//	chroot release retry:                                                 10s
+//	                                                                 --------
+//	                                                                2G + 75s
+//
+// G is the configured stop grace. Two rows scale with it: the runner answers
+// shutdown_guest only once the guest acks or grace+5s passes
+// (runner.ShutdownReplySlack), and the adapter's own exit poll then gets a
+// fresh grace+5s. They are additive, not alternatives — a guest that acks at
+// the last moment still leaves the VMM to exit on its own clock.
 //
 // Rounded up to 120s so the transitions that record the terminal state are
 // inside the budget too. This is a backstop against a wedged host, not a
 // service-level target: a healthy stop finishes well inside the grace period.
+//
+// The budget below is G + operationSlack, so it covers 2G + 75 while
+// G <= 45 — true at the documented default of 30 (a 150s budget against a 135s
+// worst case) and at every grace this repo configures. A deployment that raises
+// stop_grace_seconds past that needs this derivation revisited, because the
+// worst case grows twice as fast as the budget does.
 const operationSlack = 120 * time.Second
 
 // OperationContext derives the context a lifecycle mutation runs on.

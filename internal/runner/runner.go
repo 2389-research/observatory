@@ -35,6 +35,15 @@ const dialMaxInterval = 30 * time.Second
 // the channel is declared lost and redial begins.
 const pingMissThreshold = 3
 
+// ShutdownReplySlack is how long past the guest's grace period the runner keeps
+// waiting for the guest's shutdown ack before answering a shutdown_guest ctl
+// command with a typed failure. A shutdown_guest reply may therefore take up to
+// grace + ShutdownReplySlack to arrive, and a ctl client's socket deadline has
+// to outlive that or it cuts off a runner that is still answering on time.
+// Exported so the one client that sends the command — the jailer adapter's
+// dialCtl — can derive its deadline from this rather than guess at it.
+const ShutdownReplySlack = 5 * time.Second
+
 // Config holds everything Run needs. Populated by ParseFlags in cmd/vmobs-runner.
 type Config struct {
 	VMID         string
@@ -328,7 +337,7 @@ func (r *runner) pingLoop(ctx context.Context, conn net.Conn, vmmGone <-chan str
 			// Wire up the ack channel and wait for the result.
 			ackResult := make(chan error, 1)
 			setAck(ackResult)
-			deadline := time.Duration(req.graceS)*time.Second + 5*time.Second
+			deadline := time.Duration(req.graceS)*time.Second + ShutdownReplySlack
 			go func() {
 				select {
 				case err := <-ackResult:

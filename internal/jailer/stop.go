@@ -46,15 +46,46 @@ type adapterCtlReply struct {
 	Error string `json:"error,omitempty"`
 }
 
+// finalizeCtlDeadline is the socket deadline for the finalize ctl command. The
+// runner answers finalize as soon as its channel loop notices finalizeCh, with
+// no guest round trip in the way, so no grace period applies to it.
+const finalizeCtlDeadline = 30 * time.Second
+
+// ctlTransportSlack is the headroom ctlDeadline adds on top of the runner's own
+// ceiling: time for the runner to write the reply and for this process to read
+// it once the answer is decided. Without it a client and a server that both
+// behave perfectly still race at the boundary.
+const ctlTransportSlack = 10 * time.Second
+
+// ctlDeadline is the socket deadline for a shutdown_guest ctl command at the
+// given grace. The runner waits grace + runner.ShutdownReplySlack for the
+// guest's ack and only then writes its reply, so a deadline that does not
+// outlive that cuts off a runner which is answering on time — and every stop is
+// then recorded forced no matter how the guest behaved. A constant deadline
+// guarding a configurable wait is the bug this replaces: at the documented
+// default grace of 30s (docs/examples/host-config.yaml) the old fixed 30s
+// expired 5s before the runner could possibly answer.
+func ctlDeadline(grace time.Duration) time.Duration {
+	return grace + runner.ShutdownReplySlack + ctlTransportSlack
+}
+
+// dialCtlFn is the ctl dialer doStop sends its commands through. Production
+// always uses dialCtl; it is a variable so a test can see which deadline each
+// call site picks, which is otherwise only observable by waiting out the
+// deadline itself.
+var dialCtlFn = dialCtl
+
 // dialCtl dials the runner's control socket and sends one command, returning the reply.
-// One command per connection (runner ctl protocol).
-func dialCtl(sockPath string, req adapterCtlRequest) (adapterCtlReply, error) {
+// One command per connection (runner ctl protocol). deadline bounds the whole
+// exchange after the dial: the caller chooses it from what its own command can
+// legitimately take to answer.
+func dialCtl(sockPath string, req adapterCtlRequest, deadline time.Duration) (adapterCtlReply, error) {
 	conn, err := net.DialTimeout("unix", sockPath, 5*time.Second)
 	if err != nil {
 		return adapterCtlReply{}, fmt.Errorf("dial runner ctl %s: %w", sockPath, err)
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+	_ = conn.SetDeadline(time.Now().Add(deadline))
 
 	enc := json.NewEncoder(conn)
 	if err := enc.Encode(req); err != nil {
@@ -154,7 +185,7 @@ func (a *Adapter) doStop(ctx context.Context, vmID string, grace time.Duration, 
 		if graceS <= 0 {
 			graceS = 1
 		}
-		reply, ctlErr := dialCtl(ctlSock, adapterCtlRequest{Cmd: "shutdown_guest", GraceS: graceS})
+		reply, ctlErr := dialCtlFn(ctlSock, adapterCtlRequest{Cmd: "shutdown_guest", GraceS: graceS}, ctlDeadline(grace))
 		if ctlErr == nil && reply.OK {
 			// shutdown_guest accepted; poll for vmm_exited or finalized within grace+5s.
 			pollCtx, pollCancel := context.WithTimeout(ctx, grace+5*time.Second)
@@ -185,7 +216,7 @@ func (a *Adapter) doStop(ctx context.Context, vmID string, grace time.Duration, 
 	}
 
 	// Always send finalize to the runner (tolerate dead/missing runner socket).
-	_, _ = dialCtl(ctlSock, adapterCtlRequest{Cmd: "finalize"})
+	_, _ = dialCtlFn(ctlSock, adapterCtlRequest{Cmd: "finalize"}, finalizeCtlDeadline)
 
 	// Release the jail chroot dir (privd removes <JailBase>/firecracker/<id>).
 	// Keep network + slot + manifest: a stopped VM can be restarted.
