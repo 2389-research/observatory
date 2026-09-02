@@ -31,11 +31,15 @@ const maxSlotsWiring = 64
 // Called only when cfg.Runtime.Mode == "firecracker" on Linux.
 //
 // Path derivations (fields with no dedicated config home):
-//   - StageRoot = cfg.Paths.Runtime + "/stage"  (ephemeral staging under the runtime dir)
-//   - JailBase  = cfg.Paths.Runtime + "/jail"   (jailer chroot base under the runtime dir)
-//   - SpoolRoot = cfg.Paths.State   + "/spool"  (per-VM spool dirs under the state dir)
-//   - RepoRoot  = cfg.Paths.State               (lock artifact paths like "images/dist/vmlinux"
+//   - StageRoot = cfg.Paths.StageRoot()  (ephemeral staging under the runtime dir)
+//   - JailBase  = cfg.Paths.JailBase()   (jailer chroot base under the runtime dir)
+//   - SpoolRoot = cfg.Paths.State + "/spool"  (per-VM spool dirs under the state dir)
+//   - RepoRoot  = cfg.Paths.State             (lock artifact paths like "images/dist/vmlinux"
 //     resolve here; the runbook syncs the repo's images/dist tree under the state dir)
+//
+// StageRoot and JailBase are config.Paths methods because the preflight doctor
+// reads the same two paths; a second inline expression here would let the doctor
+// and the adapter disagree about which host they are talking about.
 //
 // All derivations are recorded in task-12-report.md.
 func buildFirecrackerRuntime(
@@ -79,8 +83,8 @@ func buildFirecrackerRuntime(
 	// from existing configured roots (see doc comment above).
 	jCfg := jailer.Config{
 		StateDir:    cfg.Paths.State,
-		StageRoot:   filepath.Join(cfg.Paths.Runtime, "stage"),
-		JailBase:    filepath.Join(cfg.Paths.Runtime, "jail"),
+		StageRoot:   cfg.Paths.StageRoot(),
+		JailBase:    cfg.Paths.JailBase(),
 		SpoolRoot:   filepath.Join(cfg.Paths.State, "spool"),
 		RunnerBin:   runnerBin,
 		RepoRoot:    cfg.Paths.State,

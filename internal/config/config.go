@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -86,6 +87,16 @@ type Paths struct {
 	RuntimeLock       string `yaml:"runtime_lock"`
 	PrivilegedSocket  string `yaml:"privileged_socket"`
 }
+
+// StageRoot is the ephemeral staging directory: <Runtime>/stage. The jailer
+// adapter stages boot files here and the preflight doctor stats it; both must
+// read the same derivation or the doctor reports a host it never looked at.
+func (p Paths) StageRoot() string { return filepath.Join(p.Runtime, "stage") }
+
+// JailBase is the jailer chroot base: <Runtime>/jail. The privd unit's
+// --jail-base flag (scripts/aibox03/vmobs-privd.service) must point at the same
+// directory, or the runner dials a v.sock in a chroot privd never created.
+func (p Paths) JailBase() string { return filepath.Join(p.Runtime, "jail") }
 
 type Admission struct {
 	AllowMemoryOvercommit       bool    `yaml:"allow_memory_overcommit"`

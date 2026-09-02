@@ -352,3 +352,31 @@ func TestValidationTeaches(t *testing.T) {
 		})
 	}
 }
+
+// The runtime-derived paths have no dedicated config key: they hang off
+// Paths.Runtime. Both the jailer adapter and the preflight doctor read them, so
+// the derivation lives in one place and this test pins it.
+func TestPathsRuntimeDerivations(t *testing.T) {
+	cases := []struct {
+		name          string
+		runtime       string
+		wantStageRoot string
+		wantJailBase  string
+	}{
+		{"aibox03 runtime root", "/srv/vmobs", "/srv/vmobs/stage", "/srv/vmobs/jail"},
+		{"trailing slash cleaned", "/srv/vmobs/", "/srv/vmobs/stage", "/srv/vmobs/jail"},
+		{"relative root", "runtime", "runtime/stage", "runtime/jail"},
+		{"empty root", "", "stage", "jail"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := config.Paths{Runtime: tc.runtime}
+			if got := p.StageRoot(); got != tc.wantStageRoot {
+				t.Errorf("StageRoot() = %q, want %q", got, tc.wantStageRoot)
+			}
+			if got := p.JailBase(); got != tc.wantJailBase {
+				t.Errorf("JailBase() = %q, want %q", got, tc.wantJailBase)
+			}
+		})
+	}
+}

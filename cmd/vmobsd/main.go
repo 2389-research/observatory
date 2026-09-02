@@ -175,6 +175,21 @@ func verifyRuntimeLock(lockPath string, logger *slog.Logger) error {
 	return fmt.Errorf("runtime lock verification failed: %s", strings.Join(msgs, "; "))
 }
 
+// preflightConfig builds the doctor's config from the daemon config. PrivdSocket
+// and StageRoot must come from the same fields the jailer adapter launches with,
+// or the doctor reports a host it never looked at.
+func preflightConfig(cfg *config.Config, pfLock *lock.Lock, pfLockErr error) preflight.Config {
+	return preflight.Config{
+		Lock:        pfLock,
+		LockErr:     pfLockErr,
+		DataDir:     filepath.Dir(cfg.Storage.Database),
+		APIMode:     cfg.Server.Mode,
+		RequireAuth: cfg.Auth.RequireAuthentication,
+		PrivdSocket: cfg.Paths.PrivilegedSocket,
+		StageRoot:   cfg.Paths.StageRoot(),
+	}
+}
+
 // serve runs the daemon until ctx is canceled. ready is called once with the
 // bound address. The loopback check runs against the address actually bound,
 // not just the configured string: config validation is not the last line.
@@ -249,13 +264,7 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready f
 			// pfLock stays nil; pfLockErr is passed to the runner.
 		}
 	}
-	pfRunner := preflight.New(preflight.Config{
-		Lock:        pfLock,
-		LockErr:     pfLockErr,
-		DataDir:     filepath.Dir(cfg.Storage.Database),
-		APIMode:     cfg.Server.Mode,
-		RequireAuth: cfg.Auth.RequireAuthentication,
-	})
+	pfRunner := preflight.New(preflightConfig(cfg, pfLock, pfLockErr))
 
 	// Run preflight once at startup; log a summary. This does not block serving.
 	{
