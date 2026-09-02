@@ -86,16 +86,35 @@ func startDaemon(t *testing.T, repoRoot, daemonBin, runnerBin, label string) *m1
 	runtimeDir := filepath.Join(m1aStageBaseDir, "m1a-gate", uniqueID)
 	stateDir := filepath.Join(t.TempDir(), "state")
 
+	templatesDir := filepath.Join(stateDir, "templates")
 	for _, d := range []string{
 		runtimeDir,
 		filepath.Join(runtimeDir, "stage"),
 		filepath.Join(runtimeDir, "jail"),
 		stateDir,
 		filepath.Join(stateDir, "spool"),
+		templatesDir,
 	} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatalf("startDaemon %s: mkdir %s: %v", label, d, err)
 		}
+	}
+
+	// Write the "standard" template the gate's POST /vms calls request.
+	// kernel_image and root_image must be paths that exist on aibox03 (/srv/vmobs).
+	// Field names match internal/runtime/templates.go:Template exactly; DisallowUnknownFields
+	// will reject any stray field, so match the struct precisely.
+	const standardTemplateJSON = `{
+	"template_id": "standard",
+	"description": "Standard M1a gate VM template",
+	"kernel_image": "/srv/vmobs/images/vmlinux",
+	"root_image": "/srv/vmobs/images/rootfs.img",
+	"guest_privilege_profiles": ["unprivileged"],
+	"sensors": ["fanotify"],
+	"protocol_versions": {"guestd": "1"}
+}`
+	if err := os.WriteFile(filepath.Join(templatesDir, "standard.json"), []byte(standardTemplateJSON), 0o644); err != nil {
+		t.Fatalf("startDaemon %s: write standard.json: %v", label, err)
 	}
 
 	// Clean up our stage subtree after the test.
@@ -410,8 +429,7 @@ func (d *m1aDaemon) waitVMState(ctx context.Context, t *testing.T, vmID, want st
 	for {
 		select {
 		case <-ctx.Done():
-			t.Errorf("waitVMState %s: timed out waiting for state=%q (ctx: %v)", vmID, want, ctx.Err())
-			return
+			t.Fatalf("waitVMState %s: timed out waiting for state=%q (ctx: %v)", vmID, want, ctx.Err())
 		default:
 		}
 		vm := d.apiGet(t, "/vms/"+vmID)
@@ -691,8 +709,12 @@ func captureBaseline(t *testing.T, stateDir, runtimeDir string) m1aBaseline {
 	}
 }
 
-// evidenceSubtest appends one subtest's evidence to sb.
-func evidenceSubtest(sb *strings.Builder, name, text string) {
+// evidenceSubtest appends one subtest's evidence to sb after asserting the text
+// contains no vsock auth token (§15.3). All evidence writes go through here so
+// no call site can forget the scan.
+func evidenceSubtest(t *testing.T, sb *strings.Builder, name, text string) {
+	t.Helper()
+	assertNoToken(t, []byte(text))
 	fmt.Fprintf(sb, "\n## Subtest: %s\n", name)
 	fmt.Fprintln(sb, text)
 }
@@ -713,7 +735,14 @@ func evidenceSubtest(sb *strings.Builder, name, text string) {
 //     = /srv/vmobs/stage/m1a-gate/<unique>/jail — in the daemon's config only;
 //     privd uses its own --jail-base /srv/vmobs/jail for actual filesystem ops ✓
 func TestM1aGate(t *testing.T) {
-	// Same guard env as TestM0Boot, plus M1a-specific checks.
+	// Guard env check with an honest M1a message — the M0 message in gateSkipChecks
+	// says "root-gated" which is wrong for M1a (M1a must NOT run as root). The env var
+	// is the same (VMOBS_FIXTURE=1) for parity with M0; only the skip text changes.
+	if os.Getenv("VMOBS_FIXTURE") != "1" {
+		t.Skip("set VMOBS_FIXTURE=1 to run the M1a real-runtime gate (requires installed vmobs-privd; must NOT run as root)")
+	}
+	// Run the shared prerequisite probes (helper binary, firecracker, vmobs-fixture
+	// group). The env check inside gateSkipChecks is now a no-op because the env is set.
 	gateSkipChecks(t)
 	m1aSkipChecks(t)
 
@@ -764,7 +793,7 @@ func TestM1aGate(t *testing.T) {
 		if !rtAvail {
 			t.Errorf("runtime.available = false, reason: %v", rt["reason"])
 		}
-		evidenceSubtest(&evidence, "1_doctor_pass", fmt.Sprintf(
+		evidenceSubtest(t, &evidence, "1_doctor_pass", fmt.Sprintf(
 			"GET /host/status: status=%d overall=%q runtime.available=%v",
 			status, overall, rtAvail,
 		))
@@ -778,18 +807,38 @@ func TestM1aGate(t *testing.T) {
 		// real privd socket — we want a daemon that uses /nonexistent/privd.sock).
 		badStateDir := filepath.Join(t.TempDir(), "bad-state")
 		badRuntimeDir := filepath.Join(m1aStageBaseDir, "m1a-gate", fmt.Sprintf("bad-privd-%d", os.Getpid()))
+		badTemplatesDir := filepath.Join(badStateDir, "templates")
 		for _, d := range []string{
 			badStateDir,
 			filepath.Join(badStateDir, "spool"),
 			badRuntimeDir,
 			filepath.Join(badRuntimeDir, "stage"),
 			filepath.Join(badRuntimeDir, "jail"),
+			badTemplatesDir,
 		} {
 			if err := os.MkdirAll(d, 0o755); err != nil {
 				t.Fatalf("AT-001: mkdir %s: %v", d, err)
 			}
 		}
 		t.Cleanup(func() { _ = os.RemoveAll(badRuntimeDir) })
+
+		// Provision the same "standard" template into the bad daemon so its
+		// POST /vms refusal is caused only by the dead privd socket, not a
+		// missing template. (manager.go checks runtime availability before
+		// template lookup, so provisioning is belt-and-suspenders — but it
+		// keeps both daemons identically configured except for the socket path.)
+		const badStandardTemplateJSON = `{
+	"template_id": "standard",
+	"description": "Standard M1a gate VM template",
+	"kernel_image": "/srv/vmobs/images/vmlinux",
+	"root_image": "/srv/vmobs/images/rootfs.img",
+	"guest_privilege_profiles": ["unprivileged"],
+	"sensors": ["fanotify"],
+	"protocol_versions": {"guestd": "1"}
+}`
+		if err := os.WriteFile(filepath.Join(badTemplatesDir, "standard.json"), []byte(badStandardTemplateJSON), 0o644); err != nil {
+			t.Fatalf("AT-001: write standard.json: %v", err)
+		}
 
 		// vmobs-runner is already beside daemonBin (installed by startDaemon above).
 		// The bad daemon uses the same daemonBin directory; no additional copy needed.
@@ -1013,7 +1062,7 @@ performance_targets:
 
 		badCancel() // shut the bad daemon down promptly
 
-		evidenceSubtest(&evidence, "2_at001_privd_refusal", fmt.Sprintf(
+		evidenceSubtest(t, &evidence, "2_at001_privd_refusal", fmt.Sprintf(
 			"POST /vms on bad-privd daemon: status=%d cause=%q message=%q details.reason=%q guest_channel_found=%v",
 			resp.StatusCode, cause, msg, reason, guestChannelFound,
 		))
@@ -1088,7 +1137,7 @@ performance_targets:
 			cidBStr = fmt.Sprintf("cid=%d", mB.CID)
 		}
 
-		evidenceSubtest(&evidence, "3_two_real_vms", fmt.Sprintf(
+		evidenceSubtest(t, &evidence, "3_two_real_vms", fmt.Sprintf(
 			"vmA=%s %s %s netns=%s channel_established=true\nvmB=%s %s %s netns=%s channel_established=true",
 			vmAID, uidAStr, cidAStr, nsA,
 			vmBID, uidBStr, cidBStr, nsB,
@@ -1128,20 +1177,45 @@ performance_targets:
 			t.Errorf("AT-011: no vm.state_changed event with reason=graceful_stop found for vmA after stop")
 		}
 
-		// B must still be running.
+		// Record the stop completion time AFTER waitVMState confirms stopped.
+		// Everything after this is "after A's stop."
+		aStopTime := time.Now()
+
+		// (a) B must still be running immediately after A's stop completed.
 		vmB := daemon.apiGet(t, "/vms/"+vmBID)
 		bState, _ := vmB["observed_state"].(string)
 		if bState != "running" {
 			t.Errorf("AT-011: vmB state = %q, want running after vmA stop", bState)
 		}
 
-		// B must still respond with channel events (guestd is alive).
-		// Poll for a guest event on B after A's stop.
-		aStopTime := time.Now()
-
-		// Find the most recent guest.channel_established on B.
-		bChanEvt := daemon.pollEventKind(t, vmBID, "guest.channel_established")
-		bActive := bChanEvt != nil
+		// (b) Assert B's vm.state_changed stream has no departure-from-running event
+		// with host_received_at after aStopTime. A departure event would mean B was
+		// interrupted by A's stop — which the product must prevent.
+		// Deviation: the brief asked for "ping-driven events after A's stop time" but
+		// no runner ping event kind exists in the registry (verified). State-change
+		// absence is the product's actual record of interruptions. (Filed: I2 deviation.)
+		bStateChanges := daemon.apiGet(t, "/events?vm_id="+vmBID+"&kind=vm.state_changed")
+		bEvts, _ := bStateChanges["events"].([]any)
+		for _, e := range bEvts {
+			em, _ := e.(map[string]any)
+			data, _ := em["data"].(map[string]any)
+			from, _ := data["from"].(string)
+			hostRecvStr, _ := em["host_received_at"].(string)
+			if from != "running" {
+				continue
+			}
+			if hostRecvStr == "" {
+				continue
+			}
+			evtTime, err := time.Parse(time.RFC3339Nano, hostRecvStr)
+			if err != nil {
+				continue
+			}
+			if evtTime.After(aStopTime) {
+				t.Errorf("AT-011: vmB left running state at %s (after aStopTime %s) — B was interrupted by A's stop",
+					hostRecvStr, aStopTime.UTC().Format(time.RFC3339Nano))
+			}
+		}
 
 		// Delete A.
 		daemon.deleteVM(t, vmAID)
@@ -1153,9 +1227,9 @@ performance_targets:
 			t.Errorf("AT-011: vmB state = %q after vmA delete, want running", bStateAfter)
 		}
 
-		evidenceSubtest(&evidence, "4_at011_graceful_stop", fmt.Sprintf(
-			"vmA stopped graceful_stop=%v; vmB state after vmA stop=%q; vmB channel_established_present=%v; vmA stop_time=%s",
-			gracefulFound, bState, bActive, aStopTime.UTC().Format(time.RFC3339),
+		evidenceSubtest(t, &evidence, "4_at011_graceful_stop", fmt.Sprintf(
+			"vmA stopped graceful_stop=%v; vmB state after vmA stop=%q; vmB state after vmA delete=%q; aStopTime=%s; vmB no state departure after stop=verified",
+			gracefulFound, bState, bStateAfter, aStopTime.UTC().Format(time.RFC3339),
 		))
 	})
 
@@ -1222,7 +1296,7 @@ performance_targets:
 		// Clean up the idempotency test VM.
 		_, _ = daemon.apiDelete(t, "/vms/"+id1)
 
-		evidenceSubtest(&evidence, "5_at006_idempotency", fmt.Sprintf(
+		evidenceSubtest(t, &evidence, "5_at006_idempotency", fmt.Sprintf(
 			"first_create=%d vm_id=%s is_replay1=%v replay=%d vm_id=%s is_replay=%v conflict=%d cause=%q",
 			status1, id1, isReplay1, status2, id2, isReplay2, status3, cause3,
 		))
@@ -1249,6 +1323,17 @@ performance_targets:
 		for _, id := range vmIDs {
 			_ = daemon.waitEventKind(chanCtx, t, id, "guest.channel_established")
 		}
+
+		// AT-009 simultaneity assertion: re-read all four states in one pass and
+		// require all are running at this point, before any stop begins.
+		for _, id := range vmIDs {
+			vm := daemon.apiGet(t, "/vms/"+id)
+			state, _ := vm["observed_state"].(string)
+			if state != "running" {
+				t.Errorf("AT-009: vm %s state = %q, want running (simultaneity check)", id, state)
+			}
+		}
+
 		// Stop and delete all four.
 		for _, id := range vmIDs {
 			daemon.stopVM(t, id)
@@ -1262,7 +1347,7 @@ performance_targets:
 			daemon.deleteVM(t, id)
 		}
 
-		evidenceSubtest(&evidence, "6_at009_four_concurrent_vms", fmt.Sprintf(
+		evidenceSubtest(t, &evidence, "6_at009_four_concurrent_vms", fmt.Sprintf(
 			"four VMs %v: all reached running with channel_established; all stopped and deleted",
 			vmIDs,
 		))
@@ -1287,14 +1372,36 @@ performance_targets:
 
 			daemon.deleteVM(t, id)
 
-			// Wait for resources to fully settle after delete.
-			time.Sleep(1 * time.Second)
+			// Poll until state dir entry count drops back to baseline.StateDirEntries,
+			// confirming the VM's state dir was cleaned up before the next cycle begins.
+			// Deadline: 30s per cycle (well within aibox03's expected teardown time).
+			cyclePollDeadline := time.Now().Add(30 * time.Second)
+			for {
+				if stateDirEntries(daemon.stateDir) == baseline.StateDirEntries {
+					break
+				}
+				if time.Now().After(cyclePollDeadline) {
+					t.Fatalf("AT-018 cycle %d: state dir did not return to baseline within 30s", cycle)
+				}
+				time.Sleep(200 * time.Millisecond)
+			}
 		}
 
-		// Give any async resource release a moment to complete.
-		time.Sleep(2 * time.Second)
-
-		after := captureBaseline(t, daemon.stateDir, daemon.runtimeDir)
+		// Poll all six observables until they match baseline or a 60s deadline expires.
+		// Hard-assert equality after — timeout is a failure, not a pass.
+		recaptureDeadline := time.Now().Add(60 * time.Second)
+		var after m1aBaseline
+		for {
+			after = captureBaseline(t, daemon.stateDir, daemon.runtimeDir)
+			if after == baseline {
+				break
+			}
+			if time.Now().After(recaptureDeadline) {
+				// Let the assertions below produce the specific failure message.
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
 
 		if after.NetnsCount != baseline.NetnsCount {
 			t.Errorf("AT-018: netns count: baseline=%d after=%d (leaked %d)",
@@ -1321,7 +1428,7 @@ performance_targets:
 				baseline.StageDirEntries, after.StageDirEntries, after.StageDirEntries-baseline.StageDirEntries)
 		}
 
-		evidenceSubtest(&evidence, "7_at018_resource_leaks", fmt.Sprintf(
+		evidenceSubtest(t, &evidence, "7_at018_resource_leaks", fmt.Sprintf(
 			"baseline: netns=%d veth=%d jail=%d fc_procs=%d state_entries=%d stage_entries=%d\n"+
 				"after 5 cycles: netns=%d veth=%d jail=%d fc_procs=%d state_entries=%d stage_entries=%d\n"+
 				"delta: netns=%+d veth=%+d jail=%+d fc_procs=%+d state=%+d stage=%+d",
@@ -1354,6 +1461,9 @@ performance_targets:
 		chanEvt := daemon.waitEventKind(chanCtx, t, vmID, "guest.channel_established")
 
 		// Get the running-transition timestamp from vm.state_changed events.
+		// The Envelope serializes host_received_at (not "occurred_at" — that field
+		// does not exist). Both timestamps use the Timestamp format: RFC3339 with
+		// microsecond precision (parseable by time.RFC3339Nano).
 		stateEvents := daemon.apiGet(t, "/events?vm_id="+vmID+"&kind=vm.state_changed")
 		evts, _ := stateEvents["events"].([]any)
 		var runningAt string
@@ -1362,42 +1472,38 @@ performance_targets:
 			data, _ := em["data"].(map[string]any)
 			to, _ := data["to"].(string)
 			if to == "running" {
-				runningAt, _ = em["occurred_at"].(string)
+				runningAt, _ = em["host_received_at"].(string)
 				break
 			}
 		}
 
 		var chanAt string
 		if chanEvt != nil {
-			chanAt, _ = chanEvt["occurred_at"].(string)
+			chanAt, _ = chanEvt["host_received_at"].(string)
 		}
 
+		// Missing timestamps are test failures — a vacuous guard would hide real
+		// product bugs. Both fields must be present and parseable.
 		if runningAt == "" {
-			t.Errorf("AT-007: no vm.state_changed event with to=running found")
+			t.Fatalf("AT-007: no vm.state_changed event with to=running found (or host_received_at missing)")
 		}
 		if chanAt == "" {
-			t.Errorf("AT-007: no guest.channel_established event found")
+			t.Fatalf("AT-007: no guest.channel_established event found (or host_received_at missing)")
 		}
 
-		if runningAt != "" && chanAt != "" {
-			// running must NOT be earlier than channel_established.
-			// i.e. parse and assert runningAt >= chanAt.
-			tRunning, errR := time.Parse(time.RFC3339Nano, runningAt)
-			tChan, errC := time.Parse(time.RFC3339Nano, chanAt)
-			if errR != nil {
-				// Try RFC3339.
-				tRunning, errR = time.Parse(time.RFC3339, runningAt)
-			}
-			if errC != nil {
-				tChan, errC = time.Parse(time.RFC3339, chanAt)
-			}
-			if errR != nil || errC != nil {
-				t.Errorf("AT-007: timestamp parse error: runningAt=%q errR=%v chanAt=%q errC=%v",
-					runningAt, errR, chanAt, errC)
-			} else if tRunning.Before(tChan) {
-				t.Errorf("AT-007 VIOLATION: running transition (%s) is EARLIER than channel_established (%s)",
-					runningAt, chanAt)
-			}
+		// Parse both and assert running >= channel_established.
+		tRunning, errR := time.Parse(time.RFC3339Nano, runningAt)
+		tChan, errC := time.Parse(time.RFC3339Nano, chanAt)
+		if errR != nil {
+			t.Fatalf("AT-007: parse running host_received_at %q: %v", runningAt, errR)
+		}
+		if errC != nil {
+			t.Fatalf("AT-007: parse channel_established host_received_at %q: %v", chanAt, errC)
+		}
+		runningNotBeforeChannel := !tRunning.Before(tChan)
+		if !runningNotBeforeChannel {
+			t.Errorf("AT-007 VIOLATION: running transition (%s) is EARLIER than channel_established (%s)",
+				runningAt, chanAt)
 		}
 
 		// Deviation note: seeding/baseline comparison is M4 scope.
@@ -1425,9 +1531,9 @@ performance_targets:
 			}
 		}
 
-		evidenceSubtest(&evidence, "8_at007_ordering", fmt.Sprintf(
-			"vm=%s running_transition_at=%q channel_established_at=%q running_not_before_channel=true",
-			vmID, runningAt, chanAt,
+		evidenceSubtest(t, &evidence, "8_at007_ordering", fmt.Sprintf(
+			"vm=%s running_transition_at=%q channel_established_at=%q running_not_before_channel=%v",
+			vmID, runningAt, chanAt, runningNotBeforeChannel,
 		))
 	})
 
