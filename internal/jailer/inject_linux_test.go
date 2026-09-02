@@ -249,10 +249,14 @@ func assertRecoveryLaunch(t *testing.T, h *injectHarness, vmID string) {
 		// already run doRollback, which SIGKILLs the runner and then removes the
 		// manifest along with the whole VM state dir (launch.go:469-511) -- so the
 		// pid is gone from the record, and the kill happened synchronously inside
-		// the Launch call that just returned. The window this helper exists to
-		// close is the other one: a runner that was never signalled, shutting
-		// itself down a tick at a time after its VMM dies. That only happens when
-		// the launch succeeded.
+		// the Launch call that just returned. One failure escapes that: if
+		// writeManifest fails at launch.go:216 the runner is already started, but
+		// the on-disk manifest doRollback re-reads records neither the pid nor
+		// stageRunnerSpawned, so the kill is skipped and this path returns with
+		// that runner still alive. The window this helper exists to close is the
+		// other one: a runner that was never signalled, shutting itself down a
+		// tick at a time after its VMM dies -- which is what a successful launch
+		// leaves behind.
 		h.backend.killAll()
 		return
 	}
