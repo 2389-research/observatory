@@ -393,20 +393,29 @@ performance_targets:
 		// r.Context() (internal/api/vms.go), so giving up here costs this test the
 		// answer, not the VM -- which is precisely why the answer must not be lost.
 		//
-		//	stop, force_stop, delete, create   Manager.OperationContext:
+		//	stop, force_stop, pause, resume    Manager.OperationContext:
 		//	                                   stop_grace_seconds + operationSlack
 		//	                                   = 30 + 120                      150s
-		//	  ...and then failing              + recoveryBudget = 150 + 75     225s
+		//	  + the tail that records it       + recoveryBudget = 150 + 75     225s
 		//	start                              Manager.launchBudget            240s
-		//	  ...and then failing              + recoveryBudget = 240 + 75     315s
+		//	  + the tail that records it       + recoveryBudget = 240 + 75     315s
+		//	delete                             Manager.OperationContext        150s
+		//	create                             Manager.OperationContext        150s
 		//
-		// The failing rows are the ones easy to miss. recoveryContext is derived
-		// with context.WithoutCancel, so it does not share the budget that just ran
-		// out: a launch that burns all 240s and then fails starts a fresh 75s for
-		// failLaunch, the cleanup ForceStop and the operation read-back. A client
-		// priced at the 240s alone gives up 75s early on precisely the request whose
-		// answer matters most -- and on a host whose staging IO drops below the
-		// assumed floor, that is the request that happens.
+		// The tail rows are the ones easy to miss. recoveryContext is derived with
+		// context.WithoutCancel, so it does not share the budget that just ran out:
+		// a launch that burns all 240s starts a fresh 75s for the writes that record
+		// how it ended, whether it succeeded or failed. A client priced at the 240s
+		// alone gives up 75s early on precisely the request whose answer matters
+		// most -- and on a host whose staging IO drops below the assumed floor, that
+		// is the request that happens. Only one such tail per mutation, however many
+		// times the code on it asks for one: recoveryContext returns a context it
+		// already made unchanged, which is what keeps these two rows at 225 and 315.
+		//
+		// delete and create have no tail at all. Manager.Delete never calls
+		// recoveryContext -- all four call sites are in doAction and failAction --
+		// and CreateVM answers as soon as the launch is enqueued, with the launch
+		// itself running on the manager's context rather than the caller's.
 		//
 		// 330s clears the largest row. All three constants live in
 		// internal/runtime/manager.go with their derivations; re-derive this whenever
@@ -501,11 +510,19 @@ performance_targets:
 		d.vmMu.Unlock()
 
 		// One deadline for the whole loop. Every request below is built with
-		// teardownCtx, so this 60s cap binds before the client's own 90s timeout and a
-		// daemon that accepts connections but never answers costs 60s in total rather
-		// than 90s per id. Uncapped, ten ids would outrun go test's own timeout, whose
-		// panic aborts the binary before the remaining cleanups run -- losing the
-		// post-mortem for exactly the failure that most needs it.
+		// teardownCtx, so this 60s cap binds before the client's own 330s timeout and
+		// a daemon that accepts connections but never answers costs 60s in total
+		// rather than 330s per id. Uncapped, ten ids would outrun the gate's own
+		// -timeout 600s (README.md), whose panic aborts the binary before the
+		// remaining cleanups run -- losing the post-mortem for exactly the failure
+		// that most needs it.
+		//
+		// So this cap is a client that gives up before the daemon does: the same
+		// shape disposeVM below was fixed for, taken deliberately here. disposeVM
+		// handles one VM and can afford to wait the daemon out; this loop handles
+		// every VM the run created, and a bounded teardown for all of them beats a
+		// complete answer for the first. Nothing is hidden by the trade -- the ids
+		// this cap abandons are logged by name below.
 		teardownCtx, cancelTeardown := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancelTeardown()
 
@@ -912,11 +929,13 @@ func (d *m1aDaemon) disposeVM(t *testing.T, vmID string) {
 	if t.Failed() {
 		savePostmortem(t, d.label, vmRunnerFiles(d.stateDir, vmID))
 	}
-	// The daemon gives a force delete Manager.OperationContext (150s) and, when it
-	// fails, a fresh recoveryBudget on top -- 225s. Teardown runs after a red
-	// subtest, which is when a delete is most likely to be slow, so a client that
-	// gives up first abandons a VM the daemon was still cleaning up and hands
-	// AT-018 a leak the test caused. 240s clears the daemon.
+	// The daemon gives a force delete Manager.OperationContext (150s) and nothing
+	// on top: Manager.Delete never derives a recovery tail. recoveryContext has
+	// exactly four call sites and every one of them is in doAction or failAction,
+	// so a delete's ceiling is 150s, not the 225s a stop gets. Teardown runs after
+	// a red subtest, which is when a delete is most likely to be slow, so a client
+	// that gives up first abandons a VM the daemon was still cleaning up and hands
+	// AT-018 a leak the test caused. 240s clears the daemon with room to spare.
 	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, d.baseURL+"/vms/"+vmID+"?force=true", nil)
