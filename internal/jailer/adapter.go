@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/2389-research/observatory-v2/internal/network"
 	"github.com/2389-research/observatory-v2/internal/preflight"
@@ -46,6 +47,10 @@ type Config struct {
 
 	Allocator *network.Allocator // CIDR allocator; caller must not use concurrently
 	Preflight func(ctx context.Context, refresh bool) preflight.Report
+
+	// AttachTimeout overrides the default 60s attach-wait deadline. Zero means 60s.
+	// Production code never sets this; tests use it to bound the wrong-token subtest.
+	AttachTimeout time.Duration
 }
 
 // Adapter implements runtime.Runtime using the real Firecracker/jailer pipeline.

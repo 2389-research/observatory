@@ -219,7 +219,11 @@ func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (retErr error
 
 	// ── Step 7: Attach wait ───────────────────────────────────────────────────
 	currentStage = stageAttached
-	attachCtx, attachCancel := context.WithTimeout(ctx, readyTimeout)
+	attachTimeout := a.cfg.AttachTimeout
+	if attachTimeout <= 0 {
+		attachTimeout = readyTimeout
+	}
+	attachCtx, attachCancel := context.WithTimeout(ctx, attachTimeout)
 	defer attachCancel()
 
 	attachErr := a.waitAttached(attachCtx, stateFile, cmd)

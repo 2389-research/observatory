@@ -15,3 +15,8 @@ import (
 func PollRunnerPhase(ctx context.Context, stateFile string, wantPhases ...string) (runner.State, error) {
 	return pollRunnerPhase(ctx, stateFile, wantPhases...)
 }
+
+// PrivdClient is an exported alias for the package-private privdClient interface.
+// Used by the AT-005 injection tests to define a decorator that satisfies jailer.New's
+// parameter without importing internal implementation details.
+type PrivdClient = privdClient
