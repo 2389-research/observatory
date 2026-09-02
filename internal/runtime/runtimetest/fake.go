@@ -192,6 +192,16 @@ func (f *Fake) ForceStop(ctx context.Context, vmID string) error {
 	return err
 }
 
+// Release records the call and returns the injected error (or nil).
+// Idempotent: unknown vmID returns nil in the real adapter; the fake does the same.
+func (f *Fake) Release(ctx context.Context, vmID string) error {
+	ch, err := f.record("Release", vmID)
+	if waitErr := wait(ctx, ch); waitErr != nil {
+		return waitErr
+	}
+	return err
+}
+
 // ForcedStop is a sentinel error injected via FailNext("Stop", vmID) to make
 // the fake report forced=true, as if the grace period elapsed.
 type ForcedStop struct{}

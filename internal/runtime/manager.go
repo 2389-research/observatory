@@ -743,6 +743,18 @@ func (m *Manager) Delete(ctx context.Context, vmID string, force bool, expectedR
 		}
 	}
 
+	// R1: call Release before flipping the row to "deleted" so jail resources
+	// are always freed before the VM is considered gone. Tolerate UnavailableError
+	// (runtime absent on startup reconcile is normal) but fail on real errors so a
+	// VM row never reads "deleted" while jail resources remain.
+	if err := m.rt.Release(ctx, vmID); err != nil {
+		var ue *UnavailableError
+		if !errors.As(err, &ue) {
+			return nil, fmt.Errorf("release vm resources: %w", err)
+		}
+		// UnavailableError is tolerated: an absent runtime must not wedge deletes.
+	}
+
 	vm, err = m.st.TransitionVM(ctx, store.TransitionInput{
 		VMID:        vmID,
 		To:          "deleted",

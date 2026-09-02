@@ -852,3 +852,127 @@ func TestManagerCreateVMReplayNoRelaunch(t *testing.T) {
 		t.Errorf("Launch calls = %d, want 1 (none from the replay)", launches)
 	}
 }
+
+// TestManagerDeleteCallsRelease: Delete must call Release on every delete path
+// (R1 controller ruling). Verifies Release is called once for stopped→deleted.
+func TestManagerDeleteCallsRelease(t *testing.T) {
+	st := openStoreForManager(t)
+	fk := runtimetest.NewFake()
+	mgr := newManager(t, st, fk)
+
+	vm, _, _, err := mgr.CreateVM(t.Context(), "local_operator", createReq("release-on-delete"))
+	if err != nil {
+		t.Fatalf("CreateVM: %v", err)
+	}
+	mgr.Close()
+
+	// Stop then delete — Release must be called.
+	if _, _, err := mgr.Action(t.Context(), vm.VMID, "stop", nil); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if _, err := mgr.Delete(t.Context(), vm.VMID, false, nil); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	// Fake must have recorded a Release call.
+	gotRelease := false
+	for _, c := range fk.Calls {
+		if c.Method == "Release" && c.VMID == vm.VMID {
+			gotRelease = true
+			break
+		}
+	}
+	if !gotRelease {
+		t.Errorf("Delete did not call Release (calls: %v)", fk.MethodCalls())
+	}
+}
+
+// TestManagerDeleteForceCallsRelease: force-delete on a live VM must also call Release.
+func TestManagerDeleteForceCallsRelease(t *testing.T) {
+	st := openStoreForManager(t)
+	fk := runtimetest.NewFake()
+	mgr := newManager(t, st, fk)
+
+	vm, _, _, err := mgr.CreateVM(t.Context(), "local_operator", createReq("release-force-delete"))
+	if err != nil {
+		t.Fatalf("CreateVM: %v", err)
+	}
+	mgr.Close()
+
+	if _, err := mgr.Delete(t.Context(), vm.VMID, true, nil); err != nil {
+		t.Fatalf("force delete: %v", err)
+	}
+
+	gotRelease := false
+	for _, c := range fk.Calls {
+		if c.Method == "Release" && c.VMID == vm.VMID {
+			gotRelease = true
+			break
+		}
+	}
+	if !gotRelease {
+		t.Errorf("Force-delete did not call Release (calls: %v)", fk.MethodCalls())
+	}
+}
+
+// TestManagerDeleteToleratesUnavailableRelease: if Release returns *UnavailableError,
+// delete must still succeed (tolerate unavailable runtime per R1 ruling).
+func TestManagerDeleteToleratesUnavailableRelease(t *testing.T) {
+	st := openStoreForManager(t)
+	fk := runtimetest.NewFake()
+	mgr := newManager(t, st, fk)
+
+	vm, _, _, err := mgr.CreateVM(t.Context(), "local_operator", createReq("release-unavailable"))
+	if err != nil {
+		t.Fatalf("CreateVM: %v", err)
+	}
+	mgr.Close()
+
+	if _, _, err := mgr.Action(t.Context(), vm.VMID, "stop", nil); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+
+	// Inject *UnavailableError for Release.
+	fk.FailNext("Release", vm.VMID, &runtime.UnavailableError{Reason: "test: runtime unavailable"})
+
+	del, err := mgr.Delete(t.Context(), vm.VMID, false, nil)
+	if err != nil {
+		t.Errorf("Delete should tolerate UnavailableError from Release, got: %v", err)
+	}
+	if del != nil && del.ObservedState != "deleted" {
+		t.Errorf("state = %q, want deleted", del.ObservedState)
+	}
+}
+
+// TestManagerDeleteFailsOnReleaseError: if Release returns a non-Unavailable error,
+// delete must fail (VM row must not reach deleted while jail resources remain).
+func TestManagerDeleteFailsOnReleaseError(t *testing.T) {
+	st := openStoreForManager(t)
+	fk := runtimetest.NewFake()
+	mgr := newManager(t, st, fk)
+
+	vm, _, _, err := mgr.CreateVM(t.Context(), "local_operator", createReq("release-error"))
+	if err != nil {
+		t.Fatalf("CreateVM: %v", err)
+	}
+	mgr.Close()
+
+	if _, _, err := mgr.Action(t.Context(), vm.VMID, "stop", nil); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+
+	// Inject a real error for Release.
+	releaseErr := errors.New("disk full")
+	fk.FailNext("Release", vm.VMID, releaseErr)
+
+	_, err = mgr.Delete(t.Context(), vm.VMID, false, nil)
+	if err == nil {
+		t.Error("Delete should fail when Release returns a non-Unavailable error")
+	}
+
+	// VM must not be in deleted state.
+	vmAfter, _ := st.GetVM(t.Context(), vm.VMID)
+	if vmAfter != nil && vmAfter.ObservedState == "deleted" {
+		t.Error("VM reached deleted state despite Release error — jail resources may remain")
+	}
+}

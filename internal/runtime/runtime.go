@@ -47,6 +47,13 @@ type Runtime interface {
 	// ForceStop immediately terminates the VMM without waiting for the guest.
 	// Must work on running, paused, and stopping VMs (§5.2).
 	ForceStop(ctx context.Context, vmID string) error
+
+	// Release performs a full resource release for the delete path: removes jail,
+	// network, manifest, state dir, and stage dir. The spool dir is left intact
+	// (the importer reads it independently). Idempotent: unknown vmID returns nil.
+	// Called by Manager.Delete on every delete path; a non-*UnavailableError return
+	// fails the delete so a VM row never reaches "deleted" while jail resources remain.
+	Release(ctx context.Context, vmID string) error
 }
 
 // UnavailableError is the typed failure from Availability and every Unavailable
@@ -88,6 +95,9 @@ func (u *unavailableRuntime) Stop(_ context.Context, _ string, _ time.Duration) 
 	return false, &UnavailableError{Reason: u.reason}
 }
 func (u *unavailableRuntime) ForceStop(_ context.Context, _ string) error {
+	return &UnavailableError{Reason: u.reason}
+}
+func (u *unavailableRuntime) Release(_ context.Context, _ string) error {
 	return &UnavailableError{Reason: u.reason}
 }
 
