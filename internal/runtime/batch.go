@@ -445,8 +445,17 @@ func (c *batchCoord) stopSiblings(failedVMID string) {
 				break // already down; nothing to stop
 			}
 			if state == "stopping" {
-				// A synchronous stop is mid-flight and will land the VM in
-				// stopped; mark the launch op and leave the VM to it.
+				// Two ways the row gets here. Usually another actor -- a stop or
+				// force_stop action, or Delete -- owns a synchronous stop that is
+				// mid-flight and will land the VM in stopped, so leaving the VM to
+				// it is right. The other way is this loop's own earlier attempt:
+				// it wrote stopping, then its terminal write to stopped failed and
+				// continued, and this re-read sees its own row. Nothing else is
+				// mid-flight then, and since NotifyVMMExit no-ops on stopping,
+				// nothing repairs the row until Manager.Reconcile runs at
+				// controller construction and releases the compute reservation.
+				// stop, force_stop and Delete(force=true) all accept stopping and
+				// drive it to stopped, so an operator can recover before that.
 				failOp(opID)
 				break
 			}
