@@ -8,6 +8,7 @@ package jailer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -188,11 +189,53 @@ func (a *Adapter) doStop(ctx context.Context, vmID string, grace time.Duration, 
 
 	// Release the jail chroot dir (privd removes <JailBase>/firecracker/<id>).
 	// Keep network + slot + manifest: a stopped VM can be restarted.
+	//
+	// The error is discarded on purpose. doStop's error reaches Manager.doAction
+	// ("stop" and "force_stop"), which routes any error into failAction: that
+	// records the operation as failed and leaves the VM row in stopping for a VM
+	// that is genuinely dead. A stop that did stop the VM but could not free its
+	// chroot must not be recorded as a failed stop -- a wrong verdict on the VM is
+	// worse than the leak. What that costs: a release that fails for any reason
+	// other than the retried invalid_state (privd unreachable, exec_failed on the
+	// jail dir) still leaks <JailBase>/firecracker/<vmID> and pins its privd ledger
+	// entry, silently, while Manager.Delete goes on to write "deleted". A cleanup
+	// backlog that would settle those is M1b work.
 	releaseCtx, releaseCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer releaseCancel()
-	_ = a.pc.ReleaseVM(releaseCtx, privd.ReleaseVMReq{VMID: vmID})
+	_ = a.releaseVMWhenDead(releaseCtx, vmID)
 
 	return forced, nil
+}
+
+// releaseVMWhenDead asks privd to release the VM's jail chroot, retrying while
+// privd answers with cause invalid_state.
+//
+// SIGKILL is asynchronous: a force-stop can reach privd before the kernel has
+// reaped the VMM, and privd then refuses with invalid_state "vm process is still
+// alive; signal first" (internal/privd/server.go). Taking that refusal as an
+// answer leaves the chroot on disk and pins the ledger entry -- release_network
+// sees a non-zero PID and writes the partial entry back instead of deleting the
+// file. The refusal is explicit and typed, so asking again until privd accepts is
+// what the protocol asks for; after a SIGKILL the process is normally gone in
+// milliseconds. Every other cause is a real failure and is returned on the first
+// attempt rather than spinning out the deadline.
+func (a *Adapter) releaseVMWhenDead(ctx context.Context, vmID string) error {
+	const retryInterval = 50 * time.Millisecond
+	for {
+		err := a.pc.ReleaseVM(ctx, privd.ReleaseVMReq{VMID: vmID})
+		if err == nil {
+			return nil
+		}
+		var re *privd.RemoteError
+		if !errors.As(err, &re) || re.Cause != "invalid_state" {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(retryInterval):
+		}
+	}
 }
 
 // Release performs a full resource release for the delete path (R1 ruling).

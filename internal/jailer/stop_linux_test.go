@@ -38,6 +38,21 @@ func makeStopHarness(t *testing.T) (
 	string, // jailBase
 ) {
 	t.Helper()
+	return makeStopHarnessWrapped(t, nil)
+}
+
+// makeStopHarnessWrapped is makeStopHarness with a hook to decorate the privd
+// client the adapter talks to. wrap==nil uses the real *privd.Client unchanged;
+// a non-nil wrap receives that client and returns whatever the adapter should
+// call instead, which is how the release-retry tests inject privd's refusals.
+func makeStopHarnessWrapped(t *testing.T, wrap func(jailer.PrivdClient) jailer.PrivdClient) (
+	*jailer.Adapter,
+	*testRecordingBackend,
+	string, // stateDir
+	string, // spoolRoot
+	string, // jailBase
+) {
+	t.Helper()
 	backend := &testRecordingBackend{}
 	t.Cleanup(backend.killAll)
 	privdSock, stageRoot := startTestPrivdServer(t, backend)
@@ -80,7 +95,10 @@ func makeStopHarness(t *testing.T) (
 		},
 	}
 
-	pc := &privd.Client{SocketPath: privdSock}
+	var pc jailer.PrivdClient = &privd.Client{SocketPath: privdSock}
+	if wrap != nil {
+		pc = wrap(pc)
+	}
 	adapter, err := jailer.New(cfg, pc)
 	if err != nil {
 		t.Fatalf("jailer.New: %v", err)
@@ -266,6 +284,109 @@ func TestForceStopSendsKill(t *testing.T) {
 	}
 	if gotTerm {
 		t.Errorf("ForceStop must not send SIGTERM, backend signals: %v", backend.signalCalls)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// release_vm retry (the SIGKILL race that leaked a 1.7 GB chroot on aibox03)
+// ---------------------------------------------------------------------------
+
+// refusingReleasePrivd decorates a real privd client and answers release_vm with a
+// chosen refusal for the first refusals calls, then delegates. Every other verb is
+// promoted from the embedded client untouched.
+type refusingReleasePrivd struct {
+	jailer.PrivdClient
+	refusal  error // what the refused calls return
+	refusals int   // refusals left to serve
+	calls    int   // release_vm calls seen, refused and delegated alike
+}
+
+func (p *refusingReleasePrivd) ReleaseVM(ctx context.Context, req privd.ReleaseVMReq) error {
+	p.calls++
+	if p.refusals > 0 {
+		p.refusals--
+		return p.refusal
+	}
+	return p.PrivdClient.ReleaseVM(ctx, req)
+}
+
+// aliveRefusal is privd's verbatim answer when the ledger still shows the VM process
+// alive (internal/privd/server.go:357-360). SIGKILL is asynchronous, so a release
+// issued the instant after the signal legitimately gets this.
+func aliveRefusal() error {
+	return &privd.RemoteError{Cause: "invalid_state", Message: "vm process is still alive; signal first"}
+}
+
+// TestForceStopRetriesRelease: privd refuses release_vm with its typed
+// "signal first" invalid_state while it can still see the VMM process. The adapter
+// must keep asking until privd accepts. Dropping that refusal is what left a 1.7 GB
+// jail chroot and an immortal ledger entry on the host in live gate run 4, while the
+// VM row read "deleted".
+func TestForceStopRetriesRelease(t *testing.T) {
+	var refuser *refusingReleasePrivd
+	adapter, backend, stateDir, _, jailBase := makeStopHarnessWrapped(t,
+		func(inner jailer.PrivdClient) jailer.PrivdClient {
+			refuser = &refusingReleasePrivd{PrivdClient: inner, refusal: aliveRefusal(), refusals: 2}
+			return refuser
+		})
+
+	vmID := launchTestVM(t, adapter, stateDir, jailBase, func() {})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := adapter.ForceStop(ctx, vmID); err != nil {
+		t.Fatalf("ForceStop: %v", err)
+	}
+
+	// Two refusals then an accepted call: anything less means the adapter took the
+	// first refusal as an answer.
+	if refuser.calls < 3 {
+		t.Errorf("release_vm attempts = %d, want >= 3 (two refusals then an accepted call): "+
+			"the adapter discarded privd's invalid_state refusal instead of retrying", refuser.calls)
+	}
+
+	// A retry that never lands is the same leak — privd's backend must have run it.
+	released := false
+	for _, id := range backend.releaseVMCalls {
+		if id == vmID {
+			released = true
+		}
+	}
+	if !released {
+		t.Errorf("privd backend never ran release_vm for %s — the jail chroot leaked "+
+			"(backend release_vm calls: %v)", vmID, backend.releaseVMCalls)
+	}
+}
+
+// TestForceStopReleaseErrNoRetry: only "invalid_state" means "signal
+// first, then ask again". Every other cause is a real failure and must be taken as
+// the answer, so the retry cannot spin out the whole release deadline on, say, a
+// broken jail directory.
+func TestForceStopReleaseErrNoRetry(t *testing.T) {
+	var refuser *refusingReleasePrivd
+	adapter, _, stateDir, _, jailBase := makeStopHarnessWrapped(t,
+		func(inner jailer.PrivdClient) jailer.PrivdClient {
+			refuser = &refusingReleasePrivd{
+				PrivdClient: inner,
+				refusal:     &privd.RemoteError{Cause: "exec_failed", Message: "rm -rf jail dir: permission denied"},
+				refusals:    100, // effectively "always"
+			}
+			return refuser
+		})
+
+	vmID := launchTestVM(t, adapter, stateDir, jailBase, func() {})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := adapter.ForceStop(ctx, vmID); err != nil {
+		t.Fatalf("ForceStop: %v", err)
+	}
+
+	if refuser.calls != 1 {
+		t.Errorf("release_vm attempts = %d, want 1: exec_failed is a real failure, not "+
+			"privd asking to be signalled first", refuser.calls)
 	}
 }
 
