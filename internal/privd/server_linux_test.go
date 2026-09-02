@@ -181,10 +181,9 @@ func spawnShortProcess(t *testing.T) (pid int, starttime string) {
 	if starttime == "" {
 		t.Fatalf("could not parse starttime from %q", string(data))
 	}
-	// Wait for the process to die.
-	if err := cmd.Wait(); err != nil {
-		// "true" exits 0, but accept any exit here.
-	}
+	// Wait for the process to die. "true" exits 0, but any exit is acceptable
+	// here: the caller only needs the pid to be dead, not how it died.
+	_ = cmd.Wait()
 	return cmd.Process.Pid, starttime
 }
 

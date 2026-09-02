@@ -170,7 +170,13 @@ func (r *Runner) checkArchKVM() Check {
 			Evidence: evidence,
 		}
 	}
-	defer unix.Munmap(mem)
+	// Unmapping a region this function just mapped with arguments it computed
+	// itself can only fail with EINVAL, which would mean a bug in these two
+	// lines rather than anything about the host. There is also nowhere honest to
+	// report it: the KVM verdict is settled before any defer runs, and every
+	// return path above builds its Check by value, so a defer cannot reach the
+	// Check the caller gets. Ignored explicitly for both reasons.
+	defer func() { _ = unix.Munmap(mem) }()
 
 	// Write a real-mode `hlt` (0xF4) at offset 0.
 	mem[0] = 0xF4
@@ -226,7 +232,8 @@ func (r *Runner) checkArchKVM() Check {
 			Evidence: evidence,
 		}
 	}
-	defer unix.Munmap(runMem)
+	// Ignored explicitly for the same two reasons as the guest-RAM unmap above.
+	defer func() { _ = unix.Munmap(runMem) }()
 
 	// Set RIP=0 and RFLAGS=2 (reserved bit 1 always set).
 	var regs kvmRegs

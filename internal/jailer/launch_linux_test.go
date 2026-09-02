@@ -211,20 +211,6 @@ func (w *testLogWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// sha256FileHex computes the SHA-256 hex of a file's contents.
-func sha256FileHex(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
 // sha256Hex computes the SHA-256 hex of a byte slice.
 func sha256Hex(data []byte) string {
 	h := sha256.Sum256(data)

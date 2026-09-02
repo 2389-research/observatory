@@ -24,6 +24,17 @@ if go vet ./...; then note "PASS go vet"; else note "FAIL go vet"; fail=1; fi
 
 if command -v golangci-lint >/dev/null 2>&1; then
   if golangci-lint run ./...; then note "PASS golangci-lint"; else note "FAIL golangci-lint"; fail=1; fi
+  # Linux is the only OS this product runs on, and the run above never sees it
+  # from a darwin workstation: internal/jailer's and internal/privd's linux
+  # files and all of tests/integration are build-tagged out. Cross-lint them.
+  # .golangci.yml takes the golangci-lint v2 default linter set, which includes
+  # govet, so this covers vet on linux as well.
+  if GOOS=linux GOARCH=amd64 golangci-lint run ./...; then
+    note "PASS golangci-lint (GOOS=linux)"
+  else
+    note "FAIL golangci-lint (GOOS=linux)"
+    fail=1
+  fi
 else
   note "FAIL golangci-lint missing — install it (brew install golangci-lint)"
   fail=1
