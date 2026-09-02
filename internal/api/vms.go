@@ -613,7 +613,10 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 			ProgressEvents: body.Run.ProgressEvents,
 		}
 	}
-	vm, op, replayed, err := s.manager.CreateVM(r.Context(), ident.Owner, req)
+	// Provisioning outlives the client that asked for it: see Manager.OperationContext.
+	opCtx, cancel := s.manager.OperationContext(r.Context())
+	defer cancel()
+	vm, op, replayed, err := s.manager.CreateVM(opCtx, ident.Owner, req)
 	if err != nil {
 		writeVMError(w, err)
 		return
@@ -770,7 +773,11 @@ func (s *Server) handleVMAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	updVM, op, err := s.manager.Action(r.Context(), vmID, body.Action, &rev)
+	// A stop that has begun must finish even if the client hangs up mid-flight:
+	// see Manager.OperationContext.
+	opCtx, cancel := s.manager.OperationContext(r.Context())
+	defer cancel()
+	updVM, op, err := s.manager.Action(opCtx, vmID, body.Action, &rev)
 	if err != nil {
 		writeVMError(w, err)
 		return
@@ -812,7 +819,11 @@ func (s *Server) handleDeleteVM(w http.ResponseWriter, r *http.Request) {
 		expectedRev = &v
 	}
 
-	vm, err := s.manager.Delete(r.Context(), vmID, force, expectedRev)
+	// A delete that has begun must finish even if the client hangs up mid-flight:
+	// see Manager.OperationContext.
+	opCtx, cancel := s.manager.OperationContext(r.Context())
+	defer cancel()
+	vm, err := s.manager.Delete(opCtx, vmID, force, expectedRev)
 	if err != nil {
 		writeVMError(w, err)
 		return

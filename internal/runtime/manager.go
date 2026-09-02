@@ -170,6 +170,49 @@ func (m *Manager) Close() {
 	m.cancel()
 }
 
+// operationSlack is the non-grace part of a lifecycle mutation's budget: the
+// fixed timeouts the real (jailer) runtime can burn around the graceful poll,
+// worst case, plus room for the store writes that record the outcome.
+//
+//	runner ctl shutdown_guest:  5s dial + 30s deadline  = 35s
+//	SIGTERM/SIGKILL escalation: 10s signal + 5s wait     = 15s
+//	runner ctl finalize:        5s dial + 30s deadline  = 35s
+//	chroot release retry:                                 10s
+//	                                                     ----
+//	                                                       95s
+//
+// Rounded up to 120s so the transitions that record the terminal state are
+// inside the budget too. This is a backstop against a wedged host, not a
+// service-level target: a healthy stop finishes well inside the grace period.
+const operationSlack = 120 * time.Second
+
+// OperationContext derives the context a lifecycle mutation runs on.
+//
+// A lifecycle mutation has host side effects — signals delivered, a chroot
+// released, a reservation freed — and the store writes that record them. Once
+// it starts it must finish, so it must not ride the caller's context: an HTTP
+// client that hangs up mid-stop would otherwise cancel the graceful poll, the
+// SIGTERM/SIGKILL step and the chroot release together, leaving a live VM
+// behind a row that reads "stopping" and an operation that reads "running"
+// forever.
+//
+// The returned context keeps the caller's values (authenticated identity,
+// tracing) and drops the caller's cancellation; it is cancelled when the
+// manager closes, so a mutation still dies with the daemon rather than
+// outliving it; and it carries its own budget, so a wedged host cannot pin the
+// work indefinitely. Callers must call the returned cancel when the mutation
+// returns — deferring it at the top of a handler is correct, because the
+// mutation is synchronous within the handler.
+func (m *Manager) OperationContext(parent context.Context) (context.Context, context.CancelFunc) {
+	budget := time.Duration(m.cfg.VMDefaults.StopGraceSeconds)*time.Second + operationSlack
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), budget)
+	stop := context.AfterFunc(m.ctx, cancel)
+	return ctx, func() {
+		stop()
+		cancel()
+	}
+}
+
 // SetReportGen installs the run-report generation callback. It is called once
 // per terminal run with the runID. Task 7 wires the real generator; tests use
 // a recording stub on this seam.

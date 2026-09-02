@@ -232,7 +232,11 @@ func (s *Server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	result, err := s.manager.CreateBatch(r.Context(), ident.Owner, runtime.CreateBatchRequest{
+	// Batch provisioning outlives the client that asked for it, same as the
+	// single-VM create path: see Manager.OperationContext.
+	opCtx, cancel := s.manager.OperationContext(r.Context())
+	defer cancel()
+	result, err := s.manager.CreateBatch(opCtx, ident.Owner, runtime.CreateBatchRequest{
 		Members:         members,
 		ReservationMode: body.ReservationMode,
 		OnFailure:       body.OnFailure,

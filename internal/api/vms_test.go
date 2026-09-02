@@ -38,6 +38,15 @@ var testTemplateDef = runtime.Template{
 // runtime. The fake is returned so callers can inject errors or block calls.
 func newTemplateServer(t *testing.T) (*httptest.Server, *store.Store, *runtimetest.Fake) {
 	t.Helper()
+	return newTemplateServerWrapped(t, nil)
+}
+
+// newTemplateServerWrapped is newTemplateServer with a middleware hook. wrap is
+// applied to the API handler before it is served; nil means serve it unwrapped.
+// Tests that need to observe the request context itself (client disconnect) use
+// the hook instead of guessing at timing.
+func newTemplateServerWrapped(t *testing.T, wrap func(http.Handler) http.Handler) (*httptest.Server, *store.Store, *runtimetest.Fake) {
+	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "events.sqlite"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -70,7 +79,11 @@ func newTemplateServer(t *testing.T) (*httptest.Server, *store.Store, *runtimete
 		t.Fatalf("create manager: %v", err)
 	}
 	t.Cleanup(func() { mgr.Close() })
-	srv := httptest.NewServer(api.New(st, eng, mgr, api.AuthConfig{Enabled: false}, nil))
+	h := api.New(st, eng, mgr, api.AuthConfig{Enabled: false}, nil)
+	if wrap != nil {
+		h = wrap(h)
+	}
+	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 	return srv, st, fake
 }
