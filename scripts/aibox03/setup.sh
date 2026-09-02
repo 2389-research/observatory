@@ -75,6 +75,10 @@ systemctl restart vmobs-privd
 
 # Verify the unit came up and the socket exists.
 systemctl is-active vmobs-privd || { echo "vmobs-privd failed to start; check: journalctl -u vmobs-privd" >&2; exit 1; }
-[ -S /run/vmobs/privd.sock ] || { echo "privd.sock absent after start" >&2; exit 1; }
+# The daemon binds the socket a few hundred milliseconds after systemd reports the unit
+# active, so poll briefly instead of checking once.
+i=0
+until [ -S /run/vmobs/privd.sock ] || [ "$i" -ge 50 ]; do sleep 0.1; i=$((i+1)); done
+[ -S /run/vmobs/privd.sock ] || { echo "privd.sock absent 5s after start; check: journalctl -u vmobs-privd" >&2; exit 1; }
 
 echo "setup complete: kvm+vmobs-fixture groups (re-login needed), firecracker $ver, helper+sudoers installed, vmobs-privd running"
