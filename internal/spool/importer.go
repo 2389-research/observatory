@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/2389-research/observatory-v2/internal/events"
 	"github.com/2389-research/observatory-v2/internal/store"
 )
 
@@ -33,14 +34,18 @@ type cursor struct {
 
 // Importer walks per-VM spool dirs under root and imports envelopes into st.
 type Importer struct {
-	st       *store.Store
-	root     string
-	interval time.Duration
+	st         *store.Store
+	root       string
+	interval   time.Duration
+	onImported func(*events.Envelope) // called per newly-appended envelope; may be nil
 }
 
 // NewImporter constructs an Importer that polls root every interval.
-func NewImporter(st *store.Store, root string, interval time.Duration) *Importer {
-	return &Importer{st: st, root: root, interval: interval}
+// onImported is called for each envelope that is newly appended to the store
+// (not deduped). Pass nil to omit the callback. The callback fires synchronously
+// in the import loop and must not block for long.
+func NewImporter(st *store.Store, root string, interval time.Duration, onImported func(*events.Envelope)) *Importer {
+	return &Importer{st: st, root: root, interval: interval, onImported: onImported}
 }
 
 // Run calls ImportOnce every interval until ctx is done.
@@ -225,6 +230,9 @@ func (imp *Importer) importVM(ctx context.Context, vmDir string) (ImportStats, e
 				stats.Deduped++
 			} else {
 				stats.Appended++
+				if imp.onImported != nil {
+					imp.onImported(env)
+				}
 			}
 
 			// §12.4 ordering: store committed → write cursor → then continue.

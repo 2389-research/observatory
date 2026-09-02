@@ -155,7 +155,7 @@ func TestImportTwoSegments(t *testing.T) {
 		t.Fatalf("Close seg1: %v", err)
 	}
 
-	imp := spool.NewImporter(st, root, time.Second)
+	imp := spool.NewImporter(st, root, time.Second, nil)
 	stats, err := imp.ImportOnce(context.Background())
 	if err != nil {
 		t.Fatalf("ImportOnce: %v", err)
@@ -191,7 +191,7 @@ func TestImportDedup(t *testing.T) {
 	// so the segment persists for the second import to iterate and deduplicate.
 	writeSegment(t, root, vmID, envs, false /* open — no end-marker, not prunable */)
 
-	imp := spool.NewImporter(st, root, time.Second)
+	imp := spool.NewImporter(st, root, time.Second, nil)
 
 	// First import.
 	stats1, err := imp.ImportOnce(context.Background())
@@ -240,7 +240,7 @@ func TestCrashBetweenBatchAndCursor(t *testing.T) {
 	// Open (no end-marker) so the segment is not pruned after the first import.
 	writeSegment(t, root, vmID, envs, false)
 
-	imp := spool.NewImporter(st, root, time.Second)
+	imp := spool.NewImporter(st, root, time.Second, nil)
 
 	// First import: succeeds; all 5 records land in the store.
 	stats1, err := imp.ImportOnce(context.Background())
@@ -295,7 +295,7 @@ func TestPruneAfterEndMarkerAndCursor(t *testing.T) {
 	}
 	writeSegment(t, root, vmID, envs, true)
 
-	imp := spool.NewImporter(st, root, time.Second)
+	imp := spool.NewImporter(st, root, time.Second, nil)
 	stats, err := imp.ImportOnce(context.Background())
 	if err != nil {
 		t.Fatalf("ImportOnce: %v", err)
@@ -316,7 +316,7 @@ func TestPruneAfterEndMarkerAndCursor(t *testing.T) {
 	envs2 := []*events.Envelope{makeSpoolEnvelope(vmID2, instanceID2, "0")}
 	writeSegment(t, root, vmID2, envs2, false /* not closed */)
 
-	imp2 := spool.NewImporter(st, root, time.Second)
+	imp2 := spool.NewImporter(st, root, time.Second, nil)
 	stats2, err := imp2.ImportOnce(context.Background())
 	if err != nil {
 		t.Fatalf("ImportOnce (open seg): %v", err)
@@ -371,7 +371,7 @@ func TestEmptyRoot(t *testing.T) {
 	st := openTestStore(t)
 	root := t.TempDir()
 
-	imp := spool.NewImporter(st, root, time.Second)
+	imp := spool.NewImporter(st, root, time.Second, nil)
 	stats, err := imp.ImportOnce(context.Background())
 	if err != nil {
 		t.Fatalf("ImportOnce on empty root: %v", err)
@@ -387,7 +387,7 @@ func TestRunLoopCancellation(t *testing.T) {
 	st := openTestStore(t)
 	root := t.TempDir()
 
-	imp := spool.NewImporter(st, root, 10*time.Millisecond)
+	imp := spool.NewImporter(st, root, 10*time.Millisecond, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() { errCh <- imp.Run(ctx) }()
@@ -463,7 +463,7 @@ func TestGapEnvelopeIngress(t *testing.T) {
 		}
 	}
 
-	imp := spool.NewImporter(st, root, time.Second)
+	imp := spool.NewImporter(st, root, time.Second, nil)
 	stats, err := imp.ImportOnce(context.Background())
 	if err != nil {
 		t.Fatalf("ImportOnce with corrupt segment: %v", err)
@@ -623,7 +623,7 @@ func TestTwoCorruptSegmentsTwoGaps(t *testing.T) {
 	}
 
 	// First ImportOnce: both gap records land.
-	imp := spool.NewImporter(st, root, time.Second)
+	imp := spool.NewImporter(st, root, time.Second, nil)
 	stats1, err := imp.ImportOnce(context.Background())
 	if err != nil {
 		t.Fatalf("ImportOnce (first): %v", err)
@@ -728,7 +728,7 @@ func TestCorruptSegmentWithEndMarkerNotPruned(t *testing.T) {
 		t.Fatalf("Close seg1: %v", err)
 	}
 
-	imp := spool.NewImporter(st, root, time.Second)
+	imp := spool.NewImporter(st, root, time.Second, nil)
 
 	// Cycle 1: cursor advances past seg1. seg0 is FUTURE (cursor empty) here —
 	// the bug does not fire yet.
@@ -793,7 +793,7 @@ func TestImportOnceSwallowsPerVMErrors(t *testing.T) {
 	// Restore permissions at test end so t.TempDir cleanup works.
 	t.Cleanup(func() { _ = os.Chmod(brokenDir, 0o700) })
 
-	imp := spool.NewImporter(st, root, time.Second)
+	imp := spool.NewImporter(st, root, time.Second, nil)
 	stats, err := imp.ImportOnce(context.Background())
 
 	// Must return nil — per-VM errors are swallowed.
@@ -876,7 +876,7 @@ func TestDriftedGapMtimeDoesNotWedge(t *testing.T) {
 		t.Fatalf("Close seg1: %v", err)
 	}
 
-	imp := spool.NewImporter(st, root, time.Second)
+	imp := spool.NewImporter(st, root, time.Second, nil)
 
 	// First import: gap recorded, seg1's record lands.
 	stats1, err := imp.ImportOnce(context.Background())
@@ -922,7 +922,7 @@ func TestCursorIsWrittenAtomically(t *testing.T) {
 	envs := []*events.Envelope{makeSpoolEnvelope(vmID, instanceID, "0")}
 	writeSegment(t, root, vmID, envs, true)
 
-	imp := spool.NewImporter(st, root, time.Second)
+	imp := spool.NewImporter(st, root, time.Second, nil)
 	if _, err := imp.ImportOnce(context.Background()); err != nil {
 		t.Fatalf("ImportOnce: %v", err)
 	}

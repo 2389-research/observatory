@@ -853,6 +853,81 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 	return nil
 }
 
+// NotifyVMMExit is called by the spool importer when it sees a vm.vmm_exited
+// envelope for a VM. It transitions the VM to stopped (graceful) or failed
+// (not graceful) using the manager's existing transition helpers — one write path.
+//
+// Already-terminal VMs (failed, stopped, deleted, …) are a no-op: importer
+// replays are normal and must not cause errors. Unknown VMs return nil.
+func (m *Manager) NotifyVMMExit(ctx context.Context, vmID, reason string, graceful bool) error {
+	vm, err := m.st.GetVM(ctx, vmID)
+	if err != nil {
+		// Unknown VM — no-op.
+		return nil
+	}
+
+	// Terminal states: already done, nothing to do.
+	switch vm.ObservedState {
+	case "stopped", "failed", "deleted", "deleting":
+		return nil
+	}
+
+	// Non-graceful exit: transition through stopping → failed.
+	// Graceful exit: transition through stopping → stopped.
+	//
+	// The §5.2 state matrix requires passing through "stopping" for running/paused
+	// VMs. For provisioning/starting VMs that exit without fully starting, we
+	// go directly to failed (no stopping intermediate required by the matrix for
+	// those states — use the failLaunch path is not appropriate here since there
+	// is no opID; use a raw transition instead).
+
+	// Intermediate stopping step for live states only.
+	switch vm.ObservedState {
+	case "running", "paused":
+		_, _ = m.st.TransitionVM(ctx, store.TransitionInput{
+			VMID:        vmID,
+			To:          "stopping",
+			Reason:      reason,
+			OperationID: 0,
+		})
+	}
+
+	// Final transition.
+	if graceful {
+		_, err = m.st.TransitionVM(ctx, store.TransitionInput{
+			VMID:           vmID,
+			To:             "stopped",
+			Reason:         reason,
+			OperationID:    0,
+			ReleaseCompute: true,
+		})
+		if err == nil {
+			m.onVMTerminal(ctx, vmID)
+		}
+	} else {
+		stage := "vmm_exit"
+		_, err = m.st.TransitionVM(ctx, store.TransitionInput{
+			VMID:           vmID,
+			To:             "failed",
+			Reason:         reason,
+			OperationID:    0,
+			FailureStage:   &stage,
+			FailureReason:  &reason,
+			ReleaseCompute: true,
+		})
+		if err == nil {
+			m.onVMTerminal(ctx, vmID)
+		}
+	}
+
+	// Ignore InvalidTransitionError: a concurrent stop/action may have already
+	// moved the VM — that is fine. Any other error is a real store failure.
+	if errors.Is(err, new(store.InvalidTransitionError)) {
+		return nil
+	}
+	return err
+}
+
 // reconcileRuns is the run portion of Reconcile. It processes two categories:
 //  1. Non-terminal runs (pending/running/concluding) whose VM is no longer live
 //     → conclude inconclusive with the interrupted reason (AT-093).

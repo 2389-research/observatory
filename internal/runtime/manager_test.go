@@ -976,3 +976,114 @@ func TestManagerDeleteFailsOnReleaseError(t *testing.T) {
 		t.Error("VM reached deleted state despite Release error — jail resources may remain")
 	}
 }
+
+// TestNotifyVMMExitRunningToFailed verifies that NotifyVMMExit on a running VM
+// with graceful=false transitions it to failed with the reason recorded.
+//
+// Pattern: create+launch on one manager, drain workers with Close(), then call
+// NotifyVMMExit on the same manager (synchronous, no goroutines needed — the
+// close gate does not affect synchronous store writes).
+func TestNotifyVMMExitRunningToFailed(t *testing.T) {
+	st := openStoreForManager(t)
+	fk := runtimetest.NewFake()
+	mgr, err := runtime.NewManager(st, fk, defaultCfg())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	vm, _, _, err := mgr.CreateVM(t.Context(), "local_operator", createReq("notify-failed"))
+	if err != nil {
+		t.Fatalf("CreateVM: %v", err)
+	}
+	// Drain the launch goroutine.
+	mgr.Close()
+
+	vm2, _ := st.GetVM(t.Context(), vm.VMID)
+	if vm2.ObservedState != "running" {
+		t.Fatalf("pre-condition: want running, got %q", vm2.ObservedState)
+	}
+
+	// mgr is closed (goroutines drained) but the store is still open.
+	// NotifyVMMExit is synchronous and does not require the close gate.
+	reason := "reconcile: vmm pid 1234 gone"
+	if err := mgr.NotifyVMMExit(t.Context(), vm.VMID, reason, false); err != nil {
+		t.Fatalf("NotifyVMMExit: %v", err)
+	}
+
+	vm3, err := st.GetVM(t.Context(), vm.VMID)
+	if err != nil {
+		t.Fatalf("GetVM after notify: %v", err)
+	}
+	if vm3.ObservedState != "failed" {
+		t.Errorf("state after non-graceful exit: want failed, got %q", vm3.ObservedState)
+	}
+	if vm3.FailureReason == nil || !strings.Contains(*vm3.FailureReason, "reconcile") {
+		t.Errorf("failure_reason should contain reason, got %v", vm3.FailureReason)
+	}
+}
+
+// TestNotifyVMMExitRunningToStopped verifies that graceful=true transitions to stopped.
+func TestNotifyVMMExitRunningToStopped(t *testing.T) {
+	st := openStoreForManager(t)
+	fk := runtimetest.NewFake()
+	mgr, err := runtime.NewManager(st, fk, defaultCfg())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	vm, _, _, err := mgr.CreateVM(t.Context(), "local_operator", createReq("notify-stopped"))
+	if err != nil {
+		t.Fatalf("CreateVM: %v", err)
+	}
+	mgr.Close()
+
+	vm2, _ := st.GetVM(t.Context(), vm.VMID)
+	if vm2.ObservedState != "running" {
+		t.Fatalf("pre-condition: want running, got %q", vm2.ObservedState)
+	}
+
+	if err := mgr.NotifyVMMExit(t.Context(), vm.VMID, "clean shutdown", true); err != nil {
+		t.Fatalf("NotifyVMMExit graceful: %v", err)
+	}
+
+	vm3, err := st.GetVM(t.Context(), vm.VMID)
+	if err != nil {
+		t.Fatalf("GetVM after graceful notify: %v", err)
+	}
+	if vm3.ObservedState != "stopped" {
+		t.Errorf("state after graceful exit: want stopped, got %q", vm3.ObservedState)
+	}
+}
+
+// TestNotifyVMMExitSecondCallNoOp verifies that a second NotifyVMMExit on an
+// already-terminal VM returns nil and does not change state.
+func TestNotifyVMMExitSecondCallNoOp(t *testing.T) {
+	st := openStoreForManager(t)
+	fk := runtimetest.NewFake()
+	mgr, err := runtime.NewManager(st, fk, defaultCfg())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	vm, _, _, err := mgr.CreateVM(t.Context(), "local_operator", createReq("notify-noop"))
+	if err != nil {
+		t.Fatalf("CreateVM: %v", err)
+	}
+	mgr.Close()
+
+	// First call: non-graceful exit → failed.
+	if err := mgr.NotifyVMMExit(t.Context(), vm.VMID, "first exit", false); err != nil {
+		t.Fatalf("first NotifyVMMExit: %v", err)
+	}
+	vm2, _ := st.GetVM(t.Context(), vm.VMID)
+	firstState := vm2.ObservedState
+
+	// Second call on already-terminal: must return nil, state unchanged.
+	if err := mgr.NotifyVMMExit(t.Context(), vm.VMID, "replay", false); err != nil {
+		t.Errorf("second NotifyVMMExit (terminal) should be no-op, got: %v", err)
+	}
+	vm3, _ := st.GetVM(t.Context(), vm.VMID)
+	if vm3.ObservedState != firstState {
+		t.Errorf("state changed after second call: was %q, now %q", firstState, vm3.ObservedState)
+	}
+}

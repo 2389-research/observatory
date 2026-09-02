@@ -243,6 +243,62 @@ func TestRuntimeLockFileExplicit(t *testing.T) {
 	}
 }
 
+// TestRuntimeModeDefault verifies that omitting runtime.mode defaults to "unavailable".
+func TestRuntimeModeDefault(t *testing.T) {
+	cfg, err := load(t, minimalConfig)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Runtime.Mode != "unavailable" {
+		t.Errorf("default Mode: want %q, got %q", "unavailable", cfg.Runtime.Mode)
+	}
+}
+
+// TestRuntimeModeFirecrackerAccepted verifies that "firecracker" is accepted.
+func TestRuntimeModeFirecrackerAccepted(t *testing.T) {
+	const withMode = minimalConfig + `runtime:
+  mode: firecracker
+`
+	cfg, err := load(t, withMode)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Runtime.Mode != "firecracker" {
+		t.Errorf("Mode: want %q, got %q", "firecracker", cfg.Runtime.Mode)
+	}
+}
+
+// TestRuntimeModeUnknownRejected verifies that an unknown mode names the field in the error.
+func TestRuntimeModeUnknownRejected(t *testing.T) {
+	const withBadMode = minimalConfig + `runtime:
+  mode: kvm_direct
+`
+	_, err := load(t, withBadMode)
+	if err == nil {
+		t.Fatal("expected error for unknown runtime.mode, got nil")
+	}
+	if !strings.Contains(err.Error(), "runtime.mode") {
+		t.Errorf("error should mention runtime.mode, got: %v", err)
+	}
+}
+
+// TestRuntimeJailDefaults verifies JailUIDBase, JailGID, CIDBase default values.
+func TestRuntimeJailDefaults(t *testing.T) {
+	cfg, err := load(t, minimalConfig)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Runtime.JailUIDBase != 20000 {
+		t.Errorf("JailUIDBase: want 20000, got %d", cfg.Runtime.JailUIDBase)
+	}
+	if cfg.Runtime.JailGID != 36000 {
+		t.Errorf("JailGID: want 36000, got %d", cfg.Runtime.JailGID)
+	}
+	if cfg.Runtime.CIDBase != 3 {
+		t.Errorf("CIDBase: want 3, got %d", cfg.Runtime.CIDBase)
+	}
+}
+
 func TestValidationTeaches(t *testing.T) {
 	cases := []struct {
 		name    string

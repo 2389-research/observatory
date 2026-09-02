@@ -23,10 +23,13 @@ import (
 	"github.com/2389-research/observatory-v2/internal/api"
 	"github.com/2389-research/observatory-v2/internal/auth"
 	"github.com/2389-research/observatory-v2/internal/config"
+	"github.com/2389-research/observatory-v2/internal/events"
+	"github.com/2389-research/observatory-v2/internal/jailer"
 	"github.com/2389-research/observatory-v2/internal/lock"
 	"github.com/2389-research/observatory-v2/internal/preflight"
 	"github.com/2389-research/observatory-v2/internal/runtime"
 	"github.com/2389-research/observatory-v2/internal/situation"
+	"github.com/2389-research/observatory-v2/internal/spool"
 	"github.com/2389-research/observatory-v2/internal/store"
 )
 
@@ -267,10 +270,37 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready f
 		return pfRunner.Run(pCtx)
 	})
 
-	rt := runtime.ForHost(func() string {
-		report := pfRunner.Run(ctx)
-		return report.Summary()
-	})
+	// Build runtime adapter and wire the importer based on runtime.mode.
+	var rt runtime.Runtime
+	var adapterFindings []jailer.Finding
+	var spoolRoot string
+
+	switch cfg.Runtime.Mode {
+	case "firecracker":
+		adapter, buildErr := buildFirecrackerRuntime(cfg, pfFunc)
+		if buildErr != nil {
+			return fmt.Errorf("build firecracker runtime: %w", buildErr)
+		}
+		// Reconcile adapter at startup: classify all known VM jail dirs.
+		// Must happen before the manager is created so findings are available
+		// when we call mgr.NotifyVMMExit after manager construction.
+		if jAdapter, ok := adapter.(*jailer.Adapter); ok {
+			adapterFindings, err = jAdapter.Reconcile(ctx)
+			if err != nil {
+				return fmt.Errorf("adapter reconcile at startup: %w", err)
+			}
+			logger.Info("adapter reconcile complete", "findings", len(adapterFindings))
+		}
+		rt = adapter
+		spoolRoot = filepath.Join(cfg.Paths.State, "spool")
+	default:
+		// "unavailable": keep the existing ForHost path unchanged.
+		rt = runtime.ForHost(func() string {
+			report := pfRunner.Run(ctx)
+			return report.Summary()
+		})
+	}
+
 	mgr, err := runtime.NewManager(st, rt, runtime.ManagerConfig{
 		Admission:  cfg.Admission,
 		VMDefaults: cfg.VMDefaults,
@@ -281,6 +311,61 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready f
 		return fmt.Errorf("create lifecycle manager: %w", err)
 	}
 	defer mgr.Close()
+
+	// Map adapter findings to manager: vmm_gone and ambiguous outcomes mean the
+	// VMM is gone or unverifiable — notify the manager so it can record the
+	// specific reason (supplementing manager.Reconcile's generic controller_restart reason).
+	for _, f := range adapterFindings {
+		switch f.Outcome {
+		case "vmm_gone", "ambiguous":
+			if notifyErr := mgr.NotifyVMMExit(ctx, f.VMID, "reconcile: "+f.Detail, false); notifyErr != nil {
+				logger.Warn("NotifyVMMExit for adapter finding failed", "vm_id", f.VMID, "outcome", f.Outcome, "err", notifyErr)
+			}
+		}
+		// "adopted": VMM is alive and runner is running — no action.
+	}
+
+	// Start the spool importer goroutine when a spool root is configured.
+	// The onImported callback routes vm.vmm_exited envelopes to NotifyVMMExit.
+	if spoolRoot != "" {
+		onImported := func(env *events.Envelope) {
+			if env.Kind != "vm.vmm_exited" {
+				return
+			}
+			vmID := ""
+			if env.VMID != nil {
+				vmID = *env.VMID
+			}
+			if vmID == "" {
+				// vm_id in data (host-stream pattern: VMID column is NULL,
+				// linkage lives in data.vm_id per the one-vm_id-semantic deviation).
+				if v, ok := env.Data["vm_id"].(string); ok {
+					vmID = v
+				}
+			}
+			if vmID == "" {
+				return
+			}
+			graceful := false
+			if g, ok := env.Data["graceful"].(bool); ok {
+				graceful = g
+			}
+			reason := "vmm_exited"
+			if by, ok := env.Data["exit_observed_by"].(string); ok {
+				reason = "vmm_exited observed by " + by
+			}
+			if notifyErr := mgr.NotifyVMMExit(ctx, vmID, reason, graceful); notifyErr != nil {
+				logger.Warn("NotifyVMMExit from importer failed", "vm_id", vmID, "err", notifyErr)
+			}
+		}
+		imp := spool.NewImporter(st, spoolRoot, 5*time.Second, onImported)
+		go func() {
+			if runErr := imp.Run(ctx); runErr != nil && !errors.Is(runErr, context.Canceled) {
+				logger.Warn("spool importer exited", "err", runErr)
+			}
+		}()
+		logger.Info("spool importer started", "root", spoolRoot)
+	}
 
 	// Build auth config. When auth is off (dev mode, loopback only), the API
 	// injects a local_operator/none identity on every request. The smoke test

@@ -38,6 +38,22 @@ type Runtime struct {
 	// (relative to wherever the daemon is invoked). Empty string disables lock
 	// verification entirely (useful for integration environments).
 	LockFile string `yaml:"lock_file"`
+
+	// Mode selects the VM runtime. "unavailable" (default) keeps the existing
+	// ForHost path. "firecracker" wires the real adapter on Linux; the darwin
+	// stub returns a config error. Future modes would land here.
+	Mode string `yaml:"mode"`
+
+	// JailUIDBase is the first UID assigned to a jailed VM (slot 0 = JailUIDBase,
+	// slot 1 = JailUIDBase+1, …). Default: 20000.
+	JailUIDBase int `yaml:"jail_uid_base"`
+
+	// JailGID is the shared group ID for all jailed VM processes. Default: 36000.
+	JailGID int `yaml:"jail_gid"`
+
+	// CIDBase is the base vsock CID (slot 0 = CIDBase, slot 1 = CIDBase+1, …).
+	// Default: 3 (CIDs 0–2 are reserved by the vsock spec).
+	CIDBase int `yaml:"cid_base"`
 }
 
 type Server struct {
@@ -190,6 +206,12 @@ func defaults() Config {
 			// Empty string means "explicitly no lock". An absent runtime:
 			// lock_file key leaves this default; lock_file: "" overwrites it.
 			LockFile: "runtime.lock.json",
+			Mode:     "unavailable",
+			// Defaults match L0's fixture UID/GID assignment (SPEC §10.1, L0-R11).
+			JailUIDBase: 20000,
+			JailGID:     36000,
+			// CIDs 0–2 are reserved by the vsock spec; base at 3.
+			CIDBase: 3,
 		},
 	}
 }
@@ -287,6 +309,13 @@ func (c *Config) Validate() error {
 	if c.Auth.SessionTTLMinutes < 0 {
 		add("auth.session_ttl_minutes must be >= 0, got %d", c.Auth.SessionTTLMinutes)
 	}
+	switch c.Runtime.Mode {
+	case "unavailable", "firecracker":
+		// valid
+	default:
+		add("runtime.mode %q is not supported: unavailable or firecracker", c.Runtime.Mode)
+	}
+
 	if c.Storage.Database == "" {
 		add("storage.database is required")
 	}
