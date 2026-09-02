@@ -28,7 +28,11 @@ auth:
 
 paths:
   state: "/var/lib/vmobs"
-  runtime: "/run/vmobs"
+  # The daemon derives its staging dir (<runtime>/stage) and the jailer chroot
+  # base (<runtime>/jail) from this root, and both must match the --stage-root
+  # and --jail-base flags in scripts/aibox03/vmobs-privd.service. Jail chroots
+  # hold rootfs images, so this root does not belong on a tmpfs.
+  runtime: "/srv/vmobs"
   approved_templates: "/var/lib/vmobs/templates"
   runtime_lock: "/etc/vmobs/runtime.lock.json"
   # Parent directory ownership is part of privileged-helper preflight.

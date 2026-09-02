@@ -73,6 +73,8 @@ After launching the jailer, `jail-start` waits (≤10s) for firecracker to bind 
 
 Handles all root-required operations the non-root runner needs: `allocate_network`, `release_network`, `start_vm`, `signal_vm`, `release_vm`. The VM uid/gid range is `[10000, 60000)` — the same policy as the old root helper.
 
+`paths.runtime` in the daemon config must be the parent of the unit's `--stage-root` and `--jail-base` — `/srv/vmobs` on aibox03 — because the daemon derives `<runtime>/stage` and `<runtime>/jail` from that one root: a mismatched stage root makes privd refuse `start_vm` with `stage_dir not under stage root`, and a mismatched jail base makes the runner dial a `v.sock` in a chroot privd never created.
+
 ### Install / upgrade
 
 Re-running `setup.sh` is the full upgrade path:
