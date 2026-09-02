@@ -37,7 +37,7 @@ const (
 )
 
 // Stage name constants for the provisioning manifest (§5.3 ordered side-effect stages).
-// Also defined in launch_other.go for non-linux builds.
+// Linux-only: the non-linux stub (launch_other.go) never references stage names.
 const (
 	stageReserved      = "reserved"
 	stageStaged        = "staged"
@@ -232,8 +232,8 @@ func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (retErr error
 	m.Stages = append(m.Stages, stageAttached)
 	if err := writeManifest(a.cfg.StateDir, m); err != nil {
 		// Attached successfully but manifest write failed — best-effort log and proceed.
-		// The runner is running; the manifest records what we own for rollback.
-		_ = err
+		// The runner is running; Task 11's Reconcile owns recovery for the missing stage record.
+		fmt.Fprintf(os.Stderr, "jailer: warn: failed to record attached stage for %s: %v\n", vmID, err)
 	}
 
 	return nil
@@ -461,6 +461,11 @@ func (a *Adapter) waitAttached(ctx context.Context, stateFile string, cmd *exec.
 
 // doRollback reads the current manifest and tears down owned resources in reverse order.
 // Tolerates already-gone resources — rollback is best-effort on each step.
+//
+// Called with launchMu held by design (§5.3): the launch slot must not be reused
+// until the transaction is fully unwound. Two 2s sleeps (SIGTERM grace for the
+// runner, then for the VMM) mean worst-case ~4s of queueing for concurrent Launch
+// calls — that is intentional and acceptable.
 func (a *Adapter) doRollback(vmID string) {
 	m, err := readManifest(a.cfg.StateDir, vmID)
 	if err != nil {
@@ -515,14 +520,6 @@ func killRunnerByPID(pid int) {
 	_ = proc.Signal(syscall.SIGTERM)
 	time.Sleep(2 * time.Second)
 	_ = proc.Signal(syscall.SIGKILL)
-}
-
-// lastStage returns the last stage in stages, or "unknown" if empty.
-func lastStage(stages []string) string {
-	if len(stages) == 0 {
-		return "unknown"
-	}
-	return stages[len(stages)-1]
 }
 
 // newUUID returns a random v4 UUID string.
