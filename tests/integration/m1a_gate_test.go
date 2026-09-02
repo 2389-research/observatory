@@ -789,13 +789,31 @@ func (d *m1aDaemon) deleteVM(t *testing.T, vmID string) {
 	}
 }
 
-// netnsCount counts entries in /var/run/netns (returns 0 on ENOENT).
-func netnsCount() int {
-	entries, err := os.ReadDir("/var/run/netns")
-	if os.IsNotExist(err) {
-		return 0
+// countDirEntries counts entries in dir. A missing directory is zero entries; a
+// directory that cannot be read is a failure, not a zero.
+//
+// The distinction is the whole point. These counters are compared against
+// themselves before and after a workload, so "could not read" answering 0 reads
+// exactly like "nothing leaked" — on both sides. privd recreates
+// <JailBase>/firecracker with os.MkdirAll(root, 0o750) as root
+// (internal/privd/vmops.go), so one removal is all it takes for the headline
+// leak observable to go permanently blind while still reporting success.
+func countDirEntries(t *testing.T, dir string) int {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0
+		}
+		t.Fatalf("leak observable %s is unreadable: %v — a count that cannot read its directory would report 0, which is indistinguishable from no leak", dir, err)
 	}
 	return len(entries)
+}
+
+// netnsCount counts entries in /var/run/netns (a missing directory is zero).
+func netnsCount(t *testing.T) int {
+	t.Helper()
+	return countDirEntries(t, "/var/run/netns")
 }
 
 // vethCount counts network interfaces whose name starts with "veth-".
@@ -803,12 +821,11 @@ func vethCount(t *testing.T) int {
 	t.Helper()
 	out, err := exec.Command("ip", "-j", "link", "show").Output()
 	if err != nil {
-		t.Logf("vethCount: ip link show: %v", err)
-		return 0
+		t.Fatalf("leak observable veth: ip -j link show: %v — a count that cannot list links would report 0, which is indistinguishable from no leak", err)
 	}
 	var links []map[string]any
 	if err := json.Unmarshal(out, &links); err != nil {
-		return 0
+		t.Fatalf("leak observable veth: parse ip -j link show output: %v", err)
 	}
 	count := 0
 	for _, l := range links {
@@ -820,73 +837,38 @@ func vethCount(t *testing.T) int {
 	return count
 }
 
-// jailDirEntries counts subdirectories under /srv/vmobs/jail/firecracker (0 on ENOENT).
-func jailDirEntries() int {
-	entries, err := os.ReadDir(filepath.Join(m1aJailBase, "firecracker"))
-	if os.IsNotExist(err) {
-		return 0
-	}
-	if err != nil {
-		return 0
-	}
-	return len(entries)
+// jailDirEntries counts subdirectories under /srv/vmobs/jail/firecracker.
+func jailDirEntries(t *testing.T) int {
+	t.Helper()
+	return countDirEntries(t, filepath.Join(m1aJailBase, "firecracker"))
 }
 
 // firecrackerProcCount counts running firecracker processes via /proc.
-func firecrackerProcCount() int {
-	entries, err := os.ReadDir("/proc")
+func firecrackerProcCount(t *testing.T) int {
+	t.Helper()
+	count, unreadable, err := countFirecrackerProcs("/proc")
 	if err != nil {
-		return 0
+		t.Fatalf("leak observable firecracker processes: %v — a count that cannot read /proc would report 0, which is indistinguishable from no leak", err)
 	}
-	count := 0
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		isNumeric := len(name) > 0
-		for _, c := range name {
-			if c < '0' || c > '9' {
-				isNumeric = false
-				break
-			}
-		}
-		if !isNumeric {
-			continue
-		}
-		exe, err := os.Readlink(filepath.Join("/proc", name, "exe"))
-		if err != nil {
-			continue
-		}
-		if strings.HasSuffix(exe, "/firecracker") {
-			count++
-		}
+	if unreadable > 0 {
+		// Not fatal: a host normally carries a few processes whose /proc entries
+		// this user may not read. Logged because "fc_procs=0, unreadable=<large>"
+		// is a blind count, and the run's log should say so rather than imply zero.
+		t.Logf("firecrackerProcCount: %d pid(s) unreadable; count=%d is a floor, not a total", unreadable, count)
 	}
 	return count
 }
 
 // stateDirEntries counts entries in stateDir/vms (number of VM state dirs).
-func stateDirEntries(stateDir string) int {
-	entries, err := os.ReadDir(filepath.Join(stateDir, "vms"))
-	if os.IsNotExist(err) {
-		return 0
-	}
-	if err != nil {
-		return 0
-	}
-	return len(entries)
+func stateDirEntries(t *testing.T, stateDir string) int {
+	t.Helper()
+	return countDirEntries(t, filepath.Join(stateDir, "vms"))
 }
 
 // stageDirEntries counts entries in runtimeDir/stage (number of staged VM dirs).
-func stageDirEntries(runtimeDir string) int {
-	entries, err := os.ReadDir(filepath.Join(runtimeDir, "stage"))
-	if os.IsNotExist(err) {
-		return 0
-	}
-	if err != nil {
-		return 0
-	}
-	return len(entries)
+func stageDirEntries(t *testing.T, runtimeDir string) int {
+	t.Helper()
+	return countDirEntries(t, filepath.Join(runtimeDir, "stage"))
 }
 
 // m1aBaseline captures the host baseline for AT-018 leak detection.
@@ -903,12 +885,12 @@ type m1aBaseline struct {
 func captureBaseline(t *testing.T, stateDir, runtimeDir string) m1aBaseline {
 	t.Helper()
 	return m1aBaseline{
-		NetnsCount:      netnsCount(),
+		NetnsCount:      netnsCount(t),
 		VethCount:       vethCount(t),
-		JailEntries:     jailDirEntries(),
-		FcProcCount:     firecrackerProcCount(),
-		StateDirEntries: stateDirEntries(stateDir),
-		StageDirEntries: stageDirEntries(runtimeDir),
+		JailEntries:     jailDirEntries(t),
+		FcProcCount:     firecrackerProcCount(t),
+		StateDirEntries: stateDirEntries(t, stateDir),
+		StageDirEntries: stageDirEntries(t, runtimeDir),
 	}
 }
 
@@ -1630,7 +1612,7 @@ performance_targets:
 			// confirming the VM's state dir was cleaned up before the next cycle begins.
 			// Deadline: 30s per cycle (well within aibox03's expected teardown time).
 			cyclePollDeadline := time.Now().Add(30 * time.Second)
-			for stateDirEntries(daemon.stateDir) != baseline.StateDirEntries {
+			for stateDirEntries(t, daemon.stateDir) != baseline.StateDirEntries {
 				if time.Now().After(cyclePollDeadline) {
 					t.Fatalf("AT-018 cycle %d: state dir did not return to baseline within 30s", cycle)
 				}
@@ -1660,7 +1642,7 @@ performance_targets:
 			delCancel()
 
 			cyclePollDeadline := time.Now().Add(30 * time.Second)
-			for stateDirEntries(daemon.stateDir) != baseline.StateDirEntries {
+			for stateDirEntries(t, daemon.stateDir) != baseline.StateDirEntries {
 				if time.Now().After(cyclePollDeadline) {
 					t.Fatalf("AT-018 force-delete cycle: state dir did not return to baseline within 30s")
 				}
