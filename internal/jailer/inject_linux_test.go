@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -244,9 +245,52 @@ func assertRecoveryLaunch(t *testing.T, h *injectHarness, vmID string) {
 	defer cancel()
 	if err := h.adapter.Launch(ctx, defaultSpec(vmID)); err != nil {
 		t.Errorf("recovery Launch for %s: %v", vmID, err)
+		h.backend.killAll()
+		return
 	}
-	// Kill the backend sleep child so we don't leak a process between subtests.
+
+	// Kill the stand-in VMM so the runner shuts down, then wait for it to be
+	// gone before returning. Both halves matter: killing it alone only starts
+	// the shutdown, and the runner keeps writing until it finishes.
+	m, err := jailer.ReadManifest(h.stateDir, vmID)
+	if err != nil {
+		t.Fatalf("recovery: read manifest for %s: %v", vmID, err)
+	}
 	h.backend.killAll()
+	waitRunnerExit(t, m.RunnerPID)
+}
+
+// waitRunnerExit blocks until pid is gone, with a deadline.
+//
+// A successful launch leaves a real vmobs-runner writing runner-state.json and
+// spool segments under the harness's t.TempDir() tree. Killing the stand-in VMM
+// only starts its shutdown: watchVMM notices within a tick, and the exit path
+// writes the state file twice more and closes the spool. Returning during that
+// window leaves a live writer in a tree t.TempDir is about to delete, and
+// RemoveAll then fails the test with "unlinkat <stateDir>/vms/<vmID>: directory
+// not empty".
+//
+// Polling is the available synchronization: the runner is not this test's child
+// to wait on -- Launch's own cmd.Wait goroutine owns it, which is also why the
+// pid really does disappear rather than lingering as a zombie.
+func waitRunnerExit(t *testing.T, pid int) {
+	t.Helper()
+	if pid <= 0 {
+		return
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		// Signal 0 checks liveness without delivering anything; ESRCH means the
+		// process is gone and reaped.
+		if err := syscall.Kill(pid, 0); err != nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Errorf("runner pid %d still alive 30s after its VMM was killed", pid)
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // ---------------------------------------------------------------------------
