@@ -1582,6 +1582,36 @@ performance_targets:
 			}
 		}
 
+		// One force-delete cycle. The five cycles above all take the graceful path,
+		// which is why this subtest stayed green next to the 1.7 GB jail chroot that
+		// live gate run 4 leaked: only DELETE ?force=true drives ForceStop, where the
+		// release raced the SIGKILL. Skip the stop entirely so the VM is killed while
+		// running, exactly as run 4 did.
+		{
+			id := daemon.createVM(t, "at018-force-delete")
+
+			runCtx, runCancel := context.WithTimeout(context.Background(), 3*time.Minute)
+			daemon.waitVMState(runCtx, t, id, "running")
+			runCancel()
+
+			status, body := daemon.apiDelete(t, "/vms/"+id+"?force=true")
+			if status != http.StatusOK {
+				t.Fatalf("AT-018 force-delete: expected 200, got %d: %v", status, body)
+			}
+
+			delCtx, delCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			daemon.waitVMState(delCtx, t, id, "deleted")
+			delCancel()
+
+			cyclePollDeadline := time.Now().Add(30 * time.Second)
+			for stateDirEntries(daemon.stateDir) != baseline.StateDirEntries {
+				if time.Now().After(cyclePollDeadline) {
+					t.Fatalf("AT-018 force-delete cycle: state dir did not return to baseline within 30s")
+				}
+				time.Sleep(200 * time.Millisecond)
+			}
+		}
+
 		// Poll all six observables until they match baseline or a 60s deadline expires.
 		// Hard-assert equality after — timeout is a failure, not a pass.
 		recaptureDeadline := time.Now().Add(60 * time.Second)
@@ -1625,7 +1655,7 @@ performance_targets:
 
 		evidenceSubtest(t, &evidence, "7_at018_resource_leaks", fmt.Sprintf(
 			"baseline: netns=%d veth=%d jail=%d fc_procs=%d state_entries=%d stage_entries=%d\n"+
-				"after 5 cycles: netns=%d veth=%d jail=%d fc_procs=%d state_entries=%d stage_entries=%d\n"+
+				"after 5 graceful cycles + 1 force-delete: netns=%d veth=%d jail=%d fc_procs=%d state_entries=%d stage_entries=%d\n"+
 				"delta: netns=%+d veth=%+d jail=%+d fc_procs=%+d state=%+d stage=%+d",
 			baseline.NetnsCount, baseline.VethCount, baseline.JailEntries,
 			baseline.FcProcCount, baseline.StateDirEntries, baseline.StageDirEntries,
