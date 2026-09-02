@@ -12,6 +12,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
@@ -117,6 +118,25 @@ func httpsConfig(t *testing.T, dir string) (*config.Config, string) {
 	return cfg, secret
 }
 
+// drainAndClose reads a response body to EOF, then closes it.
+//
+// Closing an unread body releases the caller before net/http's read loop has
+// put the connection back in the client's idle pool. A second request issued
+// inside that window finds the pool empty, queues a dial, and is then handed
+// the original connection anyway — leaving the freshly dialed connection
+// parked in the pool having never carried a request. The server counts such a
+// connection as http.StateNew, and Server.Shutdown refuses to close a
+// StateNew connection until net/http's hardcoded five-second grace expires,
+// which outlasts serve's own five-second shutdown budget. Reading to EOF
+// orders the pool return ahead of Close, so no spare connection is dialed.
+func drainAndClose(t *testing.T, resp *http.Response) {
+	t.Helper()
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		t.Errorf("drain response body: %v", err)
+	}
+	resp.Body.Close()
+}
+
 // TestServeHTTPS verifies the https server mode end-to-end:
 // (1) GET /api/v1/meta over HTTPS (no auth needed) → 200
 // (2) GET /api/v1/vms with bearer token → 200
@@ -168,7 +188,7 @@ func TestServeHTTPS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /meta: %v", err)
 	}
-	resp.Body.Close()
+	drainAndClose(t, resp)
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("GET /meta: want 200, got %d", resp.StatusCode)
 	}
@@ -184,7 +204,7 @@ func TestServeHTTPS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /vms: %v", err)
 	}
-	resp.Body.Close()
+	drainAndClose(t, resp)
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("GET /vms with bearer: want 200, got %d", resp.StatusCode)
 	}
