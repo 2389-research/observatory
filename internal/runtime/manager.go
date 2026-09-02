@@ -1026,9 +1026,10 @@ func (m *Manager) Delete(ctx context.Context, vmID string, force bool, expectedR
 	// whether or not it killed anything: doStop's forced path drops its SignalVM
 	// errors, and it logs-and-discards the final ReleaseVM failure rather than
 	// report a genuinely-dead VM's stop as failed (internal/jailer/stop.go). So
-	// three things can outlive a "deleted" row -- <JailBase>/firecracker/<vmID> on
-	// disk, a pinned privd ledger entry, and the VM process itself. Sweeping those
-	// needs the M1b cleanup backlog, not this call.
+	// three things can unintentionally outlive a "deleted" row --
+	// <JailBase>/firecracker/<vmID> on disk, a pinned privd ledger entry, and the
+	// VM process itself. Sweeping those needs the M1b cleanup backlog, not this
+	// call.
 	if err := m.rt.Release(ctx, vmID); err != nil {
 		var ue *UnavailableError
 		if !errors.As(err, &ue) {
