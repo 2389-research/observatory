@@ -218,6 +218,14 @@ func (a *Adapter) doStop(ctx context.Context, vmID string, grace time.Duration, 
 			s, _ := pollRunnerPhase(pollCtx, stateFile, runner.PhaseVMMExited, runner.PhaseFinalized)
 			if s.Phase == runner.PhaseVMMExited || s.Phase == runner.PhaseFinalized {
 				graceful = true
+			} else {
+				// The runner accepted the request — the guest acknowledged it — but
+				// the VMM never reached a terminal phase inside the poll window.
+				// This is the one branch that can tell "the guest never answered"
+				// apart from "the guest answered and then did not go down."
+				fmt.Fprintf(os.Stderr,
+					"jailer: stop: warn: runner accepted graceful shutdown for %s but the VMM did not reach vmm_exited or finalized within %s (last phase observed: %q); escalating to a forced stop\n",
+					vmID, grace+5*time.Second, s.Phase)
 			}
 		}
 		// If ctl failed or grace expired: fall through to forced path.

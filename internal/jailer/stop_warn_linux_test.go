@@ -6,12 +6,16 @@
 package jailer
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/2389-research/observatory-v2/internal/runner"
 )
 
 // TestDoStopWarnsOnCtlTransportFailure: when the ctl exchange itself fails the
@@ -124,6 +128,83 @@ func TestDoStopWarningsDistinguishTransportFromRefusal(t *testing.T) {
 	// Strip the vmID so only the wording is compared.
 	if strings.ReplaceAll(transport, "vm-a", "") == strings.ReplaceAll(refusal, "vm-b", "") {
 		t.Errorf("transport failure and runner refusal produced the same wording: %q", transport)
+	}
+}
+
+// TestDoStopWarnsOnGracefulPollTimeout: the runner accepted shutdown_guest —
+// the guest acknowledged it — but the VMM never reached vmm_exited or
+// finalized inside the poll window. That is a different fact from a refused
+// or unreachable request: it is the only branch that can tell "the guest
+// never answered" apart from "the guest answered and then did not go down."
+// Losing it collapses both into the same silent forced stop.
+func TestDoStopWarnsOnGracefulPollTimeout(t *testing.T) {
+	restore := dialCtlFn
+	dialCtlFn = func(_ string, _ adapterCtlRequest, _ time.Duration) (adapterCtlReply, error) {
+		return adapterCtlReply{OK: true}, nil
+	}
+	t.Cleanup(func() { dialCtlFn = restore })
+
+	a := stopOnlyAdapter(t)
+	writeLiveRunnerManifest(t, a.cfg.StateDir, "vm-hung")
+	// No runner-state.json is written for this VM: the poll never observes a
+	// terminal phase and must fall through on ctx.Done() with the zero-value
+	// state ReadState returns for a missing file — Phase "".
+
+	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	defer cancel()
+
+	var forced bool
+	out := captureStderr(t, func() {
+		var err error
+		forced, err = a.doStop(ctx, "vm-hung", 30*time.Second, false)
+		if err != nil {
+			t.Errorf("doStop: %v", err)
+		}
+	})
+
+	if !forced {
+		t.Errorf("forced = false; a poll that never observes a terminal phase must escalate")
+	}
+	warn := stopWarnLine(out, "vm-hung")
+	if warn == "" {
+		t.Fatalf("no jailer stop warning on stderr; captured:\n%s", out)
+	}
+	if !strings.Contains(warn, `""`) {
+		t.Errorf("warning does not report the last observed phase, empty and quoted since no state file was ever written: %q", warn)
+	}
+}
+
+// TestDoStopSilentOnSuccessfulGracefulPoll: a graceful stop that reaches
+// vmm_exited inside the grace window is not a warning — a line that fires on
+// every healthy stop would bury the one case this branch exists to surface.
+func TestDoStopSilentOnSuccessfulGracefulPoll(t *testing.T) {
+	restore := dialCtlFn
+	dialCtlFn = func(_ string, _ adapterCtlRequest, _ time.Duration) (adapterCtlReply, error) {
+		return adapterCtlReply{OK: true}, nil
+	}
+	t.Cleanup(func() { dialCtlFn = restore })
+
+	a := stopOnlyAdapter(t)
+	writeLiveRunnerManifest(t, a.cfg.StateDir, "vm-clean")
+	stateFile := filepath.Join(a.cfg.StateDir, "vms", "vm-clean", "runner-state.json")
+	if err := runner.WriteState(stateFile, runner.State{VMID: "vm-clean", Phase: runner.PhaseVMMExited}); err != nil {
+		t.Fatalf("seed runner state: %v", err)
+	}
+
+	var forced bool
+	out := captureStderr(t, func() {
+		var err error
+		forced, err = a.doStop(t.Context(), "vm-clean", 30*time.Second, false)
+		if err != nil {
+			t.Errorf("doStop: %v", err)
+		}
+	})
+
+	if forced {
+		t.Errorf("forced = true; a poll that observes vmm_exited inside the grace window must not escalate")
+	}
+	if warn := stopWarnLine(out, "vm-clean"); warn != "" {
+		t.Errorf("graceful stop that succeeded within the poll window produced a warning: %q", warn)
 	}
 }
 
