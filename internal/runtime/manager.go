@@ -214,9 +214,9 @@ func (m *Manager) Close() {
 const operationSlack = 120 * time.Second
 
 // OperationContext derives the context a stop-shaped lifecycle mutation runs
-// on: stop, restart, and the delete path that stops first. A start action takes
-// the same shape from detachedContext with launchBudget instead, because its
-// worst case is file IO rather than the guest's patience.
+// on: stop, force_stop, pause, resume, and the delete path that stops first. A
+// start action takes the same shape from detachedContext with launchBudget
+// instead, because its worst case is file IO rather than the guest's patience.
 //
 // A lifecycle mutation has host side effects — signals delivered, a chroot
 // released, a reservation freed — and the store writes that record them. Once
@@ -324,18 +324,21 @@ const recoveryBudget = 75 * time.Second
 // sites hand their recovery context on to failAction, which asks for one of its
 // own: the shared tail below and the start path's success branch. Stacking a
 // second recoveryBudget there priced a stop at 150 + 75 + 75 and a start at
-// 240 + 75 + 75, against a gate client sized for 315 — and contradicted the
-// sizing above, which covers the largest single such job plus its writes, not
-// two of them end to end. So a context this function already made is returned
-// unchanged, with a no-op cancel: the caller that made it owns the cancel.
+// 240 + 75 + 75, outrunning a gate client priced off these same constants
+// (tests/integration/m1a_gate_test.go, which owns the composed per-request
+// ceilings) — and contradicted the sizing above, which covers the largest
+// single such job plus its writes, not two of them end to end. So a context
+// this function already made is returned unchanged, with a no-op cancel: the
+// caller that made it owns the cancel.
 //
 // The cost is real and small. failAction's writes no longer get a guaranteed
 // budget of their own; they run on whatever the caller's tail has left. What
 // spends that tail is one TransitionVM, and the failure that reaches failAction
 // is nearly always a fast one — an invalid transition, a refused revision pin —
 // with the whole 75s still on the clock. The case that loses is a store wedged
-// badly enough that a single write burns 75s, and a store in that state does not
-// answer a second 75s either; Reconcile settles the record on the next start.
+// badly enough that a single write burns 75s, and a store in that state is
+// unlikely to answer a second 75s either — though a writer that freed at ~74s
+// would have; Reconcile settles the record on the next start.
 //
 // The marker rides context values, and values survive both WithoutCancel and
 // WithTimeout. Anything that derives a *new* mutation budget from a recovery

@@ -393,33 +393,65 @@ performance_targets:
 		// r.Context() (internal/api/vms.go), so giving up here costs this test the
 		// answer, not the VM -- which is precisely why the answer must not be lost.
 		//
-		//	stop, force_stop, pause, resume    Manager.OperationContext:
+		//	create, delete                     Manager.OperationContext:
 		//	                                   stop_grace_seconds + operationSlack
 		//	                                   = 30 + 120                      150s
-		//	  + the tail that records it       + recoveryBudget = 150 + 75     225s
-		//	start                              Manager.launchBudget            240s
-		//	  + the tail that records it       + recoveryBudget = 240 + 75     315s
-		//	delete                             Manager.OperationContext        150s
-		//	create                             Manager.OperationContext        150s
+		//	stop, force_stop, pause, resume    OperationContext 150
+		//	  + the tail that records it       + recoveryBudget 75             225s
+		//	start refused as an invalid        OperationContext prefix <=150
+		//	  transition                       + failAction's own tail 75      225s
+		//	start once it reaches the launch   OperationContext prefix <=150
+		//	  -- success and failure alike     + launchBudget 240
+		//	                                   + the tail that records it 75   465s
 		//
-		// The tail rows are the ones easy to miss. recoveryContext is derived with
-		// context.WithoutCancel, so it does not share the budget that just ran out:
-		// a launch that burns all 240s starts a fresh 75s for the writes that record
-		// how it ended, whether it succeeded or failed. A client priced at the 240s
-		// alone gives up 75s early on precisely the request whose answer matters
-		// most -- and on a host whose staging IO drops below the assumed floor, that
-		// is the request that happens. Only one such tail per mutation, however many
-		// times the code on it asks for one: recoveryContext returns a context it
-		// already made unchanged, which is what keeps these two rows at 225 and 315.
+		// Two terms are easy to miss, and both are additive because the context that
+		// carries them is built with context.WithoutCancel, which drops the parent's
+		// deadline along with its cancellation.
+		//
+		// The tail: recoveryContext does not share the budget that just ran out, so a
+		// launch that burns all 240s starts a fresh 75s for the writes that record how
+		// it ended, whether it succeeded or failed. A client priced at the 240s alone
+		// gives up 75s early on precisely the request whose answer matters most -- and
+		// on a host whose staging IO drops below the assumed floor, that is the request
+		// that happens. Only one such tail per mutation, however many times the code on
+		// it asks for one: recoveryContext returns a context it already made unchanged,
+		// which is what holds each start row to a single 75s.
+		//
+		// The prefix: Manager.Action (internal/runtime/manager.go) runs st.GetVM and
+		// st.InsertActionOperation on the caller's 150s OperationContext, and only then
+		// builds startCtx via detachedContext. So launchBudget is not the start's
+		// budget -- it is 240s on top of whatever that prefix already spent. The prefix
+		// is a read and a write against a store with one logical writer, and a
+		// database/sql wait for that writer is bounded by nothing but the caller's
+		// context, so under contention it is not a rounding error. A start refused as an
+		// invalid transition never reaches detachedContext, which is why it stops at
+		// 225s.
 		//
 		// delete and create have no tail at all. Manager.Delete never calls
 		// recoveryContext -- all four call sites are in doAction and failAction --
 		// and CreateVM answers as soon as the launch is enqueued, with the launch
 		// itself running on the manager's context rather than the caller's.
 		//
-		// 330s clears the largest row. All three constants live in
-		// internal/runtime/manager.go with their derivations; re-derive this whenever
-		// any of them moves, or whenever stop_grace_seconds does.
+		// 330s clears every row but the 465s one, and leaving that row uncovered is a
+		// choice rather than an oversight. A client above 465s buys a worse failure:
+		// -timeout 600s is the documented binary budget (docs/ACCEPTANCE.md,
+		// tests/integration/README.md, and the teardown cleanup below already reasons
+		// about its panic aborting the run), a healthy 8/8 pass spends ~94s of it, and
+		// one composed 465s request on top leaves nothing for the teardown loop's own
+		// 60s cap. Priced past the daemon, this client stops buying a named timeout and
+		// starts buying a go-test panic and a goroutine dump.
+		//
+		// What the gap costs, stated plainly: a start that composes its way past 330s
+		// times out client-side, and the evidence then says "client gave up" instead of
+		// naming the daemon's budget. Nothing observed comes near it -- the full 8/8
+		// pass runs in ~94s and no request in it takes more than seconds -- but the
+		// 465s ceiling belongs to every start that reaches the launch, a successful one
+		// included, not only to the paths that fail.
+		//
+		// All four constants live in internal/runtime/manager.go with their
+		// derivations; re-derive this whenever any of them moves, whenever
+		// stop_grace_seconds does, or whenever Manager.Action changes what runs before
+		// startCtx exists.
 		httpClient: &http.Client{Timeout: 330 * time.Second},
 		cmd:        cmd,
 		configPath: configPath,
