@@ -1,0 +1,636 @@
+// ABOUTME: Linux integration test for the launch transaction: real privd server, real runner binary,
+// ABOUTME: real guestd agent on a UDS — verifies the full §5.3 launch sequence end to end.
+
+//go:build linux
+
+package jailer_test
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"net/netip"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/2389-research/observatory-v2/internal/guest"
+	"github.com/2389-research/observatory-v2/internal/guest/proto"
+	"github.com/2389-research/observatory-v2/internal/jailer"
+	"github.com/2389-research/observatory-v2/internal/network"
+	"github.com/2389-research/observatory-v2/internal/preflight"
+	"github.com/2389-research/observatory-v2/internal/privd"
+	"github.com/2389-research/observatory-v2/internal/runtime"
+	"github.com/2389-research/observatory-v2/internal/spool"
+)
+
+// runnerBin is built once by TestMain and shared across all tests.
+var runnerBin string
+
+// TestMain builds the runner binary before running tests.
+func TestMain(m *testing.M) {
+	tmp, err := os.MkdirTemp("", "jailer-test-runner-*")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "TestMain: mkdir runner temp: %v\n", err)
+		os.Exit(1)
+	}
+	bin := filepath.Join(tmp, "vmobs-runner")
+	cmd := exec.Command("go", "build", "-o", bin,
+		"github.com/2389-research/observatory-v2/cmd/vmobs-runner")
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "TestMain: build runner: %v\n", err)
+		os.RemoveAll(tmp)
+		os.Exit(1)
+	}
+	runnerBin = bin
+	code := m.Run()
+	os.RemoveAll(tmp)
+	os.Exit(code)
+}
+
+// testRecordingBackend implements privd.OpsBackend for tests.
+// StartVM spawns a real "sleep 300" as the fake VMM and records its real PID+starttime.
+type testRecordingBackend struct {
+	allocateCalls  []string
+	releaseCalls   []string
+	startCalls     []string
+	signalCalls    []string
+	releaseVMCalls []string
+
+	// sleepCmds tracks spawned sleep processes so tests can kill them.
+	sleepCmds []*exec.Cmd
+}
+
+func (b *testRecordingBackend) AllocateNetwork(entry privd.VMEntry, req privd.AllocateNetworkReq) error {
+	b.allocateCalls = append(b.allocateCalls, req.VMID)
+	return nil
+}
+
+func (b *testRecordingBackend) ReleaseNetwork(entry privd.VMEntry) error {
+	b.releaseCalls = append(b.releaseCalls, entry.VMID)
+	return nil
+}
+
+func (b *testRecordingBackend) StartVM(entry *privd.VMEntry, req privd.StartVMReq) (privd.StartVMResp, error) {
+	b.startCalls = append(b.startCalls, req.VMID)
+
+	cmd := exec.Command("sleep", "300")
+	if err := cmd.Start(); err != nil {
+		return privd.StartVMResp{}, fmt.Errorf("spawn sleep: %w", err)
+	}
+	b.sleepCmds = append(b.sleepCmds, cmd)
+
+	pid := cmd.Process.Pid
+	statData, err := os.ReadFile(privd.ProcStatPath(pid))
+	if err != nil {
+		_ = cmd.Process.Kill()
+		return privd.StartVMResp{}, fmt.Errorf("read proc stat: %w", err)
+	}
+	starttime := privd.ParseStartTime(string(statData))
+	if starttime == "" {
+		_ = cmd.Process.Kill()
+		return privd.StartVMResp{}, fmt.Errorf("parse starttime")
+	}
+
+	// Update the entry with process identity so the server ledger stays consistent.
+	entry.PID = pid
+	entry.StartTime = starttime
+
+	go func() { _ = cmd.Wait() }()
+
+	return privd.StartVMResp{PID: pid, StartTime: starttime}, nil
+}
+
+func (b *testRecordingBackend) SignalVM(entry privd.VMEntry, kind string) error {
+	b.signalCalls = append(b.signalCalls, fmt.Sprintf("%s/%s", entry.VMID, kind))
+	if entry.PID > 0 {
+		if p, err := os.FindProcess(entry.PID); err == nil {
+			_ = p.Kill()
+		}
+	}
+	return nil
+}
+
+func (b *testRecordingBackend) ReleaseVM(entry privd.VMEntry) error {
+	b.releaseVMCalls = append(b.releaseVMCalls, entry.VMID)
+	return nil
+}
+
+func (b *testRecordingBackend) killAll() {
+	for _, cmd := range b.sleepCmds {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}
+}
+
+// startTestPrivdServer starts a privd.Server with the given backend.
+// Returns the socket path. The server is cancelled on t.Cleanup.
+func startTestPrivdServer(t *testing.T, backend privd.OpsBackend) (sockPath, stageRoot string) {
+	t.Helper()
+	dir := t.TempDir()
+	sockPath = filepath.Join(dir, "privd.sock")
+	stageRoot = filepath.Join(dir, "stage")
+	ledgerDir := filepath.Join(dir, "ledger")
+	for _, d := range []string{stageRoot, ledgerDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+
+	cfg := privd.ServerCfg{
+		AllowedUID: os.Getuid(),
+		LedgerDir:  ledgerDir,
+		StageRoot:  stageRoot,
+		JailBase:   filepath.Join(dir, "jail"),
+		UIDMin:     os.Getuid(),
+		UIDMax:     os.Getuid() + 1000,
+		Ops:        backend,
+		Log:        testLogger(t),
+	}
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen privd: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	srv := privd.NewServer(cfg)
+	go func() {
+		if err := srv.Serve(ctx, ln); err != nil && ctx.Err() == nil {
+			t.Logf("privd server exited: %v", err)
+		}
+	}()
+	t.Cleanup(func() {
+		cancel()
+		_ = ln.Close()
+	})
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		c, err := net.Dial("unix", sockPath)
+		if err == nil {
+			_ = c.Close()
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("privd socket never became ready")
+	return
+}
+
+// testLogger redirects server logs to t.Logf.
+func testLogger(t *testing.T) *log.Logger {
+	t.Helper()
+	return log.New(&testLogWriter{t}, "privd: ", 0)
+}
+
+type testLogWriter struct{ t *testing.T }
+
+func (w *testLogWriter) Write(p []byte) (int, error) {
+	w.t.Log(strings.TrimRight(string(p), "\n"))
+	return len(p), nil
+}
+
+// sha256FileHex computes the SHA-256 hex of a file's contents.
+func sha256FileHex(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// sha256Hex computes the SHA-256 hex of a byte slice.
+func sha256Hex(data []byte) string {
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:])
+}
+
+// listen0600 creates a unix socket listener with mode 0600.
+func listen0600(path string) (net.Listener, error) {
+	old := syscall.Umask(0o177)
+	defer syscall.Umask(old)
+	return net.Listen("unix", path)
+}
+
+// spoolContainsKind reports whether any segment in spoolDir contains an envelope with kind.
+func spoolContainsKind(t *testing.T, spoolDir, kind string) bool {
+	t.Helper()
+	segs, _ := filepath.Glob(filepath.Join(spoolDir, "seg-*.vmsp"))
+	for _, seg := range segs {
+		iter, err := spool.ReadSegment(seg)
+		if err != nil {
+			continue
+		}
+		for {
+			env, err := iter.Next()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				break
+			}
+			if env.Kind == kind {
+				iter.Close()
+				return true
+			}
+		}
+		iter.Close()
+	}
+	return false
+}
+
+// newRandomUUID returns a random v4 UUID string.
+func newRandomUUID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(err)
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
+}
+
+// makeTestImagesDir creates a minimal images directory with fake vmlinux + rootfs files,
+// writes a lock.json with their real SHA-256s, and returns (imagesDir, lockPath, lockJSON).
+func makeTestImagesDir(t *testing.T) (imagesDir, lockPath string) {
+	t.Helper()
+	dir := t.TempDir()
+	imagesDir = filepath.Join(dir, "images")
+	if err := os.MkdirAll(imagesDir, 0o755); err != nil {
+		t.Fatalf("mkdir images: %v", err)
+	}
+
+	vmlinuxContent := []byte("fake-vmlinux-for-jailer-test")
+	rootfsContent := []byte("fake-rootfs-for-jailer-test")
+	if err := os.WriteFile(filepath.Join(imagesDir, "vmlinux"), vmlinuxContent, 0o644); err != nil {
+		t.Fatalf("write vmlinux: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(imagesDir, "rootfs.ext4"), rootfsContent, 0o644); err != nil {
+		t.Fatalf("write rootfs: %v", err)
+	}
+
+	vmlinuxSHA := sha256Hex(vmlinuxContent)
+	rootfsSHA := sha256Hex(rootfsContent)
+
+	// Lock paths are relative to the lock's containing directory (dir).
+	lockPath = filepath.Join(dir, "runtime.lock.json")
+	lockBody := fmt.Sprintf(`{
+		"schema": "vmobs.runtime_lock.v1",
+		"firecracker": {"version": "v1.16.1", "sha256": "", "install_path": "/usr/local/bin/firecracker"},
+		"jailer": {"sha256": "", "install_path": "/usr/local/bin/jailer"},
+		"host_support": {"arch": "amd64", "min_kernel": "5.10"},
+		"guest_kernel": {"version": "6.1.186", "vmlinux_sha256": %q, "vmlinux_path": "images/vmlinux"},
+		"root_image": {"sha256": %q, "path": "images/rootfs.ext4"},
+		"guestd": {"protocol_version": 1}
+	}`, vmlinuxSHA, rootfsSHA)
+	if err := os.WriteFile(lockPath, []byte(lockBody), 0o644); err != nil {
+		t.Fatalf("write lock: %v", err)
+	}
+	// imagesDir must be accessible relative to the lock file's parent dir.
+	// The lock verifier resolves vmlinux_path relative to repoRoot which the adapter
+	// passes as the parent of the lock file.
+	return imagesDir, lockPath
+}
+
+// guestdServer serves a guestd-style handshake on a UDS path, reading the capability token
+// from tokenFile before accepting each connection so it matches the adapter-generated token.
+type guestdServer struct {
+	tokenFile string
+	vmID      string
+	bootID    string
+}
+
+func (g *guestdServer) serve(ctx context.Context, ln net.Listener) {
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			select {
+			case <-ctx.Done():
+			default:
+				// listener closed or error
+			}
+			return
+		}
+		go g.handleConn(ctx, conn)
+	}
+}
+
+func (g *guestdServer) handleConn(ctx context.Context, conn net.Conn) {
+	defer conn.Close()
+
+	// Perform the CONNECT/OK vsock proxy handshake.
+	var line []byte
+	buf := make([]byte, 1)
+	for len(line) < 64 {
+		n, err := conn.Read(buf)
+		if err != nil || n == 0 {
+			return
+		}
+		if buf[0] == '\n' {
+			break
+		}
+		line = append(line, buf[0])
+	}
+	if _, err := conn.Write([]byte("OK 12345\n")); err != nil {
+		return
+	}
+
+	// Read the token from the token file (adapter writes it before spawning the runner).
+	var token string
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		b, err := os.ReadFile(g.tokenFile)
+		if err == nil {
+			token = strings.TrimRight(string(b), "\n")
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if token == "" {
+		return
+	}
+
+	cfg := &guest.BootConfig{
+		Schema:          guest.GuestContextSchema,
+		VMID:            g.vmID,
+		BootID:          g.bootID,
+		CapabilityToken: token,
+		ProtocolVersion: proto.ProtocolVersion,
+	}
+	manifest := proto.CapabilityManifest{
+		Schema:        "vmobs.guest_capability.v1",
+		KernelRelease: "6.1.0-test",
+		Features:      []proto.Feature{{ID: "btf", Present: true}},
+	}
+	agent := guest.NewAgent(cfg, manifest)
+	// We need to stop calling systemctl poweroff in tests.
+	agent.PoweroffFunc = func() {} // no-op in test
+
+	// Wrap the already-connected conn as a single-connection listener.
+	scl := &singleConnListener{conn: conn, ch: make(chan struct{})}
+	_ = agent.ServeControl(ctx, scl)
+}
+
+// singleConnListener adapts a single conn into a net.Listener.
+// Accept() returns the conn once, then blocks until Close().
+type singleConnListener struct {
+	conn net.Conn
+	ch   chan struct{}
+	used bool
+}
+
+func (s *singleConnListener) Accept() (net.Conn, error) {
+	if !s.used {
+		s.used = true
+		return s.conn, nil
+	}
+	<-s.ch
+	return nil, fmt.Errorf("singleConnListener: closed")
+}
+func (s *singleConnListener) Close() error {
+	select {
+	case <-s.ch:
+	default:
+		close(s.ch)
+	}
+	return nil
+}
+func (s *singleConnListener) Addr() net.Addr { return s.conn.LocalAddr() }
+
+// TestLaunchTransactionAgainstFakePrivd drives Adapter.Launch with:
+//   - A real privd.Server backed by testRecordingBackend (StartVM returns real sleep 300 PID)
+//   - A real guestdServer on the VM's vsock UDS path
+//   - The real vmobs-runner binary built by TestMain
+//
+// Asserts: manifest stages complete in order; allocate_network was called;
+// runner reaches "attached"; spool contains guest.channel_established.
+func TestLaunchTransactionAgainstFakePrivd(t *testing.T) {
+	backend := &testRecordingBackend{}
+	t.Cleanup(backend.killAll)
+	privdSock, stageRoot := startTestPrivdServer(t, backend)
+
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	spoolRoot := filepath.Join(dir, "spool")
+	jailBase := filepath.Join(dir, "jail")
+	for _, d := range []string{stateDir, spoolRoot, jailBase} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+
+	imagesDir, lockPath := makeTestImagesDir(t)
+	// The lock verifier resolves paths relative to repoRoot = parent of images/.
+	lockRepoRoot := filepath.Dir(imagesDir)
+	_ = lockRepoRoot // passed as LockPath parent in Config
+
+	vmID := "vm-launch-test"
+	bootID := "boot-" + newRandomUUID()
+	spec := runtime.VMSpec{
+		VMID:             vmID,
+		BootID:           bootID,
+		VCPUCount:        1,
+		MemoryMiB:        512,
+		WorkspaceDiskMiB: 64,
+	}
+
+	// Pre-create the vsock UDS dir so we know its path before the adapter runs.
+	vSockDir := filepath.Join(jailBase, "firecracker", vmID, "root")
+	if err := os.MkdirAll(vSockDir, 0o755); err != nil {
+		t.Fatalf("mkdir vsock dir: %v", err)
+	}
+	vSockPath := filepath.Join(vSockDir, "v.sock")
+
+	// Token file path (adapter writes it during staging).
+	tokenFile := filepath.Join(stateDir, "vms", vmID, "token")
+
+	// Start guestd listener at the vsock path before the adapter spawns the runner.
+	guestLn, err := listen0600(vSockPath)
+	if err != nil {
+		t.Fatalf("listen v.sock at %s: %v", vSockPath, err)
+	}
+	agentCtx, agentCancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		agentCancel()
+		guestLn.Close()
+	})
+
+	gs := &guestdServer{tokenFile: tokenFile, vmID: vmID, bootID: bootID}
+	go gs.serve(agentCtx, guestLn)
+
+	// Build a simple network allocator (no host routes to exclude in the test).
+	pool, err := network.NewAllocator(nil, []netip.Prefix{netip.MustParsePrefix("10.88.0.0/24")})
+	if err != nil {
+		t.Fatalf("NewAllocator: %v", err)
+	}
+
+	cfg := jailer.Config{
+		StateDir:      stateDir,
+		StageRoot:     stageRoot,
+		JailBase:      jailBase,
+		SpoolRoot:     spoolRoot,
+		RunnerBin:     runnerBin,
+		RepoImagesDir: imagesDir,
+		LockPath:      lockPath,
+		JailUIDBase:   os.Getuid(),
+		JailGID:       os.Getgid(),
+		MaxSlots:      8,
+		CIDBase:       3,
+		Allocator:     pool,
+		Preflight: func(ctx context.Context, refresh bool) preflight.Report {
+			return preflight.Report{Overall: preflight.StatusPass}
+		},
+	}
+
+	pc := &privd.Client{SocketPath: privdSock}
+	adapter, err := jailer.New(cfg, pc)
+	if err != nil {
+		t.Fatalf("jailer.New: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if err := adapter.Launch(ctx, spec); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+
+	// Assert manifest has all six stages in order.
+	m, err := jailer.ReadManifest(stateDir, vmID)
+	if err != nil {
+		t.Fatalf("ReadManifest: %v", err)
+	}
+	wantStages := []string{"reserved", "staged", "network", "vmm_started", "runner_spawned", "attached"}
+	if len(m.Stages) != len(wantStages) {
+		t.Errorf("stages = %v, want %v", m.Stages, wantStages)
+	} else {
+		for i, want := range wantStages {
+			if m.Stages[i] != want {
+				t.Errorf("stages[%d] = %q, want %q", i, m.Stages[i], want)
+			}
+		}
+	}
+
+	// Assert network was allocated.
+	if len(backend.allocateCalls) == 0 {
+		t.Error("allocate_network was never called")
+	}
+
+	// Assert spool contains guest.channel_established.
+	vmSpoolDir := filepath.Join(spoolRoot, vmID)
+	if !spoolContainsKind(t, vmSpoolDir, "guest.channel_established") {
+		t.Error("spool: missing guest.channel_established")
+	}
+}
+
+// TestLaunchDigestTamperingBlocksNetwork verifies that a digest mismatch in the staging
+// step causes a failure BEFORE allocate_network is called (network is step 4; digest
+// check is inside step 3/staging).
+func TestLaunchDigestTamperingBlocksNetwork(t *testing.T) {
+	backend := &testRecordingBackend{}
+	t.Cleanup(backend.killAll)
+	privdSock, stageRoot := startTestPrivdServer(t, backend)
+
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	spoolRoot := filepath.Join(dir, "spool")
+	jailBase := filepath.Join(dir, "jail")
+	for _, d := range []string{stateDir, spoolRoot, jailBase} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+
+	imagesDir := filepath.Join(dir, "images")
+	if err := os.MkdirAll(imagesDir, 0o755); err != nil {
+		t.Fatalf("mkdir images: %v", err)
+	}
+
+	// Write real files.
+	realContent := []byte("real content for tamper test")
+	if err := os.WriteFile(filepath.Join(imagesDir, "vmlinux"), realContent, 0o644); err != nil {
+		t.Fatalf("write vmlinux: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(imagesDir, "rootfs.ext4"), realContent, 0o644); err != nil {
+		t.Fatalf("write rootfs: %v", err)
+	}
+
+	// Lock has WRONG hashes — staging will fail on digest mismatch.
+	wrongSHA := sha256Hex([]byte("this is not the real content"))
+	lockPath := filepath.Join(dir, "runtime.lock.json")
+	lockBody := fmt.Sprintf(`{
+		"schema": "vmobs.runtime_lock.v1",
+		"firecracker": {"version": "v1.16.1", "sha256": "", "install_path": "/usr/local/bin/firecracker"},
+		"jailer": {"sha256": "", "install_path": "/usr/local/bin/jailer"},
+		"host_support": {"arch": "amd64", "min_kernel": "5.10"},
+		"guest_kernel": {"version": "6.1.186", "vmlinux_sha256": %q, "vmlinux_path": "images/vmlinux"},
+		"root_image": {"sha256": %q, "path": "images/rootfs.ext4"},
+		"guestd": {"protocol_version": 1}
+	}`, wrongSHA, wrongSHA)
+	if err := os.WriteFile(lockPath, []byte(lockBody), 0o644); err != nil {
+		t.Fatalf("write lock: %v", err)
+	}
+
+	pool, err := network.NewAllocator(nil, []netip.Prefix{netip.MustParsePrefix("10.89.0.0/24")})
+	if err != nil {
+		t.Fatalf("NewAllocator: %v", err)
+	}
+
+	cfg := jailer.Config{
+		StateDir:      stateDir,
+		StageRoot:     stageRoot,
+		JailBase:      jailBase,
+		SpoolRoot:     spoolRoot,
+		RunnerBin:     runnerBin,
+		RepoImagesDir: imagesDir,
+		LockPath:      lockPath,
+		JailUIDBase:   os.Getuid(),
+		JailGID:       os.Getgid(),
+		MaxSlots:      8,
+		CIDBase:       3,
+		Allocator:     pool,
+		Preflight: func(ctx context.Context, refresh bool) preflight.Report {
+			return preflight.Report{Overall: preflight.StatusPass}
+		},
+	}
+
+	pc := &privd.Client{SocketPath: privdSock}
+	adapter, err := jailer.New(cfg, pc)
+	if err != nil {
+		t.Fatalf("jailer.New: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	launchErr := adapter.Launch(ctx, runtime.VMSpec{
+		VMID:             "vm-tamper",
+		BootID:           "boot-tamper",
+		VCPUCount:        1,
+		MemoryMiB:        512,
+		WorkspaceDiskMiB: 64,
+	})
+	if launchErr == nil {
+		t.Fatal("expected Launch to fail on digest tamper, got nil")
+	}
+	t.Logf("launch failed as expected: %v", launchErr)
+
+	// network must NOT have been allocated — staging fails in step 3, network is step 4.
+	if len(backend.allocateCalls) > 0 {
+		t.Errorf("allocate_network was called despite digest mismatch (got calls: %v)", backend.allocateCalls)
+	}
+}
