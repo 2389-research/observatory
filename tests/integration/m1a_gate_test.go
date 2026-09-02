@@ -363,6 +363,12 @@ performance_targets:
 		}
 		stdoutF.Close()
 		stderrF.Close()
+		// The daemon has stopped writing and the files are closed, so what is on
+		// disk now is the whole record — and it lives under t.TempDir(), which Go
+		// removes as this test ends. Rescue it before that happens.
+		if t.Failed() {
+			savePostmortem(t, label, stdoutPath, stderrPath, dbPath)
+		}
 	})
 
 	d := &m1aDaemon{
@@ -388,6 +394,38 @@ performance_targets:
 		d.vmMu.Unlock()
 		for _, id := range ids {
 			_ = os.RemoveAll(filepath.Join(m1aStageBaseDir, id))
+		}
+	})
+
+	// Best-effort VM teardown. Registered last on purpose: t.Cleanup runs in
+	// last-added-first-called order (testing.go's runCleanup pops off the end),
+	// so this runs BEFORE the stage-dir removal and before the daemon is killed —
+	// i.e. while the daemon is still up and can serve the request. privd owns the
+	// VM lifecycle (firecracker process, runner, netns, veth pair, jail dir) and
+	// the daemon is the only thing that asks privd to release it, so killing
+	// vmobsd with VMs still live strands all of that on the host; every red run so
+	// far has needed manual cleanup with the root helper. A VM that will not
+	// delete is a leak for AT-018 to catch — log it, never fail the run here.
+	t.Cleanup(func() {
+		d.vmMu.Lock()
+		ids := append([]string(nil), d.createdVMs...)
+		d.vmMu.Unlock()
+		for _, id := range ids {
+			req, err := http.NewRequest(http.MethodDelete, d.baseURL+"/vms/"+id+"?force=true", nil)
+			if err != nil {
+				t.Logf("teardown %s: DELETE vm %s: new request: %v", label, id, err)
+				continue
+			}
+			resp, err := d.httpClient.Do(req)
+			if err != nil {
+				t.Logf("teardown %s: DELETE vm %s: %v", label, id, err)
+				continue
+			}
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Logf("teardown %s: DELETE vm %s: got %d: %s", label, id, resp.StatusCode, body)
+			}
 		}
 	})
 
@@ -581,6 +619,43 @@ func copyFile(src, dst string, mode os.FileMode) error {
 		return fmt.Errorf("copy: %w", err)
 	}
 	return out.Close()
+}
+
+// savePostmortem copies a failed daemon's logs and state DB out of t.TempDir(),
+// which Go deletes as the test ends, into a directory that survives the run, and
+// names that directory in the test log so the path shows up in the run output.
+// The pid keeps concurrent or repeated runs from overwriting each other.
+// Best-effort throughout: a copy error is reported, never fatal.
+func savePostmortem(t *testing.T, label, stdoutPath, stderrPath, dbPath string) {
+	t.Helper()
+	dir := filepath.Join("/tmp", fmt.Sprintf("m1a-gate-postmortem-%d", os.Getpid()), label)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Logf("postmortem %s: mkdir %s: %v", label, dir, err)
+		return
+	}
+	// The WAL and shared-memory sidecars exist only while the DB is open or after
+	// an unclean exit; their absence is normal, not a copy failure.
+	for _, f := range []struct {
+		path     string
+		optional bool
+	}{
+		{stdoutPath, false},
+		{stderrPath, false},
+		{dbPath, false},
+		{dbPath + "-wal", true},
+		{dbPath + "-shm", true},
+	} {
+		if _, err := os.Stat(f.path); err != nil {
+			if !f.optional {
+				t.Logf("postmortem %s: %s: %v", label, f.path, err)
+			}
+			continue
+		}
+		if err := copyFile(f.path, filepath.Join(dir, filepath.Base(f.path)), 0o644); err != nil {
+			t.Logf("postmortem %s: %v", label, err)
+		}
+	}
+	t.Logf("postmortem for %s saved to %s", label, dir)
 }
 
 // readFileTail returns the last n lines of a file as a string, for log dumps.
