@@ -482,6 +482,65 @@ func TestManagerStopSpendsRevisionPinOnce(t *testing.T) {
 	}
 }
 
+// TestManagerStopStalePinIsRefusedBeforeTheRuntimeIsTouched: the sibling of
+// TestManagerStopSpendsRevisionPinOnce. That test proves the pin isn't spent
+// twice; this one proves it's still spent at all. A stale pin must be refused
+// with a typed *store.RevisionMismatchError before rt.Stop/rt.ForceStop ever
+// runs, and the VM row must be left exactly as it was.
+func TestManagerStopStalePinIsRefusedBeforeTheRuntimeIsTouched(t *testing.T) {
+	cases := []struct {
+		action string
+	}{
+		{"stop"},
+		{"force_stop"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.action, func(t *testing.T) {
+			st := openStoreForManager(t)
+			fk := runtimetest.NewFake()
+			mgr := newManager(t, st, fk)
+
+			vm, _, _, err := mgr.CreateVM(t.Context(), "local_operator", createReq(tc.action+"-stale"))
+			if err != nil {
+				t.Fatalf("CreateVM: %v", err)
+			}
+			mgr.Close() // drain the launch goroutine so the VM is settled in running
+
+			current, err := st.GetVM(t.Context(), vm.VMID)
+			if err != nil {
+				t.Fatalf("GetVM: %v", err)
+			}
+			stale := current.Revision - 1
+
+			_, _, err = mgr.Action(t.Context(), vm.VMID, tc.action, &stale)
+			if err == nil {
+				t.Fatalf("%s pinned at stale revision %d: got nil error, want refusal", tc.action, stale)
+			}
+			var mismatch *store.RevisionMismatchError
+			if !errors.As(err, &mismatch) {
+				t.Fatalf("error is %T (%v), want *store.RevisionMismatchError", err, err)
+			}
+			if mismatch.Current != current.Revision {
+				t.Errorf("mismatch.Current = %d, want %d", mismatch.Current, current.Revision)
+			}
+
+			for _, c := range fk.CallsFor(vm.VMID) {
+				if c.Method == "Stop" || c.Method == "ForceStop" {
+					t.Errorf("runtime was asked to %s despite the refused pin; calls: %v", c.Method, fk.CallsFor(vm.VMID))
+				}
+			}
+			after, err := st.GetVM(t.Context(), vm.VMID)
+			if err != nil {
+				t.Fatalf("GetVM after refusal: %v", err)
+			}
+			if after.ObservedState != "running" || after.Revision != current.Revision {
+				t.Errorf("after refusal: state %q revision %d, want running at revision %d",
+					after.ObservedState, after.Revision, current.Revision)
+			}
+		})
+	}
+}
+
 // TestManagerActionWrongStateIsInvalidTransition: an action the VM's current
 // state does not allow is a caller-side mistake, so it must carry the state
 // pair that explains it. An untyped error falls through the API's mapping to a
