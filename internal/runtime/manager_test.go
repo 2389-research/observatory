@@ -1562,8 +1562,11 @@ func waitForFakeCall(t *testing.T, fk *runtimetest.Fake, vmID, method string) {
 }
 
 // lastStateChangeReason returns the reason of the newest vm.state_changed event
-// for vmID. Store-synthesized vm.* events ride the host stream with a NULL vm_id
-// column; store.Query matches data.vm_id as well, so the VMID filter finds them.
+// among the first 100 for vmID — the query orders ascending, so the newest event
+// is the last of that page rather than of the whole history. Test VMs never reach
+// 100 state changes. Store-synthesized vm.* events ride the host stream with a
+// NULL vm_id column; store.Query matches data.vm_id as well, so the VMID filter
+// finds them.
 func lastStateChangeReason(t *testing.T, st *store.Store, vmID string) string {
 	t.Helper()
 	res, err := st.Query(t.Context(), store.Query{VMID: &vmID, Kind: "vm.state_changed", Limit: 100})

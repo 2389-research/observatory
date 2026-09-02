@@ -410,8 +410,24 @@ performance_targets:
 		d.vmMu.Lock()
 		ids := append([]string(nil), d.createdVMs...)
 		d.vmMu.Unlock()
-		for _, id := range ids {
-			req, err := http.NewRequest(http.MethodDelete, d.baseURL+"/vms/"+id+"?force=true", nil)
+
+		// One deadline for the whole loop. The DELETEs go out serially on a client
+		// with a 30s timeout, so against a daemon that accepts connections but never
+		// answers, ten ids burn about five minutes; go test's own timeout panic then
+		// aborts the binary before the remaining cleanups run, losing the post-mortem
+		// for exactly the failure that most needs it.
+		teardownCtx, cancelTeardown := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancelTeardown()
+
+		for i, id := range ids {
+			if teardownCtx.Err() != nil {
+				t.Logf("teardown %s: deadline expired after %d/%d vm(s); not deleted: %v",
+					label, i, len(ids), ids[i:])
+				return
+			}
+			logVMStateBeforeTeardown(teardownCtx, t, d, label, id)
+
+			req, err := http.NewRequestWithContext(teardownCtx, http.MethodDelete, d.baseURL+"/vms/"+id+"?force=true", nil)
 			if err != nil {
 				t.Logf("teardown %s: DELETE vm %s: new request: %v", label, id, err)
 				continue
@@ -448,6 +464,36 @@ performance_targets:
 	}
 
 	return d
+}
+
+// logVMStateBeforeTeardown records a VM's observed state and revision before the
+// teardown loop force-deletes it. Cleanups run last-added-first-called, so the
+// teardown runs before the post-mortem capture and the rescued DB shows
+// post-teardown vms rows rather than the state at failure; events and operations
+// are append-only, so only the row state needs rescuing here. Best-effort — every
+// failure logs and returns so the teardown continues.
+func logVMStateBeforeTeardown(ctx context.Context, t *testing.T, d *m1aDaemon, label, id string) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.baseURL+"/vms/"+id, nil)
+	if err != nil {
+		t.Logf("teardown %s: pre-delete GET vm %s: new request: %v", label, id, err)
+		return
+	}
+	resp, err := d.httpClient.Do(req)
+	if err != nil {
+		t.Logf("teardown %s: pre-delete GET vm %s: %v", label, id, err)
+		return
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	var vm map[string]any
+	if err := json.Unmarshal(body, &vm); err != nil {
+		t.Logf("teardown %s: pre-delete GET vm %s: got %d, unparseable body: %s",
+			label, id, resp.StatusCode, body)
+		return
+	}
+	t.Logf("teardown %s: pre-delete vm %s: status=%d observed_state=%v revision=%v",
+		label, id, resp.StatusCode, vm["observed_state"], vm["revision"])
 }
 
 // apiGet performs a GET request and returns the parsed body.
@@ -635,6 +681,7 @@ func savePostmortem(t *testing.T, label, stdoutPath, stderrPath, dbPath string) 
 	}
 	// The WAL and shared-memory sidecars exist only while the DB is open or after
 	// an unclean exit; their absence is normal, not a copy failure.
+	var saved []string
 	for _, f := range []struct {
 		path     string
 		optional bool
@@ -653,9 +700,18 @@ func savePostmortem(t *testing.T, label, stdoutPath, stderrPath, dbPath string) 
 		}
 		if err := copyFile(f.path, filepath.Join(dir, filepath.Base(f.path)), 0o644); err != nil {
 			t.Logf("postmortem %s: %v", label, err)
+			continue
 		}
+		saved = append(saved, filepath.Base(f.path))
 	}
-	t.Logf("postmortem for %s saved to %s", label, dir)
+	// Only claim what actually landed. A summary line that says "saved" after every
+	// copy failed is the kind of vacuous evidence this gate exists to catch.
+	if len(saved) == 0 {
+		t.Logf("postmortem for %s: nothing saved to %s", label, dir)
+		return
+	}
+	t.Logf("postmortem for %s: saved %d file(s) to %s: %s",
+		label, len(saved), dir, strings.Join(saved, ", "))
 }
 
 // readFileTail returns the last n lines of a file as a string, for log dumps.
