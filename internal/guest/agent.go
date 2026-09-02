@@ -39,9 +39,13 @@ type Agent struct {
 // defaultPoweroff is the production implementation. It runs "systemctl
 // reboot", not poweroff, despite the name — this guest has no working
 // poweroff path. Firecracker v1.16.1 hands it ACPI tables that advertise only
-// S0, never S5 (soft-off), so "systemctl poweroff" runs a complete, clean
-// systemd shutdown and then halts: no power-off handler is registered, so the
-// vCPU parks in HLT and the VMM never exits. No grace period fixes that.
+// S0, never S5 (soft-off), and "systemctl poweroff" then runs a complete, clean
+// systemd shutdown and halts: the guest prints "reboot: System halted", the
+// vCPU parks in HLT, and the VMM never exits. All of that was observed
+// directly. The step between them — no S5 sleep-type data means no registered
+// power-off handler, so sys_reboot downgrades POWER_OFF to HALT — is inferred
+// from kernel source (drivers/acpi/sleep.c); the guest's handler list was never
+// read. No grace period fixes any of it.
 // Firecracker cannot reboot a guest, so a guest-initiated restart is the only
 // exit door that exists: reboot=k (boot args) makes the kernel write the
 // i8042 reset byte directly, which Firecracker catches and exits on. So this
