@@ -872,39 +872,12 @@ func (m *Manager) NotifyVMMExit(ctx context.Context, vmID, reason string, gracef
 		return nil
 	}
 
-	// Non-graceful exit: transition through stopping → failed.
-	// Graceful exit: transition through stopping → stopped.
-	//
-	// The §5.2 state matrix requires passing through "stopping" for running/paused
-	// VMs. For provisioning/starting VMs that exit without fully starting, we
-	// go directly to failed (no stopping intermediate required by the matrix for
-	// those states — use the failLaunch path is not appropriate here since there
-	// is no opID; use a raw transition instead).
-
-	// Intermediate stopping step for live states only.
-	switch vm.ObservedState {
-	case "running", "paused":
-		_, _ = m.st.TransitionVM(ctx, store.TransitionInput{
-			VMID:        vmID,
-			To:          "stopping",
-			Reason:      reason,
-			OperationID: 0,
-		})
-	}
-
-	// Final transition.
-	if graceful {
-		_, err = m.st.TransitionVM(ctx, store.TransitionInput{
-			VMID:           vmID,
-			To:             "stopped",
-			Reason:         reason,
-			OperationID:    0,
-			ReleaseCompute: true,
-		})
-		if err == nil {
-			m.onVMTerminal(ctx, vmID)
-		}
-	} else {
+	// provisioning/starting VMs never reached running: the VMM did not fully start.
+	// Route directly to failed regardless of graceful — stopped is not a valid
+	// destination from those states (§5.2 matrix), and "graceful" has no meaning
+	// for a VM that never ran.
+	earlyExit := vm.ObservedState == "provisioning" || vm.ObservedState == "starting"
+	if earlyExit {
 		stage := "vmm_exit"
 		_, err = m.st.TransitionVM(ctx, store.TransitionInput{
 			VMID:           vmID,
@@ -917,6 +890,42 @@ func (m *Manager) NotifyVMMExit(ctx context.Context, vmID, reason string, gracef
 		})
 		if err == nil {
 			m.onVMTerminal(ctx, vmID)
+		}
+	} else {
+		// running/paused: §5.2 requires passing through stopping first.
+		_, _ = m.st.TransitionVM(ctx, store.TransitionInput{
+			VMID:        vmID,
+			To:          "stopping",
+			Reason:      reason,
+			OperationID: 0,
+		})
+
+		// Final transition: stopped (graceful) or failed (not graceful).
+		if graceful {
+			_, err = m.st.TransitionVM(ctx, store.TransitionInput{
+				VMID:           vmID,
+				To:             "stopped",
+				Reason:         reason,
+				OperationID:    0,
+				ReleaseCompute: true,
+			})
+			if err == nil {
+				m.onVMTerminal(ctx, vmID)
+			}
+		} else {
+			stage := "vmm_exit"
+			_, err = m.st.TransitionVM(ctx, store.TransitionInput{
+				VMID:           vmID,
+				To:             "failed",
+				Reason:         reason,
+				OperationID:    0,
+				FailureStage:   &stage,
+				FailureReason:  &reason,
+				ReleaseCompute: true,
+			})
+			if err == nil {
+				m.onVMTerminal(ctx, vmID)
+			}
 		}
 	}
 

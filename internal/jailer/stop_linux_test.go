@@ -52,7 +52,7 @@ func makeStopHarness(t *testing.T) (
 		}
 	}
 
-	imagesDir, lockPath := makeTestImagesDir(t)
+	repoRoot, lockPath := makeTestImagesDir(t)
 
 	pool, err := network.NewAllocator(nil, []netip.Prefix{netip.MustParsePrefix("10.91.0.0/24")})
 	if err != nil {
@@ -62,19 +62,19 @@ func makeStopHarness(t *testing.T) (
 	_ = stageRoot // used by privd server internally
 
 	cfg := jailer.Config{
-		StateDir:      stateDir,
-		StageRoot:     stageRoot,
-		JailBase:      jailBase,
-		SpoolRoot:     spoolRoot,
-		RunnerBin:     runnerBin,
-		RepoImagesDir: imagesDir,
-		LockPath:      lockPath,
-		JailUIDBase:   os.Getuid(),
-		JailGID:       os.Getgid(),
-		MaxSlots:      8,
-		CIDBase:       4,
-		Allocator:     pool,
-		PrivdSocket:   privdSock,
+		StateDir:    stateDir,
+		StageRoot:   stageRoot,
+		JailBase:    jailBase,
+		SpoolRoot:   spoolRoot,
+		RunnerBin:   runnerBin,
+		RepoRoot:    repoRoot,
+		LockPath:    lockPath,
+		JailUIDBase: os.Getuid(),
+		JailGID:     os.Getgid(),
+		MaxSlots:    8,
+		CIDBase:     4,
+		Allocator:   pool,
+		PrivdSocket: privdSock,
 		Preflight: func(ctx context.Context, refresh bool) preflight.Report {
 			return preflight.Report{Overall: preflight.StatusPass}
 		},
@@ -410,19 +410,19 @@ func TestReconcileVMMGone(t *testing.T) {
 	}
 
 	cfg := jailer.Config{
-		StateDir:      stateDir,
-		StageRoot:     filepath.Join(dir, "stage"),
-		JailBase:      filepath.Join(dir, "jail"),
-		SpoolRoot:     filepath.Join(dir, "spool"),
-		RunnerBin:     runnerBin,
-		RepoImagesDir: filepath.Join(dir, "images"), // won't be used in Reconcile
-		LockPath:      filepath.Join(dir, "lock.json"),
-		PrivdSocket:   filepath.Join(dir, "privd.sock"), // non-existent — reconcile shouldn't call privd
-		JailUIDBase:   os.Getuid(),
-		JailGID:       os.Getgid(),
-		MaxSlots:      8,
-		CIDBase:       5,
-		Allocator:     pool,
+		StateDir:    stateDir,
+		StageRoot:   filepath.Join(dir, "stage"),
+		JailBase:    filepath.Join(dir, "jail"),
+		SpoolRoot:   filepath.Join(dir, "spool"),
+		RunnerBin:   runnerBin,
+		RepoRoot:    filepath.Join(dir, "images"), // won't be used in Reconcile
+		LockPath:    filepath.Join(dir, "lock.json"),
+		PrivdSocket: filepath.Join(dir, "privd.sock"), // non-existent — reconcile shouldn't call privd
+		JailUIDBase: os.Getuid(),
+		JailGID:     os.Getgid(),
+		MaxSlots:    8,
+		CIDBase:     5,
+		Allocator:   pool,
 		Preflight: func(ctx context.Context, refresh bool) preflight.Report {
 			return preflight.Report{Overall: preflight.StatusPass}
 		},
@@ -479,19 +479,19 @@ func TestReconcileAmbiguousUnreadableManifest(t *testing.T) {
 	}
 
 	cfg := jailer.Config{
-		StateDir:      stateDir,
-		StageRoot:     filepath.Join(dir, "stage"),
-		JailBase:      filepath.Join(dir, "jail"),
-		SpoolRoot:     filepath.Join(dir, "spool"),
-		RunnerBin:     runnerBin,
-		RepoImagesDir: filepath.Join(dir, "images"),
-		LockPath:      filepath.Join(dir, "lock.json"),
-		PrivdSocket:   filepath.Join(dir, "privd.sock"),
-		JailUIDBase:   os.Getuid(),
-		JailGID:       os.Getgid(),
-		MaxSlots:      8,
-		CIDBase:       6,
-		Allocator:     pool,
+		StateDir:    stateDir,
+		StageRoot:   filepath.Join(dir, "stage"),
+		JailBase:    filepath.Join(dir, "jail"),
+		SpoolRoot:   filepath.Join(dir, "spool"),
+		RunnerBin:   runnerBin,
+		RepoRoot:    filepath.Join(dir, "images"),
+		LockPath:    filepath.Join(dir, "lock.json"),
+		PrivdSocket: filepath.Join(dir, "privd.sock"),
+		JailUIDBase: os.Getuid(),
+		JailGID:     os.Getgid(),
+		MaxSlots:    8,
+		CIDBase:     6,
+		Allocator:   pool,
 		Preflight: func(ctx context.Context, refresh bool) preflight.Report {
 			return preflight.Report{Overall: preflight.StatusPass}
 		},
@@ -537,7 +537,7 @@ func TestAvailabilityPassWhenPreflightPasses(t *testing.T) {
 	pool, _ := network.NewAllocator(nil, []netip.Prefix{netip.MustParsePrefix("10.99.0.0/24")})
 	cfg := jailer.Config{
 		StateDir: t.TempDir(), StageRoot: t.TempDir(), JailBase: t.TempDir(),
-		SpoolRoot: t.TempDir(), RunnerBin: runnerBin, RepoImagesDir: t.TempDir(),
+		SpoolRoot: t.TempDir(), RunnerBin: runnerBin, RepoRoot: t.TempDir(),
 		LockPath: filepath.Join(t.TempDir(), "lock.json"), MaxSlots: 1,
 		PrivdSocket: filepath.Join(t.TempDir(), "p.sock"),
 		Allocator:   pool,
@@ -559,7 +559,7 @@ func TestAvailabilityFailSurfacesFirstFailingCheck(t *testing.T) {
 	pool, _ := network.NewAllocator(nil, []netip.Prefix{netip.MustParsePrefix("10.99.1.0/24")})
 	cfg := jailer.Config{
 		StateDir: t.TempDir(), StageRoot: t.TempDir(), JailBase: t.TempDir(),
-		SpoolRoot: t.TempDir(), RunnerBin: runnerBin, RepoImagesDir: t.TempDir(),
+		SpoolRoot: t.TempDir(), RunnerBin: runnerBin, RepoRoot: t.TempDir(),
 		LockPath: filepath.Join(t.TempDir(), "lock.json"), MaxSlots: 1,
 		PrivdSocket: filepath.Join(t.TempDir(), "p.sock"),
 		Allocator:   pool,

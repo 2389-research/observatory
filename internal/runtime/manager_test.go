@@ -1087,3 +1087,46 @@ func TestNotifyVMMExitSecondCallNoOp(t *testing.T) {
 		t.Errorf("state changed after second call: was %q, now %q", firstState, vm3.ObservedState)
 	}
 }
+
+// TestNotifyVMMExitProvisioningGracefulGoesToFailed verifies that a provisioning-state VM
+// routes to failed regardless of graceful=true (§5.2: provisioning→stopped is not a valid
+// transition; the VMM never reached running so failed is the honest outcome).
+func TestNotifyVMMExitProvisioningGracefulGoesToFailed(t *testing.T) {
+	st := openStoreForManager(t)
+	fk := runtimetest.NewFake()
+	mgr, err := runtime.NewManager(st, fk, defaultCfg())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	vm, _, _, err := mgr.CreateVM(t.Context(), "local_operator", createReq("notify-prov-graceful"))
+	if err != nil {
+		t.Fatalf("CreateVM: %v", err)
+	}
+
+	// Block Launch so the VM stays in provisioning.
+	unblock := fk.Block("Launch", vm.VMID)
+
+	// Confirm provisioning before we call NotifyVMMExit.
+	vmNow, _ := st.GetVM(t.Context(), vm.VMID)
+	if vmNow == nil || vmNow.ObservedState != "provisioning" {
+		t.Fatalf("pre-condition: want provisioning, got %q", vmNow.ObservedState)
+	}
+
+	// graceful=true on a provisioning VM must still route to failed, not stopped.
+	if err := mgr.NotifyVMMExit(t.Context(), vm.VMID, "early exit", true); err != nil {
+		t.Fatalf("NotifyVMMExit: %v", err)
+	}
+
+	vmAfter, _ := st.GetVM(t.Context(), vm.VMID)
+	if vmAfter.ObservedState != "failed" {
+		t.Errorf("provisioning + graceful=true: want failed, got %q", vmAfter.ObservedState)
+	}
+	if vmAfter.FailureReason == nil {
+		t.Error("failure_reason should be set, got nil")
+	}
+
+	// Unblock and drain so the test doesn't leak the goroutine.
+	close(unblock)
+	mgr.Close()
+}

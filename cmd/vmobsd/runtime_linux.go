@@ -31,10 +31,11 @@ const maxSlotsWiring = 64
 // Called only when cfg.Runtime.Mode == "firecracker" on Linux.
 //
 // Path derivations (fields with no dedicated config home):
-//   - StageRoot     = cfg.Paths.Runtime + "/stage"       (ephemeral staging under the runtime dir)
-//   - JailBase      = cfg.Paths.Runtime + "/jail"        (jailer chroot base under the runtime dir)
-//   - SpoolRoot     = cfg.Paths.State   + "/spool"       (per-VM spool dirs under the state dir)
-//   - RepoImagesDir = cfg.Paths.State   + "/images/dist" (where vmlinux + rootfs.ext4 live)
+//   - StageRoot = cfg.Paths.Runtime + "/stage"  (ephemeral staging under the runtime dir)
+//   - JailBase  = cfg.Paths.Runtime + "/jail"   (jailer chroot base under the runtime dir)
+//   - SpoolRoot = cfg.Paths.State   + "/spool"  (per-VM spool dirs under the state dir)
+//   - RepoRoot  = cfg.Paths.State               (lock artifact paths like "images/dist/vmlinux"
+//     resolve here; the runbook syncs the repo's images/dist tree under the state dir)
 //
 // All derivations are recorded in task-12-report.md.
 func buildFirecrackerRuntime(
@@ -54,7 +55,7 @@ func buildFirecrackerRuntime(
 	// Build network allocator from live host routing table.
 	routeJSON, err := exec.Command("ip", "-json", "route", "show", "table", "all").Output()
 	if err != nil {
-		return nil, fmt.Errorf("runtime_mode firecracker: get host routes: %w", err)
+		return nil, fmt.Errorf("runtime_mode firecracker: get host routes (is 'ip' on PATH?): %w", err)
 	}
 	routes, err := network.ParseIPRoutes(routeJSON)
 	if err != nil {
@@ -77,20 +78,20 @@ func buildFirecrackerRuntime(
 	// Assemble jailer Config. Paths without a dedicated config field are derived
 	// from existing configured roots (see doc comment above).
 	jCfg := jailer.Config{
-		StateDir:      cfg.Paths.State,
-		StageRoot:     filepath.Join(cfg.Paths.Runtime, "stage"),
-		JailBase:      filepath.Join(cfg.Paths.Runtime, "jail"),
-		SpoolRoot:     filepath.Join(cfg.Paths.State, "spool"),
-		RunnerBin:     runnerBin,
-		RepoImagesDir: filepath.Join(cfg.Paths.State, "images", "dist"),
-		LockPath:      cfg.Runtime.LockFile,
-		PrivdSocket:   cfg.Paths.PrivilegedSocket,
-		JailUIDBase:   cfg.Runtime.JailUIDBase,
-		JailGID:       cfg.Runtime.JailGID,
-		MaxSlots:      maxSlotsWiring,
-		CIDBase:       uint32(cfg.Runtime.CIDBase),
-		Allocator:     alloc,
-		Preflight:     pfFunc,
+		StateDir:    cfg.Paths.State,
+		StageRoot:   filepath.Join(cfg.Paths.Runtime, "stage"),
+		JailBase:    filepath.Join(cfg.Paths.Runtime, "jail"),
+		SpoolRoot:   filepath.Join(cfg.Paths.State, "spool"),
+		RunnerBin:   runnerBin,
+		RepoRoot:    cfg.Paths.State,
+		LockPath:    cfg.Runtime.LockFile,
+		PrivdSocket: cfg.Paths.PrivilegedSocket,
+		JailUIDBase: cfg.Runtime.JailUIDBase,
+		JailGID:     cfg.Runtime.JailGID,
+		MaxSlots:    maxSlotsWiring,
+		CIDBase:     uint32(cfg.Runtime.CIDBase),
+		Allocator:   alloc,
+		Preflight:   pfFunc,
 	}
 
 	adapter, err := jailer.New(jCfg, pc)

@@ -237,7 +237,8 @@ func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (retErr error
 }
 
 // doStage builds the staging directory for the VM:
-//  1. Copy vmlinux + rootfs.ext4 from RepoImagesDir, verifying SHA-256 against the lock.
+//  1. Copy vmlinux + rootfs.ext4 from paths recorded in the lock (resolved against RepoRoot),
+//     verifying SHA-256 against the lock's pinned hashes.
 //  2. Generate a per-boot token, write to token file, and build config.ext4.
 //  3. Create workspace.ext4.
 //  4. Write fc-config.json.
@@ -247,11 +248,9 @@ func (a *Adapter) doStage(ctx context.Context, vmID, bootID string, cid uint32, 
 	if err != nil {
 		return fmt.Errorf("load lock: %w", err)
 	}
-	// Verify artifacts relative to the lock file's parent directory (repoRoot).
-	repoRoot := filepath.Dir(filepath.Dir(a.cfg.RepoImagesDir)) // parent of images/
-	// Actually: RepoImagesDir is the images/ dir. Lock paths are "images/vmlinux" etc.
-	// repoRoot = parent of RepoImagesDir.
-	repoRoot = filepath.Dir(a.cfg.RepoImagesDir)
+	// RepoRoot is the directory the lock's artifact paths resolve against.
+	// Lock paths like "images/dist/vmlinux" are relative to it — one source of truth.
+	repoRoot := a.cfg.RepoRoot
 	if mismatches := lk.VerifyArtifacts(repoRoot); len(mismatches) > 0 {
 		return fmt.Errorf("artifact hash mismatch: %+v", mismatches)
 	}
@@ -261,14 +260,14 @@ func (a *Adapter) doStage(ctx context.Context, vmID, bootID string, cid uint32, 
 		return fmt.Errorf("mkdir stage dir: %w", err)
 	}
 
-	// Copy vmlinux.
-	vmlinuxSrc := filepath.Join(a.cfg.RepoImagesDir, "vmlinux")
+	// Copy vmlinux — path comes from the lock, resolved against repoRoot.
+	vmlinuxSrc := filepath.Join(repoRoot, lk.GuestKernel.VmlinuxPath)
 	if err := copyFile(vmlinuxSrc, filepath.Join(stageDir, "vmlinux")); err != nil {
 		return fmt.Errorf("copy vmlinux: %w", err)
 	}
 
-	// Copy rootfs.ext4.
-	rootfsSrc := filepath.Join(a.cfg.RepoImagesDir, "rootfs.ext4")
+	// Copy rootfs.ext4 — path comes from the lock, resolved against repoRoot.
+	rootfsSrc := filepath.Join(repoRoot, lk.RootImage.Path)
 	if err := copyFile(rootfsSrc, filepath.Join(stageDir, "rootfs.ext4")); err != nil {
 		return fmt.Errorf("copy rootfs: %w", err)
 	}

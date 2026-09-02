@@ -265,13 +265,16 @@ func newRandomUUID() string {
 }
 
 // makeTestImagesDir creates a minimal images directory with fake vmlinux + rootfs files,
-// writes a lock.json with their real SHA-256s, and returns (imagesDir, lockPath, lockJSON).
-func makeTestImagesDir(t *testing.T) (imagesDir, lockPath string) {
+// writes a lock.json with repo-relative paths, and returns (repoRoot, lockPath).
+// repoRoot is the directory the lock's artifact paths resolve against.
+// Lock paths mirror the real runtime.lock.json layout: "images/dist/vmlinux" etc.
+func makeTestImagesDir(t *testing.T) (repoRoot, lockPath string) {
 	t.Helper()
 	dir := t.TempDir()
-	imagesDir = filepath.Join(dir, "images")
+	repoRoot = dir
+	imagesDir := filepath.Join(dir, "images", "dist")
 	if err := os.MkdirAll(imagesDir, 0o755); err != nil {
-		t.Fatalf("mkdir images: %v", err)
+		t.Fatalf("mkdir images/dist: %v", err)
 	}
 
 	vmlinuxContent := []byte("fake-vmlinux-for-jailer-test")
@@ -280,30 +283,32 @@ func makeTestImagesDir(t *testing.T) (imagesDir, lockPath string) {
 		t.Fatalf("write vmlinux: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(imagesDir, "rootfs.ext4"), rootfsContent, 0o644); err != nil {
-		t.Fatalf("write rootfs: %v", err)
+		t.Fatalf("write rootfs.ext4: %v", err)
 	}
 
 	vmlinuxSHA := sha256Hex(vmlinuxContent)
 	rootfsSHA := sha256Hex(rootfsContent)
 
-	// Lock paths are relative to the lock's containing directory (dir).
+	// Lock paths are relative to repoRoot (dir). Mirror the real lock layout.
 	lockPath = filepath.Join(dir, "runtime.lock.json")
 	lockBody := fmt.Sprintf(`{
 		"schema": "vmobs.runtime_lock.v1",
 		"firecracker": {"version": "v1.16.1", "sha256": "", "install_path": "/usr/local/bin/firecracker"},
 		"jailer": {"sha256": "", "install_path": "/usr/local/bin/jailer"},
 		"host_support": {"arch": "amd64", "min_kernel": "5.10"},
-		"guest_kernel": {"version": "6.1.186", "vmlinux_sha256": %q, "vmlinux_path": "images/vmlinux"},
-		"root_image": {"sha256": %q, "path": "images/rootfs.ext4"},
+		"guest_kernel": {"version": "6.1.186", "vmlinux_sha256": %q, "vmlinux_path": "images/dist/vmlinux"},
+		"root_image": {"sha256": %q, "path": "images/dist/rootfs.ext4"},
 		"guestd": {"protocol_version": 1}
 	}`, vmlinuxSHA, rootfsSHA)
 	if err := os.WriteFile(lockPath, []byte(lockBody), 0o644); err != nil {
 		t.Fatalf("write lock: %v", err)
 	}
-	// imagesDir must be accessible relative to the lock file's parent dir.
-	// The lock verifier resolves vmlinux_path relative to repoRoot which the adapter
-	// passes as the parent of the lock file.
-	return imagesDir, lockPath
+	// RepoRoot (dir) is the base the lock's "images/dist/..." paths resolve against.
+	// Under the old broken arithmetic (filepath.Dir(RepoImagesDir) where
+	// RepoImagesDir = dir/images/dist), repoRoot was dir/images — causing
+	// VerifyArtifacts to look for dir/images/images/dist/vmlinux (absent).
+	// With RepoRoot = dir, VerifyArtifacts resolves dir/images/dist/vmlinux correctly.
+	return repoRoot, lockPath
 }
 
 // guestdServer serves a guestd-style handshake on a UDS path, reading the capability token
@@ -441,10 +446,7 @@ func TestLaunchTransactionAgainstFakePrivd(t *testing.T) {
 		}
 	}
 
-	imagesDir, lockPath := makeTestImagesDir(t)
-	// The lock verifier resolves paths relative to repoRoot = parent of images/.
-	lockRepoRoot := filepath.Dir(imagesDir)
-	_ = lockRepoRoot // passed as LockPath parent in Config
+	repoRoot, lockPath := makeTestImagesDir(t)
 
 	vmID := "vm-launch-test"
 	bootID := "boot-" + newRandomUUID()
@@ -487,18 +489,18 @@ func TestLaunchTransactionAgainstFakePrivd(t *testing.T) {
 	}
 
 	cfg := jailer.Config{
-		StateDir:      stateDir,
-		StageRoot:     stageRoot,
-		JailBase:      jailBase,
-		SpoolRoot:     spoolRoot,
-		RunnerBin:     runnerBin,
-		RepoImagesDir: imagesDir,
-		LockPath:      lockPath,
-		JailUIDBase:   os.Getuid(),
-		JailGID:       os.Getgid(),
-		MaxSlots:      8,
-		CIDBase:       3,
-		Allocator:     pool,
+		StateDir:    stateDir,
+		StageRoot:   stageRoot,
+		JailBase:    jailBase,
+		SpoolRoot:   spoolRoot,
+		RunnerBin:   runnerBin,
+		RepoRoot:    repoRoot,
+		LockPath:    lockPath,
+		JailUIDBase: os.Getuid(),
+		JailGID:     os.Getgid(),
+		MaxSlots:    8,
+		CIDBase:     3,
+		Allocator:   pool,
 		Preflight: func(ctx context.Context, refresh bool) preflight.Report {
 			return preflight.Report{Overall: preflight.StatusPass}
 		},
@@ -563,9 +565,9 @@ func TestLaunchDigestTamperingBlocksNetwork(t *testing.T) {
 		}
 	}
 
-	imagesDir := filepath.Join(dir, "images")
+	imagesDir := filepath.Join(dir, "images", "dist")
 	if err := os.MkdirAll(imagesDir, 0o755); err != nil {
-		t.Fatalf("mkdir images: %v", err)
+		t.Fatalf("mkdir images/dist: %v", err)
 	}
 
 	// Write real files.
@@ -585,8 +587,8 @@ func TestLaunchDigestTamperingBlocksNetwork(t *testing.T) {
 		"firecracker": {"version": "v1.16.1", "sha256": "", "install_path": "/usr/local/bin/firecracker"},
 		"jailer": {"sha256": "", "install_path": "/usr/local/bin/jailer"},
 		"host_support": {"arch": "amd64", "min_kernel": "5.10"},
-		"guest_kernel": {"version": "6.1.186", "vmlinux_sha256": %q, "vmlinux_path": "images/vmlinux"},
-		"root_image": {"sha256": %q, "path": "images/rootfs.ext4"},
+		"guest_kernel": {"version": "6.1.186", "vmlinux_sha256": %q, "vmlinux_path": "images/dist/vmlinux"},
+		"root_image": {"sha256": %q, "path": "images/dist/rootfs.ext4"},
 		"guestd": {"protocol_version": 1}
 	}`, wrongSHA, wrongSHA)
 	if err := os.WriteFile(lockPath, []byte(lockBody), 0o644); err != nil {
@@ -599,18 +601,18 @@ func TestLaunchDigestTamperingBlocksNetwork(t *testing.T) {
 	}
 
 	cfg := jailer.Config{
-		StateDir:      stateDir,
-		StageRoot:     stageRoot,
-		JailBase:      jailBase,
-		SpoolRoot:     spoolRoot,
-		RunnerBin:     runnerBin,
-		RepoImagesDir: imagesDir,
-		LockPath:      lockPath,
-		JailUIDBase:   os.Getuid(),
-		JailGID:       os.Getgid(),
-		MaxSlots:      8,
-		CIDBase:       3,
-		Allocator:     pool,
+		StateDir:    stateDir,
+		StageRoot:   stageRoot,
+		JailBase:    jailBase,
+		SpoolRoot:   spoolRoot,
+		RunnerBin:   runnerBin,
+		RepoRoot:    dir,
+		LockPath:    lockPath,
+		JailUIDBase: os.Getuid(),
+		JailGID:     os.Getgid(),
+		MaxSlots:    8,
+		CIDBase:     3,
+		Allocator:   pool,
 		Preflight: func(ctx context.Context, refresh bool) preflight.Report {
 			return preflight.Report{Overall: preflight.StatusPass}
 		},

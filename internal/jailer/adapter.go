@@ -27,13 +27,13 @@ type privdClient interface {
 
 // Config holds all static configuration for the Adapter.
 type Config struct {
-	StateDir      string // <StateDir>/vms/<id>/ holds per-VM manifests, tokens, runner state
-	StageRoot     string // staging directories live under <StageRoot>/<id>/
-	JailBase      string // jailer chroot base; vsock path is <JailBase>/firecracker/<id>/root/v.sock
-	SpoolRoot     string // spool directories live under <SpoolRoot>/<id>/
-	RunnerBin     string // absolute path to the vmobs-runner binary
-	RepoImagesDir string // directory containing vmlinux and rootfs.ext4
-	LockPath      string // path to runtime.lock.json
+	StateDir  string // <StateDir>/vms/<id>/ holds per-VM manifests, tokens, runner state
+	StageRoot string // staging directories live under <StageRoot>/<id>/
+	JailBase  string // jailer chroot base; vsock path is <JailBase>/firecracker/<id>/root/v.sock
+	SpoolRoot string // spool directories live under <SpoolRoot>/<id>/
+	RunnerBin string // absolute path to the vmobs-runner binary
+	RepoRoot  string // directory the lock's artifact paths resolve against (repo/state root)
+	LockPath  string // path to runtime.lock.json
 
 	// PrivdSocket is the path to the vmobs-privd unix socket. Used by the
 	// guest_channel preflight check (connect + close with a 1s timeout).
@@ -62,7 +62,7 @@ type Adapter struct {
 // New constructs an Adapter. Returns an error if cfg is obviously invalid.
 func New(cfg Config, pc privdClient) (*Adapter, error) {
 	if cfg.StateDir == "" || cfg.StageRoot == "" || cfg.JailBase == "" ||
-		cfg.SpoolRoot == "" || cfg.RunnerBin == "" || cfg.RepoImagesDir == "" ||
+		cfg.SpoolRoot == "" || cfg.RunnerBin == "" || cfg.RepoRoot == "" ||
 		cfg.LockPath == "" {
 		return nil, errors.New("jailer: Config missing required path field")
 	}
