@@ -248,7 +248,10 @@ func TestBootConfigSchema(t *testing.T) {
 
 // TestCIDDerivation checks that CID = 3+n for n ∈ {0,1} matches the fixture invariant.
 func TestCIDDerivation(t *testing.T) {
-	cases := []struct{ n int; wantCID uint32 }{
+	cases := []struct {
+		n       int
+		wantCID uint32
+	}{
 		{0, 3},
 		{1, 4},
 		{9, 12},

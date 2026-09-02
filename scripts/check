@@ -12,7 +12,7 @@ fi
 fail=0
 note() { printf '%s\n' "$*"; }
 
-unformatted=$(gofmt -l cmd internal 2>/dev/null)
+unformatted=$(gofmt -l cmd internal tests 2>/dev/null)
 if [ -n "$unformatted" ]; then
   note "FAIL gofmt — run: gofmt -w $unformatted"
   fail=1
