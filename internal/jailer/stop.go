@@ -168,13 +168,18 @@ func (a *Adapter) doStop(ctx context.Context, vmID string, grace time.Duration, 
 
 	if !graceful {
 		forced = true
-		// SIGTERM then SIGKILL on the VMM via privd.
 		if m.VMMPID > 0 {
-			termCtx, termCancel := context.WithTimeout(ctx, 10*time.Second)
-			defer termCancel()
-			_ = a.pc.SignalVM(termCtx, privd.SignalVMReq{VMID: vmID, Kind: "term"})
-			time.Sleep(5 * time.Second)
-			_ = a.pc.SignalVM(termCtx, privd.SignalVMReq{VMID: vmID, Kind: "kill"})
+			signalCtx, signalCancel := context.WithTimeout(ctx, 10*time.Second)
+			defer signalCancel()
+			// ForceStop goes straight to SIGKILL; graceful-timeout path sends SIGTERM first.
+			if !forceImmediate {
+				_ = a.pc.SignalVM(signalCtx, privd.SignalVMReq{VMID: vmID, Kind: "term"})
+				select {
+				case <-time.After(5 * time.Second):
+				case <-ctx.Done():
+				}
+			}
+			_ = a.pc.SignalVM(signalCtx, privd.SignalVMReq{VMID: vmID, Kind: "kill"})
 		}
 	}
 
@@ -228,15 +233,15 @@ func (a *Adapter) doRelease(ctx context.Context, vmID string) error {
 	}
 
 	// Remove stage dir (disk images + fc-config.json).
-	if stageSet[stageStaged] {
-		stageDir := filepath.Join(a.cfg.StageRoot, vmID)
-		if err := os.RemoveAll(stageDir); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("jailer release %s: remove stage dir: %w", vmID, err)
-		}
+	// os.RemoveAll on a missing path is a no-op — no stage guard needed.
+	stageDir := filepath.Join(a.cfg.StageRoot, vmID)
+	if err := os.RemoveAll(stageDir); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("jailer release %s: remove stage dir: %w", vmID, err)
 	}
 
 	// Remove <StateDir>/vms/<id>/ — includes manifest.json, token, runner-state.json, etc.
 	// This must be last so the manifest is still readable until all other cleanup is done.
+	// os.RemoveAll on a missing path is a no-op — no stage guard needed.
 	vmStateDir := filepath.Join(a.cfg.StateDir, "vms", vmID)
 	if err := os.RemoveAll(vmStateDir); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("jailer release %s: remove state dir: %w", vmID, err)
@@ -355,7 +360,7 @@ func buildRunnerCmd(argv []string, logFile *os.File) *exec.Cmd {
 // respawnRunner spawns a fresh runner process for a VM whose runner died but
 // whose VMM is still alive. A fresh instance-id is minted to avoid dedup collisions
 // in the spool importer (which deduplicates on (source_instance_id, source_seq)).
-func (a *Adapter) respawnRunner(ctx context.Context, m Manifest) error {
+func (a *Adapter) respawnRunner(_ context.Context, m Manifest) error {
 	instanceID := uuid.NewString()
 	vmID := m.VMID
 
@@ -402,12 +407,8 @@ func (a *Adapter) respawnRunner(ctx context.Context, m Manifest) error {
 		fmt.Fprintf(os.Stderr, "jailer: reconcile: warn: update manifest runner_pid for %s: %v\n", vmID, err)
 	}
 
-	// Wait for the runner to reach attached.
-	attachCtx, attachCancel := context.WithTimeout(ctx, 30*time.Second)
-	defer attachCancel()
-	if err := a.waitAttached(attachCtx, stateFile, cmd); err != nil {
-		return fmt.Errorf("wait for respawned runner to attach: %w", err)
-	}
-
+	// Do NOT wait for the runner to attach here. The runner attaches on its own;
+	// its state file is the source of truth. Blocking here would stall daemon
+	// startup on guest handshakes — Task 12 wires Reconcile into startup.
 	return nil
 }

@@ -7,7 +7,7 @@ package jailer_test
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -171,20 +171,11 @@ func TestStopGraceful(t *testing.T) {
 
 	// Runner must reach finalized.
 	stateFile := filepath.Join(stateDir, "vms", vmID, "runner-state.json")
-	var lastPhase string
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		s, err := runner.ReadState(stateFile)
-		if err == nil {
-			lastPhase = s.Phase
-			if s.Phase == runner.PhaseFinalized {
-				break
-			}
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	if lastPhase != runner.PhaseFinalized {
-		t.Errorf("runner phase = %q, want finalized", lastPhase)
+	pollCtx, pollCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer pollCancel()
+	s, _ := jailer.PollRunnerPhase(pollCtx, stateFile, runner.PhaseFinalized)
+	if s.Phase != runner.PhaseFinalized {
+		t.Errorf("runner phase = %q, want finalized", s.Phase)
 	}
 
 	// No signal_vm should have been called (guest powered off gracefully).
@@ -256,18 +247,25 @@ func TestForceStopSendsKill(t *testing.T) {
 		t.Fatalf("ForceStop: %v", err)
 	}
 
-	// Must have seen a kill signal.
+	// Must have seen a kill signal and must NOT have seen a term signal.
 	gotKill := false
+	gotTerm := false
 	for _, call := range backend.signalCalls {
 		if len(call) >= len(vmID) && call[:len(vmID)] == vmID {
 			suffix := call[len(vmID)+1:]
 			if suffix == "kill" {
 				gotKill = true
 			}
+			if suffix == "term" {
+				gotTerm = true
+			}
 		}
 	}
 	if !gotKill {
 		t.Errorf("expected signal_vm kill for ForceStop, backend signals: %v", backend.signalCalls)
+	}
+	if gotTerm {
+		t.Errorf("ForceStop must not send SIGTERM, backend signals: %v", backend.signalCalls)
 	}
 }
 
@@ -597,12 +595,12 @@ func isUnavailableError(err error, out **runtime.UnavailableError) bool {
 	if err == nil {
 		return false
 	}
-	ue, ok := err.(*runtime.UnavailableError)
-	if ok && out != nil {
-		*out = ue
+	var ue *runtime.UnavailableError
+	if errors.As(err, &ue) {
+		if out != nil {
+			*out = ue
+		}
+		return true
 	}
-	return ok
+	return false
 }
-
-// Dummy use of fmt for the test file.
-var _ = fmt.Sprintf

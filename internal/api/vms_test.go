@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	sysruntime "runtime"
 	"strings"
 	"testing"
 	"time"
@@ -310,11 +311,17 @@ func TestHostStatusPreflightGuestChannelPresent(t *testing.T) {
 	if guestChannel == nil {
 		t.Fatal("guest_channel check absent from preflight block")
 	}
-	// On non-Linux: not_implemented. On Linux without PrivdSocket: fail.
-	// Both are honest; the important invariant is presence.
 	st, _ := guestChannel["status"].(string)
-	if st == "" {
-		t.Error("guest_channel check has empty status")
+	if sysruntime.GOOS == "linux" {
+		// Linux with no PrivdSocket configured → fail.
+		if st != "fail" {
+			t.Errorf("guest_channel status = %q on linux with no PrivdSocket, want fail", st)
+		}
+	} else {
+		// Non-Linux: not_implemented.
+		if st != "not_implemented" {
+			t.Errorf("guest_channel status = %q on non-linux, want not_implemented", st)
+		}
 	}
 	t.Logf("guest_channel status on this platform: %s", st)
 }

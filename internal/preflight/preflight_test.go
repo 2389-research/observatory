@@ -395,7 +395,7 @@ func TestAPIBindingBadConfig(t *testing.T) {
 // --- guest_channel ---
 
 // TestGuestChannelPresent verifies that the guest_channel check is always present
-// in the report (regardless of platform or outcome).
+// in the report and produces the exact expected status per platform.
 func TestGuestChannelPresent(t *testing.T) {
 	r := preflight.New(preflight.Config{DataDir: t.TempDir()})
 	report := r.Run(t.Context())
@@ -404,11 +404,16 @@ func TestGuestChannelPresent(t *testing.T) {
 	if gc == nil {
 		t.Fatal("guest_channel check not present in report")
 	}
-	// On non-Linux: not_implemented.
-	// On Linux with empty PrivdSocket/StageRoot: fail.
-	// Either is valid — the check must be present with a non-empty status.
-	if gc.Status == "" {
-		t.Errorf("guest_channel status is empty")
+	if runtime.GOOS == "linux" {
+		// Linux with empty PrivdSocket configured → fail.
+		if gc.Status != preflight.StatusFail {
+			t.Errorf("guest_channel status = %q on linux with no PrivdSocket, want fail", gc.Status)
+		}
+	} else {
+		// Non-Linux → not_implemented.
+		if gc.Status != preflight.StatusNotImplemented {
+			t.Errorf("guest_channel status = %q on non-linux, want not_implemented", gc.Status)
+		}
 	}
 	t.Logf("guest_channel: %s — %s", gc.Status, gc.Summary)
 }
