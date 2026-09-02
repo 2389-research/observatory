@@ -428,12 +428,13 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready f
 	//	if st == StateNew && unixSec < time.Now().Unix()-5 {
 	//
 	// Three details put that clock out of a 5s budget's reach. It starts when the
-	// connection was created, not when shutdown began. unixSec compares whole
+	// connection was accepted, not when shutdown began. unixSec compares whole
 	// seconds, so the grace runs 5–6s rather than 5s. And Shutdown only re-checks
 	// on an interval that ramps to shutdownPollIntervalMax (500ms), so it can
 	// miss a reclaim it did not cause. Worst case the connection clears ~6.5s
-	// after it appeared, and any client holding an idle pooled connection at
-	// SIGTERM — a browser pre-connect, any pooled Go client — leaves one behind.
+	// after it was accepted, and any client holding an idle but never used pooled
+	// connection at SIGTERM — a browser pre-connect, any pooled Go client — leaves
+	// one behind.
 	// A 5s budget was structurally unable to win that race and turned ordinary
 	// shutdowns into "context deadline exceeded".
 	//
