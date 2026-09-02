@@ -902,7 +902,8 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 // (not graceful) using the manager's existing transition helpers — one write path.
 //
 // Already-terminal VMs (failed, stopped, deleted, …) are a no-op: importer
-// replays are normal and must not cause errors. Unknown VMs return nil.
+// replays are normal and must not cause errors. VMs in "stopping" are a no-op
+// as well — that stop belongs to whoever started it. Unknown VMs return nil.
 func (m *Manager) NotifyVMMExit(ctx context.Context, vmID, reason string, graceful bool) error {
 	vm, err := m.st.GetVM(ctx, vmID)
 	if err != nil {
@@ -913,6 +914,18 @@ func (m *Manager) NotifyVMMExit(ctx context.Context, vmID, reason string, gracef
 	// Terminal states: already done, nothing to do.
 	switch vm.ObservedState {
 	case "stopped", "failed", "deleted", "deleting":
+		return nil
+	}
+
+	// "stopping" is not terminal — it is owned. Whoever put the VM there (a stop
+	// or force_stop action, Delete's force path, a batch stop wave) holds the
+	// graceful-vs-forced determination that only rt.Stop knows, and will record
+	// the terminal transition itself with that reason; its operation record
+	// depends on making that write. Finishing the stop here steals the
+	// transition, loses the determination, and leaves the initiator's tail
+	// answering 409 invalid_transition stopped→stopped for a stop that worked.
+	// An orphaned "stopping" row — initiator died — is Reconcile's to recover.
+	if vm.ObservedState == "stopping" {
 		return nil
 	}
 

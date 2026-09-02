@@ -1412,3 +1412,150 @@ func TestNotifyVMMExitEarlyLifecycleGracefulGoesToFailed(t *testing.T) {
 	close(unblock)
 	mgr.Close()
 }
+
+// waitForFakeCall blocks until the fake records a call of method against vmID.
+// Pair it with fk.Block(method, vmID): once the call is in the log, the manager
+// is parked inside that runtime call and every write it makes beforehand has
+// committed.
+func waitForFakeCall(t *testing.T, fk *runtimetest.Fake, vmID, method string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if slices.ContainsFunc(fk.CallsFor(vmID), func(c runtimetest.Call) bool {
+			return c.Method == method
+		}) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("runtime never reached %s for vm %s", method, vmID)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// lastStateChangeReason returns the reason of the newest vm.state_changed event
+// for vmID. Store-synthesized vm.* events ride the host stream with a NULL vm_id
+// column; store.Query matches data.vm_id as well, so the VMID filter finds them.
+func lastStateChangeReason(t *testing.T, st *store.Store, vmID string) string {
+	t.Helper()
+	res, err := st.Query(t.Context(), store.Query{VMID: &vmID, Kind: "vm.state_changed", Limit: 100})
+	if err != nil {
+		t.Fatalf("Query vm.state_changed: %v", err)
+	}
+	if len(res.Events) == 0 {
+		t.Fatalf("no vm.state_changed events for vm %s", vmID)
+	}
+	last := res.Events[len(res.Events)-1]
+	reason, _ := last.Data["reason"].(string)
+	return reason
+}
+
+// parkStopInRuntime starts a stop action on vmID and returns once the manager is
+// parked inside rt.Stop — the VM frozen in "stopping", the action still owning
+// the row. release() unblocks rt.Stop and returns the action's outcome.
+func parkStopInRuntime(t *testing.T, st *store.Store, mgr *runtime.Manager, fk *runtimetest.Fake, vmID string) (parked *store.VM, release func() (*store.Operation, error)) {
+	t.Helper()
+	gate := fk.Block("Stop", vmID)
+	type outcome struct {
+		op  *store.Operation
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		_, op, err := mgr.Action(t.Context(), vmID, "stop", nil)
+		done <- outcome{op: op, err: err}
+	}()
+	waitForFakeCall(t, fk, vmID, "Stop")
+
+	// doAction writes running→stopping before calling rt.Stop, so the row is
+	// already parked by the time the Stop call shows up in the fake's log.
+	parked, err := st.GetVM(t.Context(), vmID)
+	if err != nil {
+		t.Fatalf("GetVM while parked in rt.Stop: %v", err)
+	}
+	if parked.ObservedState != "stopping" {
+		t.Fatalf("pre-condition: want stopping (parked in rt.Stop), got %q", parked.ObservedState)
+	}
+	return parked, func() (*store.Operation, error) {
+		close(gate)
+		res := <-done
+		return res.op, res.err
+	}
+}
+
+// TestNotifyVMMExitStoppingIsNoOp verifies the importer leaves a "stopping" VM
+// alone. A stopping VM has an initiator — an action, a delete, or a batch wave —
+// which holds the graceful-vs-forced determination and will record the terminal
+// transition itself. NotifyVMMExit exists to catch VMM exits nobody asked for.
+func TestNotifyVMMExitStoppingIsNoOp(t *testing.T) {
+	st := openStoreForManager(t)
+	fk := runtimetest.NewFake()
+	mgr := newManager(t, st, fk)
+
+	vm := launchedVM(t, st, mgr, "notify-stopping")
+	parked, release := parkStopInRuntime(t, st, mgr, fk, vm.VMID)
+
+	if err := mgr.NotifyVMMExit(t.Context(), vm.VMID, "vmm_exited observed by runner", true); err != nil {
+		t.Fatalf("NotifyVMMExit on a stopping VM: %v", err)
+	}
+
+	after, err := st.GetVM(t.Context(), vm.VMID)
+	if err != nil {
+		t.Fatalf("GetVM after notify: %v", err)
+	}
+	if after.ObservedState != "stopping" {
+		t.Errorf("state after notify: want stopping (untouched), got %q", after.ObservedState)
+	}
+	if after.Revision != parked.Revision {
+		t.Errorf("revision after notify: want %d (untouched), got %d", parked.Revision, after.Revision)
+	}
+	if after.LastEventID != parked.LastEventID {
+		t.Errorf("last_event_id after notify: want %d (no event written), got %d", parked.LastEventID, after.LastEventID)
+	}
+	if got := lastStateChangeReason(t, st, vm.VMID); got != "stop_requested" {
+		t.Errorf("newest state-change reason: want stop_requested (the initiator's), got %q", got)
+	}
+
+	if _, err := release(); err != nil {
+		t.Fatalf("stop action after the notice: %v", err)
+	}
+}
+
+// TestStopActionOutlivesConcurrentVMMExitNotice is the live-gate race made
+// deterministic: rt.Stop holds the window open for seconds tearing down the
+// jail while the spool importer ticks and sees the guest's vm.vmm_exited
+// envelope. The action must still succeed, still end stopped, and still record
+// its own graceful-vs-forced determination.
+func TestStopActionOutlivesConcurrentVMMExitNotice(t *testing.T) {
+	st := openStoreForManager(t)
+	fk := runtimetest.NewFake()
+	mgr := newManager(t, st, fk)
+
+	vm := launchedVM(t, st, mgr, "stop-vs-importer")
+	_, release := parkStopInRuntime(t, st, mgr, fk, vm.VMID)
+
+	// The importer fires while the action is inside rt.Stop.
+	if err := mgr.NotifyVMMExit(t.Context(), vm.VMID, "vmm_exited observed by runner", true); err != nil {
+		t.Fatalf("NotifyVMMExit during rt.Stop: %v", err)
+	}
+
+	op, err := release()
+	if err != nil {
+		t.Fatalf("stop action lost the race with the importer: %v", err)
+	}
+	if op == nil || op.State != "succeeded" {
+		t.Errorf("stop operation state: want succeeded, got %+v", op)
+	}
+
+	final, err := st.GetVM(t.Context(), vm.VMID)
+	if err != nil {
+		t.Fatalf("GetVM after stop: %v", err)
+	}
+	if final.ObservedState != "stopped" {
+		t.Errorf("state after stop: want stopped, got %q", final.ObservedState)
+	}
+	// The determination only rt.Stop knows must survive on the terminal transition.
+	if got := lastStateChangeReason(t, st, vm.VMID); got != "graceful_stop" {
+		t.Errorf("terminal state-change reason: want graceful_stop, got %q", got)
+	}
+}
