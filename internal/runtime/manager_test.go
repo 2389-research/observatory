@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1091,7 +1092,7 @@ func TestNotifyVMMExitSecondCallNoOp(t *testing.T) {
 // TestNotifyVMMExitProvisioningGracefulGoesToFailed verifies that a provisioning-state VM
 // routes to failed regardless of graceful=true (§5.2: provisioning→stopped is not a valid
 // transition; the VMM never reached running so failed is the honest outcome).
-func TestNotifyVMMExitProvisioningGracefulGoesToFailed(t *testing.T) {
+func TestNotifyVMMExitEarlyLifecycleGracefulGoesToFailed(t *testing.T) {
 	st := openStoreForManager(t)
 	fk := runtimetest.NewFake()
 	mgr, err := runtime.NewManager(st, fk, defaultCfg())
@@ -1099,21 +1100,34 @@ func TestNotifyVMMExitProvisioningGracefulGoesToFailed(t *testing.T) {
 		t.Fatalf("NewManager: %v", err)
 	}
 
-	vm, _, _, err := mgr.CreateVM(t.Context(), "local_operator", createReq("notify-prov-graceful"))
+	vm, _, _, err := mgr.CreateVM(t.Context(), "local_operator", createReq("notify-early-graceful"))
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
 
-	// Block Launch so the VM stays in provisioning.
+	// Park the launch worker inside rt.Launch. The worker writes
+	// provisioning→starting BEFORE calling Launch, so once the Launch call is
+	// visible in the fake's log the VM is frozen in "starting" until unblock.
 	unblock := fk.Block("Launch", vm.VMID)
-
-	// Confirm provisioning before we call NotifyVMMExit.
+	launchSeen := func() bool {
+		return slices.ContainsFunc(fk.CallsFor(vm.VMID), func(c runtimetest.Call) bool {
+			return c.Method == "Launch"
+		})
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !launchSeen() {
+		if time.Now().After(deadline) {
+			t.Fatal("launch worker never reached rt.Launch")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
 	vmNow, _ := st.GetVM(t.Context(), vm.VMID)
-	if vmNow == nil || vmNow.ObservedState != "provisioning" {
-		t.Fatalf("pre-condition: want provisioning, got %q", vmNow.ObservedState)
+	if vmNow == nil || vmNow.ObservedState != "starting" {
+		t.Fatalf("pre-condition: want starting (parked in Launch), got %+v", vmNow)
 	}
 
-	// graceful=true on a provisioning VM must still route to failed, not stopped.
+	// graceful=true on an early-lifecycle VM must still route to failed, not
+	// stopped — the VM never reached running, so the launch did not complete.
 	if err := mgr.NotifyVMMExit(t.Context(), vm.VMID, "early exit", true); err != nil {
 		t.Fatalf("NotifyVMMExit: %v", err)
 	}
