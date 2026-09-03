@@ -63,7 +63,7 @@ The helper is invoked via `sudo vmobs-root-helper <verb> <args>`. All arguments 
 
 After launching the jailer, `jail-start` waits (≤10s) for firecracker to bind `v.sock`, then reopens the chroot root dir to `0750`. Jailer chmods that dir to `0700` (uid-owned) during its own chroot prep, which locks the fixture group out of the socket path; the socket bind strictly follows jailer's prep, so re-chmodding after it appears cannot be raced back to `0700`. The socket itself is group-writable via the `umask 0002` set before the jailer runs.
 
-`jail-stop` reads the PID from `$JAIL_BASE/firecracker/<id>/root/firecracker.pid`, which is where the jailer writes it when `--daemonize` is used (per the Firecracker/jailer v1.16.1 documentation). The process title is `firecracker --id=<id> ...` (using `=`, not space), so pgrep string matching is unreliable; the pid file is the authoritative source.
+`jail-stop` reads the PID from `$JAIL_BASE/firecracker/<id>/root/firecracker.pid`, which is where the jailer writes it when `--daemonize` is used (per the Firecracker/jailer v1.16.1 documentation). Matching on the process title instead would be unreliable: every path under the jail carries the VM id, so `pgrep -f <id>` also matches a runner dialing that jail's `v.sock`, and a pattern that pins the flag depends on jailer's exact argv spelling (v1.16.1 passes `--id` and the id as two separate elements). The pid file is the authoritative source.
 
 ## `vmobs-privd` — the M1 privilege daemon
 
