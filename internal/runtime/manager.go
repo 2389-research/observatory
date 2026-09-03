@@ -1014,19 +1014,23 @@ func (m *Manager) Delete(ctx context.Context, vmID string, force bool, expectedR
 	}
 
 	// R1: release before flipping the row to "deleted". The invariant this keeps
-	// is scoped to what Release owns -- the network allocation, the stage dir, and
-	// <StateDir>/vms/<id>/ (internal/jailer/stop.go): no VM row reads "deleted"
-	// while any of those survive, because a real error here fails the delete and
-	// leaves the row in "deleting". UnavailableError is the one tolerated failure
-	// -- a runtime absent on startup reconcile is normal and must not wedge
-	// deletes.
+	// is scoped to what Release owns -- the network allocation, the stage dir and
+	// <StateDir>/vms/<id>/, and, when the manifest is already gone, the jail
+	// chroot and privd's ledger entry too (internal/jailer/stop.go): no VM row
+	// reads "deleted" while any of those survive, because a real error here fails
+	// the delete and leaves the row in "deleting". UnavailableError is the one
+	// tolerated failure -- a runtime absent on startup reconcile is normal and
+	// must not wedge deletes.
 	//
-	// Release owns neither the jail chroot nor privd's ledger entry, and nothing
-	// on this path establishes that the VM died. The force-stop above returns nil
-	// whether or not it killed anything: doStop's forced path drops its SignalVM
-	// errors, and it logs-and-discards the final ReleaseVM failure rather than
-	// report a genuinely-dead VM's stop as failed (internal/jailer/stop.go). So
-	// three things can unintentionally outlive a "deleted" row --
+	// With a manifest present Release owns neither the jail chroot nor the ledger
+	// entry, and nothing on this path establishes that the VM died. The force-stop
+	// above runs only from a live state, and it returns nil whether or not it
+	// killed anything: doStop's forced path drops its SignalVM errors, and it
+	// logs-and-discards the final ReleaseVM failure rather than report a
+	// genuinely-dead VM's stop as failed (internal/jailer/stop.go). A guest that
+	// shut itself down is never even asked -- NotifyVMMExit takes the row to
+	// "stopped" without a runtime call, so the delete that follows force-stops
+	// nothing. So three things can unintentionally outlive a "deleted" row --
 	// <JailBase>/firecracker/<vmID> on disk, a pinned privd ledger entry, and the
 	// VM process itself. Sweeping those needs the M1b cleanup backlog, not this
 	// call.
@@ -1130,7 +1134,11 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 			// Complete the idempotent delete, keeping the R1 invariant Delete
 			// states above: no VM row reads "deleted" while the resources
 			// Release owns -- the network allocation, the stage dir and
-			// <StateDir>/vms/<id>/ -- survive it. A controller that died
+			// <StateDir>/vms/<id>/, plus the jail chroot and privd ledger entry
+			// whenever the manifest is already gone -- survive it. A row that
+			// reaches here is disproportionately in that last state: it is a
+			// delete that was interrupted, and doRollback removes the state dir
+			// whether or not its own release landed (internal/jailer/launch.go). A controller that died
 			// mid-delete can leave the row at "deleting" with the release never
 			// attempted, and Delete refuses to retry: it returns early for both
 			// "deleted" and "deleting". So this is the only retry there is, and

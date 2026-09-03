@@ -299,12 +299,18 @@ func (s *Server) handleStartVM(raw json.RawMessage) Response {
 	if err != nil {
 		// StartVM fails after it has already built <JailBase>/firecracker/<id>
 		// and copied the boot artifacts into it, and it can fail with
-		// firecracker already running and its pid reported to no one. Neither
-		// survivor is recoverable through any other verb: the ledger write
-		// below never runs, so the entry keeps PID 0, and release_vm removes a
-		// tree only for a VM the ledger says exists at a pid it can check. Roll
-		// back best-effort and surface the original cause unchanged — the same
-		// discipline handleAllocateNetwork uses above.
+		// firecracker already running and its pid reported to no one.
+		//
+		// Of those two survivors, the tree is the one another verb could still
+		// reach: allocate_network's entry is in the ledger with PID 0, so
+		// handleReleaseVM's alive gate does not apply to it and Ops.ReleaseVM
+		// removes the tree unconditionally. The live VMM is what nothing else
+		// can reach. Its pid is recorded nowhere — the ledger write below never
+		// runs, and the jailer's manifest is written only after start_vm
+		// returns — so no verb can name it and no scan will find it. That alone
+		// is why this rollback exists. Roll back best-effort and surface the
+		// original cause unchanged — the same discipline handleAllocateNetwork
+		// uses above.
 		//
 		// Removing the tree here cannot destroy a previous boot's live chroot.
 		// A VM whose start succeeded has a non-zero entry.PID and is refused

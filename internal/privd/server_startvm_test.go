@@ -116,9 +116,11 @@ func startVM(t *testing.T, s *Server, vmID, stageDir string) Response {
 }
 
 // TestStartVMFailureRollsBackPartialStart: a StartVM that fails after building
-// the jail tree must not leave it behind. Nothing else can reclaim it — the
-// ledger write never runs, so the entry keeps PID 0, and release_vm only removes
-// a tree for a VM whose recorded pid it can check.
+// the jail tree must not leave it behind. A later release_vm could reclaim the
+// tree — the entry allocate_network wrote is still in the ledger with PID 0 —
+// but a firecracker the same failure left running could not be: the ledger write
+// never runs, so its pid is recorded nowhere. Rolling back here is the only
+// chance either survivor gets while anything still knows they exist.
 func TestStartVMFailureRollsBackPartialStart(t *testing.T) {
 	s, ops, stageDir := startVMFixture(t)
 	const vmID = "vm-rollback"
