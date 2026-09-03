@@ -90,11 +90,21 @@ committed at tests/integration/evidence/m1a-gate-aibox03.txt; the two runs' evid
 for UUIDs/timestamps/pid/temp-dir, is byte-identical. A §15.3 scan of all 33 evidence lines for
 token/secret/bearer/authorization/password/key= found nothing, both runs. AT-005 draws on a
 separate test binary and is noted at its own row.
+Runtime lock at aa12929 (runtime.lock.json, unchanged since the 0881e69 rootfs re-pin): vmlinux
+b6067686…, rootfs c6a92bba…, firecracker 2fd01713…, jailer 1f3a0c1f…. The daemon verifies both
+binaries against the lock at startup (cmd/vmobsd/main.go:197) and every launch verifies both
+images against it before staging (internal/jailer/launch.go:258), so a passing run proves the
+artifacts matched those digests. The evidence file itself records no digest — unlike M0's, which
+carries a "Lock artifact verification" section — so these are read from the lock at the gate
+commit, not captured on the host.
 
 AT-001: TESTED_PASS.
   Completes the M0 note. A second real vmobsd daemon, pointed at a nonexistent privd socket, is
-  sent a real POST /vms; the refusal happens before any provisioning side effect and names the
-  failing check.
+  sent a real POST /vms; the refusal names the failing check. That it happens before any
+  provisioning side effect is by construction (internal/runtime/manager.go:411-414 checks
+  availability before the row insert at :492), not by assertion: the gate checks only the
+  response body (m1a_gate_test.go:1470-1512) and never inspects the refusing daemon's store or
+  state dir.
   Test: tests/integration/m1a_gate_test.go:at001_privd_refusal (subtest of TestM1aGate; aibox03,
     PASS both runs). Asserts status=501, cause="runtime_unavailable", and that the reason names
     both the failing check (guest_channel) and the dial failure (cannot reach privd socket) with
@@ -106,13 +116,18 @@ AT-001: TESTED_PASS.
   The trigger is an unreachable privd socket, not a literally-absent KVM device — the doctor
   check that fails and is named is guest_channel, not arch_kvm. That is still the full flow the
   M0 note was waiting on: doctor runs, launch is refused, the failing check is named, before any
-  side effect occurs.
+  side effect occurs (by construction, as above — not asserted).
 
-AT-005: TESTED_PASS (fake-runtime result — labeled per this file's fake-runtime rule; does not
-  satisfy a real-KVM gate).
-  Test: internal/jailer/inject_linux_test.go:TestInject (aibox03, PASS, 6 subtests, 14s —
-    manifest_write_failure, staging_digest_mismatch, allocate_network_failure, start_vm_failure,
-    runner_spawn_failure, wrong_token_attach_timeout; PLAN.md M1a Task 13 session log).
+AT-005: TESTED_PASS (not a real-KVM result: fake VMM — a privd test backend's `sleep 300`
+  stand-in — with real privd, runner and guest.Agent code; labeled per this file's fake-runtime
+  rule; does not satisfy a real-KVM gate).
+  Test: internal/jailer/inject_linux_test.go:TestInject (aibox03, PASS 6/6 in 14.5s at 11864b9,
+    the commit that made the exact-sequence and runner-gone assertions bite; and `-race -run
+    TestInject -count=5` ok in 88.593s after e6172f8. Both runs are recorded in the M1a SDD
+    ledger, which is not tracked; PLAN.md's M1a Task 13 entry records the earlier 6/6 in 14s at
+    6747f7c, before the assertions were hardened) — manifest_write_failure,
+    staging_digest_mismatch, allocate_network_failure, start_vm_failure, runner_spawn_failure,
+    wrong_token_attach_timeout.
   Each subtest injects a failure immediately after one provisioning side effect and asserts the
   exact backend call sequence the rollback issues, proving cleanup calls only the release verbs
   for what was actually allocated: allocate_network_failure sees exactly `[allocate_network]`
@@ -121,8 +136,16 @@ AT-005: TESTED_PASS (fake-runtime result — labeled per this file's fake-runtim
   releases it); runner_spawn_failure sees the full
   `[allocate_network, start_vm, signal_vm/term, signal_vm/kill, release_vm, release_network]`
   (the VMM was running, so it is killed and released). Every subtest ends with a real recovery
-  launch that succeeds after the injected failure, over the same pool and privd server —
-  reservations are actually freed, not just marked freed. wrong_token_attach_timeout also asserts
+  launch of the same VM ID that succeeds after the injected failure, over the same privd server
+  and prefix pool. What that proves: the VM's state dir, manifest and slot — and the uid and CID
+  derived from the slot (launch.go:63-70) — are gone, because allocateSlot's manifest scan
+  (internal/jailer/manifest.go:127) hands the slot out again. What it does not prove: the /30
+  prefix is NOT returned — internal/network/alloc.go has Next() (:152) and Exclusions() (:146)
+  and no release path, so a rolled-back launch keeps its prefix for the daemon's lifetime, and
+  each subtest's pool is sized for two launches (inject_linux_test.go:95); and the compute
+  reservation is a manager-layer object this suite never touches — its release after a failed
+  launch is evidenced only by TestManagerLaunchFailure (internal/runtime/manager_test.go:176,
+  :212-218), a SPEC §18 fake-runtime unit test. wrong_token_attach_timeout also asserts
   the runner process is gone before recovery and that the injected wrong token never appears in
   any error string (§15.3).
   Harness: a real privd.Server and a real *privd.Client, wrapped by a decorator that injects one
@@ -132,7 +155,8 @@ AT-005: TESTED_PASS (fake-runtime result — labeled per this file's fake-runtim
   recorders — no real netns or veth. This is not the SPEC §18 fake runtime, and it is never
   wired into a served mode.
 
-AT-006: TESTED_PASS.
+AT-006: TESTED_PASS (partial — VM identity and key-reuse conflict; operation identity not
+  compared, timeout replay not simulated).
   Test: tests/integration/m1a_gate_test.go:at006_idempotency (subtest of TestM1aGate; aibox03,
     PASS both runs). A real POST /vms is replayed with the same idempotency key: the replay
     returns the same VM ID with is_replay:true; a third request reusing the key with a changed
@@ -140,6 +164,11 @@ AT-006: TESTED_PASS.
   Evidence (run B): `first_create=201 vm_id=60271f9f-e799-469b-bf6a-df33eaabc2d7 is_replay1=false
     replay=201 vm_id=60271f9f-e799-469b-bf6a-df33eaabc2d7 is_replay=true conflict=409
     cause="idempotency_key_reused"`.
+  The row asks for exactly the original VM/operation across a timeout. The subtest
+  (m1a_gate_test.go:1696-1764) compares vm_id and is_replay only: the create response also
+  carries the operation (internal/api/vms.go:628) and the subtest never compares the replay's
+  against the original's, and the replay is sent immediately after the first create — no client
+  timeout is simulated.
 
 AT-007: TESTED_PASS (partial — one of the row's four procedure elements).
   The row asks that user jobs cannot start before guestd readiness, workspace seeding, baseline
@@ -164,7 +193,11 @@ AT-009: TESTED_PASS (partial — concurrent launch and channel establishment onl
     channel_established; all stopped and deleted`.
   POST /vms is itself the create-and-launch request (SPEC §14); M1a has no separate "start"
   action, so four concurrent creates are the simultaneous-launch shape the product offers. Not
-  covered: per-VM writable-disk-content isolation is AT-010's row, not this one; terminal
+  covered: the row's distinctness claims are not asserted by this subtest at all
+  (m1a_gate_test.go:1767-1838 checks that four VMs reach running with channel_established, then
+  stop and delete); the only distinctness the gate asserts anywhere is two_real_vms
+  (:1528-1599), for two VMs: distinct uid and CID read from their manifests, and both netns
+  present. Per-VM writable-disk-content isolation is AT-010's row, not this one; terminal
   sessions do not exist yet (L1b, planned after L1a).
 
 AT-011: TESTED_PASS (partial — VM-lifecycle independence only).
@@ -177,10 +210,17 @@ AT-011: TESTED_PASS (partial — VM-lifecycle independence only).
     state after vmA delete="running"; ... vmB no state departure after stop=verified`.
   The row's text also names terminal and network-worker continuity; M1a has neither subsystem
   built (terminal is L1b), so this row proves VM-lifecycle independence only: a sibling's own
-  recorded state is untouched by a VM's stop or delete. No runner-ping event kind exists in the
-  registry, so state-change absence stands in as the product's actual record of an interruption.
+  recorded state is untouched by a VM's stop or delete. The gate asserts vmB's state and the
+  absence of vm.state_changed events for vmB; it does not assert the absence of
+  guest.channel_lost for vmB (m1a_gate_test.go:1622 and :1656 query kind=vm.state_changed only).
+  guest.channel_lost is registered (internal/events/registry.go:233) and is what the runner
+  appends when the guest control channel drops and it redials (internal/runner/runner.go:248-250,
+  in supervisionLoop) — the product's own record of a ping interruption, and the mechanism gate
+  run 6 saw on the VM being stopped. A sibling whose channel dropped and redialed stays
+  "running", so the assertion the gate makes cannot see that interruption.
 
-AT-018: TESTED_PASS (partial — cgroups not separately counted).
+AT-018: TESTED_PASS (partial — six host-side counters, delta-zero against an in-run baseline;
+  cgroups, reservation counts and privd's network ledger not counted).
   Test: tests/integration/m1a_gate_test.go:at018_no_resource_leaks (subtest of TestM1aGate,
     aibox03, PASS both runs). Captures a baseline over six counters (netns, veth, jail chroot
     entries, firecracker process count, state-dir entries, stage-dir entries), runs 5 graceful
@@ -191,9 +231,17 @@ AT-018: TESTED_PASS (partial — cgroups not separately counted).
     / `after 5 graceful cycles + 1 force-delete: netns=1 veth=1 jail=1 fc_procs=1
     state_entries=1 stage_entries=1` / `delta: netns=+0 veth=+0 jail=+0 fc_procs=+0 state=+0
     stage=+0`.
-  The row's text also names cgroups among what to compare. The baseline struct carries no
-  cgroup counter — jail/state/stage entry counts catch a leaked chroot or socket, but nothing
-  here separately counts cgroups. That gap is real and unclaimed.
+  The row's text names cgroups and reservation counts among what to compare, against the
+  documented idle baseline; four things it asks for this subtest does not measure. (a) The
+  baseline is not the documented idle one: captureBaseline (m1a_gate_test.go:1118) runs inside
+  the subtest at :1843 with one live VM left by an earlier subtest — every counter reads 1 in
+  the evidence — and the assertion is delta-zero against that, not against an idle host. (b)
+  Reservation counts are never read: none of the six counters queries GET /host/status, which
+  reports reserved_memory_mib, reserved_vcpu and reserved_disk_mib (internal/api/vms.go:509-515),
+  so a leaked reservation would pass. (c) privd's network ledger (internal/privd/ledger.go, one
+  file per VM) is not counted — the record 7934423 had left immortal. (d) The baseline struct
+  carries no cgroup counter — jail/state/stage entry counts catch a leaked chroot or socket, but
+  nothing here separately counts cgroups. All four gaps are real and unclaimed.
 
 -->
 
