@@ -32,6 +32,13 @@ type OpsBackend interface {
 	AllocateNetwork(VMEntry, AllocateNetworkReq) error
 	ReleaseNetwork(VMEntry) error
 	StartVM(*VMEntry, StartVMReq) (StartVMResp, error)
+	// AbortStartVM undoes a StartVM that failed partway. StartVM creates the
+	// jail tree and copies gigabytes into it before it can fail, and it can
+	// also leave a live firecracker whose pid it never got to report, so the
+	// undo owns both: kill what is running, then remove the tree. It does not
+	// touch the network allocation — allocate_network owns that half and
+	// release_network reclaims it.
+	AbortStartVM(VMEntry) error
 	SignalVM(VMEntry, string) error
 	ReleaseVM(VMEntry) error
 }
@@ -290,6 +297,25 @@ func (s *Server) handleStartVM(raw json.RawMessage) Response {
 
 	startResp, err := s.cfg.Ops.StartVM(&entry, r)
 	if err != nil {
+		// StartVM fails after it has already built <JailBase>/firecracker/<id>
+		// and copied the boot artifacts into it, and it can fail with
+		// firecracker already running and its pid reported to no one. Neither
+		// survivor is recoverable through any other verb: the ledger write
+		// below never runs, so the entry keeps PID 0, and release_vm removes a
+		// tree only for a VM the ledger says exists at a pid it can check. Roll
+		// back best-effort and surface the original cause unchanged — the same
+		// discipline handleAllocateNetwork uses above.
+		//
+		// Removing the tree here cannot destroy a previous boot's live chroot.
+		// A VM whose start succeeded has a non-zero entry.PID and is refused
+		// above with invalid_state before the backend is reached; PID returns to
+		// 0 only through handleReleaseVM, which clears it after Ops.ReleaseVM
+		// removed the tree. So any tree standing when StartVM runs is the debris
+		// of a start that already failed, never a running VM's chroot.
+		if abortErr := s.cfg.Ops.AbortStartVM(entry); abortErr != nil {
+			s.log.Printf("start_vm %s failed and the rollback did not finish: %v; "+
+				"jail tree and any live vmm may survive under jail base", r.VMID, abortErr)
+		}
 		return backendErrResp(err)
 	}
 

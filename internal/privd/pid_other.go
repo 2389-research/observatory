@@ -11,5 +11,8 @@ func ProcStatPath(pid int) string { return "" }
 // ParseStartTime is a no-op stub on non-linux platforms.
 func ParseStartTime(statLine string) string { return "" }
 
+// ParseComm is a no-op stub on non-linux platforms.
+func ParseComm(statLine string) string { return "" }
+
 // PIDAlive always returns false on non-linux platforms (no /proc).
 func PIDAlive(pid int, starttime string) bool { return false }

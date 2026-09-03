@@ -273,6 +273,70 @@ func (r *RealOps) StartVM(entry *VMEntry, req StartVMReq) (StartVMResp, error) {
 	return StartVMResp{PID: pid, StartTime: startTime}, nil
 }
 
+// AbortStartVM implements OpsBackend.AbortStartVM: undo a start that failed
+// partway through.
+//
+// Two things survive such a failure. The jail tree is the certain one — StartVM
+// creates <JailBase>/firecracker/<id>/root and copies the boot artifacts into it
+// before it reaches any step that can report an error, so a failure at step 3 or
+// 4 leaves gigabytes behind. The other is a live firecracker: the jailer exec
+// can succeed and the pid read that follows can fail, and then the VMM runs with
+// its pid recorded nowhere — not in the ledger, which the server writes only on
+// success, and not in the jailer's manifest, which is written only after
+// start_vm returns. Nothing would ever find it again.
+//
+// So kill first, then remove: an unlinked chroot would leave a running VMM with
+// no pid file for anyone to find it by. Returning an error here is advisory —
+// the server surfaces the original start failure, not this one — which is why
+// every step that does not happen is logged instead.
+func (r *RealOps) AbortStartVM(entry VMEntry) error {
+	jailDir := filepath.Join(r.cfg.JailBase, "firecracker", entry.VMID)
+	r.killJailedVMM(jailDir, entry.VMID)
+	if err := os.RemoveAll(jailDir); err != nil {
+		return fmt.Errorf("privd: abort start %s: remove jail dir %q: %w", entry.VMID, jailDir, err)
+	}
+	return nil
+}
+
+// killJailedVMM SIGKILLs the firecracker named by the pid file inside jailDir,
+// when there is one and the process it names really is a firecracker.
+//
+// The identity check is what makes this safe to do at all. StartVM's MkdirAll
+// does not clear the tree, so a chroot left by an earlier failed start can carry
+// a pid file naming a process that exited long ago — and pids are recycled
+// (SPEC §5.5 asks for more than a pid). There is no starttime to compare
+// against, because the failure being undone is precisely that StartVM never got
+// to read one, so /proc/<pid>/stat's comm field stands in. It cannot prove this
+// is our firecracker; it does keep the kill off every process that is not one.
+// The guard only ever withholds a kill, never causes one, so a comm that fails
+// to parse costs a leaked VMM and no wrong signal.
+func (r *RealOps) killJailedVMM(jailDir, vmID string) {
+	pidFile := filepath.Join(jailDir, "root", "firecracker.pid")
+	pidData, err := os.ReadFile(pidFile)
+	if err != nil {
+		return // no pid file: the jailer never got far enough to write one
+	}
+	raw := string(bytes.TrimSpace(pidData))
+	pid, err := strconv.Atoi(raw)
+	if err != nil || pid <= 1 {
+		r.log.Printf("abort start %s: firecracker.pid holds %q, which is not a pid; killing nothing", vmID, raw)
+		return
+	}
+	statData, err := os.ReadFile(ProcStatPath(pid))
+	if err != nil {
+		return // process already gone; nothing to kill
+	}
+	if comm := ParseComm(string(statData)); comm != "firecracker" {
+		r.log.Printf("abort start %s: pid %d is %q, not firecracker; leaving it alone — a vmm may survive this rollback", vmID, pid, comm)
+		return
+	}
+	if err := unix.Kill(pid, unix.SIGKILL); err != nil {
+		r.log.Printf("abort start %s: kill firecracker pid %d: %v", vmID, pid, err)
+		return
+	}
+	r.log.Printf("abort start %s: killed firecracker pid %d left running by a failed start", vmID, pid)
+}
+
 // SignalVM implements OpsBackend.SignalVM.
 // Re-reads /proc to verify identity before signalling (§5.5).
 func (r *RealOps) SignalVM(entry VMEntry, kind string) error {

@@ -25,11 +25,12 @@ import (
 
 // recordingBackend implements OpsBackend, capturing every call made by the server.
 type recordingBackend struct {
-	allocateCalls  []recordedAllocate
-	releaseCalls   []string // vm_ids
-	startCalls     []recordedStart
-	signalCalls    []recordedSignal
-	releaseVMCalls []string // vm_ids
+	allocateCalls   []recordedAllocate
+	releaseCalls    []string // vm_ids
+	startCalls      []recordedStart
+	abortStartCalls []string // vm_ids
+	signalCalls     []recordedSignal
+	releaseVMCalls  []string // vm_ids
 
 	// Injected responses.
 	allocateErr error
@@ -66,6 +67,11 @@ func (b *recordingBackend) ReleaseNetwork(entry privd.VMEntry) error {
 func (b *recordingBackend) StartVM(entry *privd.VMEntry, req privd.StartVMReq) (privd.StartVMResp, error) {
 	b.startCalls = append(b.startCalls, recordedStart{*entry, req})
 	return b.startResp, b.startErr
+}
+
+func (b *recordingBackend) AbortStartVM(entry privd.VMEntry) error {
+	b.abortStartCalls = append(b.abortStartCalls, entry.VMID)
+	return nil
 }
 
 func (b *recordingBackend) SignalVM(entry privd.VMEntry, signal string) error {

@@ -70,6 +70,7 @@ type testRecordingBackend struct {
 	allocateCalls  []string
 	releaseCalls   []string
 	startCalls     []string
+	abortCalls     []string
 	signalCalls    []string
 	releaseVMCalls []string
 
@@ -127,6 +128,13 @@ func (b *testRecordingBackend) StartVM(entry *privd.VMEntry, req privd.StartVMRe
 	entry.StartTime = starttime
 
 	return privd.StartVMResp{PID: pid, StartTime: starttime}, nil
+}
+
+// AbortStartVM records the undo privd runs when StartVM fails. This backend's
+// StartVM builds no jail tree, so there is nothing here to remove.
+func (b *testRecordingBackend) AbortStartVM(entry privd.VMEntry) error {
+	b.abortCalls = append(b.abortCalls, entry.VMID)
+	return nil
 }
 
 func (b *testRecordingBackend) SignalVM(entry privd.VMEntry, kind string) error {

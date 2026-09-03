@@ -36,6 +36,19 @@ func ParseStartTime(statLine string) string {
 	return fields[19]
 }
 
+// ParseComm extracts the comm (field 2, 1-based) from a /proc/<pid>/stat line —
+// the executable name the kernel records for the process, without a path.
+// Returns "" if the line cannot be parsed. Field 2 is wrapped in parens and may
+// itself contain spaces and parens, so the first '(' and the last ')' bound it.
+func ParseComm(statLine string) string {
+	lparen := strings.Index(statLine, "(")
+	rparen := strings.LastIndex(statLine, ")")
+	if lparen < 0 || rparen <= lparen {
+		return ""
+	}
+	return statLine[lparen+1 : rparen]
+}
+
 // PIDAlive reports whether the process at pid is still running with the given starttime.
 // A missing /proc entry, or a mismatched starttime, means not alive.
 func PIDAlive(pid int, starttime string) bool {
