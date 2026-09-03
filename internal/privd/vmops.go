@@ -298,12 +298,45 @@ func (r *RealOps) AbortStartVM(entry VMEntry) error {
 	return nil
 }
 
-// procRootLink resolves /proc/<pid>/root — the chroot the process runs under,
-// which for a jailed firecracker is its own jail root. It is a variable so a
-// test can exercise the matching case, which needs a chrooted process an
-// unprivileged test cannot create.
-var procRootLink = func(pid int) (string, error) {
-	return os.Readlink(fmt.Sprintf("/proc/%d/root", pid))
+// procCmdline reads /proc/<pid>/cmdline and splits it into argv elements. The
+// file holds the arguments the process was execed with, NUL-terminated, and it
+// reads the same from every mount namespace — which is why the identity check
+// below asks it and not /proc/<pid>/root.
+//
+// A process with no argv left to report — a kernel thread, or a zombie whose
+// memory the kernel has already released — reads as zero bytes and yields no
+// elements.
+func procCmdline(pid int) ([]string, error) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil {
+		return nil, err
+	}
+	data = bytes.TrimSuffix(data, []byte{0})
+	if len(data) == 0 {
+		return nil, nil
+	}
+	parts := bytes.Split(data, []byte{0})
+	argv := make([]string, 0, len(parts))
+	for _, p := range parts {
+		argv = append(argv, string(p))
+	}
+	return argv, nil
+}
+
+// argvServesVM reports whether argv carries "--id" and vmID as two adjacent
+// elements — how the jailer names the VM to the firecracker it execs.
+//
+// Element equality, never a substring of the joined line: every jail path is
+// keyed by the VM id, so a process that merely mentions this VM in a path (the
+// runner's --uds is one) would match a substring search and take a SIGKILL for
+// it.
+func argvServesVM(argv []string, vmID string) bool {
+	for i := 0; i+1 < len(argv); i++ {
+		if argv[i] == "--id" && argv[i+1] == vmID {
+			return true
+		}
+	}
+	return false
 }
 
 // killJailedVMM SIGKILLs the firecracker named by the pid file inside jailDir,
@@ -319,15 +352,25 @@ var procRootLink = func(pid int) (string, error) {
 // every process that is not a firecracker at all — but on a host whose whole job
 // is running firecrackers, the process that inherits a recycled pid is
 // disproportionately another VM's VMM, and comm cannot tell two firecrackers
-// apart. So /proc/<pid>/root must also name this jail's root: the jailer chroots
-// each VMM into its own, and no other VM's process is in this one. (The kernel
-// answers with a canonical path, so a jail base reached through a symlink would
-// never match — that withholds kills, which is the safe direction.)
+// apart. So /proc/<pid>/cmdline must also carry "--id <vmID>": the jailer passes
+// the VM id straight through to the firecracker it execs (JailerArgv builds it
+// from the same id), so those two argv elements say which VM this process serves.
 //
-// Anything that leaves identity unproven — an unparsable comm, a readlink that
-// fails, a chroot that is not this jail — withholds the kill and logs it. A
+// The host cannot ask a jailed VMM where its root is. The jailer unshares a
+// mount namespace and pivot_roots into the jail, so the jail root exists as a
+// mount only inside that namespace and the kernel cannot express it as a path
+// here — reading /proc/<pid>/root from privd never yields <jailDir>/root, and a
+// check on it withholds every kill. cmdline reads the same from every namespace.
+// It is also world-readable, which matters because the VMM runs as another uid.
+//
+// Anything that leaves identity unproven — an unparsable comm, a cmdline that
+// cannot be read, an argv that does not name this VM (an empty one included: a
+// zombie needs no killing) — withholds the kill and logs the argv it saw. A
 // leaked VMM costs memory and disk until an operator finds it; SIGKILLing a
-// healthy neighbour destroys a guest that was doing nothing wrong.
+// healthy neighbour destroys a guest that was doing nothing wrong. The log is
+// what makes a wrong guess about the argv visible: if a future jailer ever
+// spelled it "--id=<vmID>", every withheld kill would print the spelling that
+// defeated it.
 func (r *RealOps) killJailedVMM(jailDir, vmID string) {
 	pidFile := filepath.Join(jailDir, "root", "firecracker.pid")
 	pidData, err := os.ReadFile(pidFile)
@@ -348,14 +391,13 @@ func (r *RealOps) killJailedVMM(jailDir, vmID string) {
 		r.log.Printf("abort start %s: pid %d is %q, not firecracker; leaving it alone — a vmm may survive this rollback", vmID, pid, comm)
 		return
 	}
-	jailRoot := filepath.Join(jailDir, "root")
-	procRoot, err := procRootLink(pid)
+	argv, err := procCmdline(pid)
 	if err != nil {
-		r.log.Printf("abort start %s: cannot read the chroot of firecracker pid %d (%v); leaving it alone — a vmm may survive this rollback", vmID, pid, err)
+		r.log.Printf("abort start %s: cannot read the argv of firecracker pid %d (%v); leaving it alone — a vmm may survive this rollback", vmID, pid, err)
 		return
 	}
-	if procRoot != jailRoot {
-		r.log.Printf("abort start %s: firecracker pid %d is chrooted in %q, not this VM's jail %q; leaving it alone — a vmm may survive this rollback", vmID, pid, procRoot, jailRoot)
+	if !argvServesVM(argv, vmID) {
+		r.log.Printf("abort start %s: firecracker pid %d has argv %q, which does not carry --id %s; leaving it alone — a vmm may survive this rollback", vmID, pid, argv, vmID)
 		return
 	}
 	if err := unix.Kill(pid, unix.SIGKILL); err != nil {
