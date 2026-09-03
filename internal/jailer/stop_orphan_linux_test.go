@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/2389-research/observatory-v2/internal/privd"
 )
@@ -69,9 +70,10 @@ func TestStopWithNoManifestAndNoChrootIsANoOp(t *testing.T) {
 // TestStopWithNoManifestButLiveChrootDoesNotReportSuccess is the finding. doRollback
 // deletes the manifest unconditionally while its own release can fail, so the chroot
 // -- and the microVM inside it -- can outlive the record. doStop used to read the
-// missing manifest as "already gone" and return (false, nil); Release then
-// early-returns nil on the same missing manifest and Delete writes "deleted" over a
-// running VM, every call in the chain reporting success.
+// missing manifest as "already gone" and return (false, nil); Release read it the
+// same way and returned nil, and Delete wrote "deleted" over a running VM, every
+// call in the chain reporting success. Both halves now probe the host
+// (TestReleaseWithNoManifestReportsASurvivingChroot covers the other).
 //
 // Here privd is unreachable, so the teardown cannot land and the chroot is still
 // there when doStop looks again. The answer must be an error that names it.
@@ -155,4 +157,66 @@ func (p *reclaimingPrivd) SignalVM(context.Context, privd.SignalVMReq) error {
 func (p *reclaimingPrivd) ReleaseVM(context.Context, privd.ReleaseVMReq) error {
 	p.releases++
 	return os.RemoveAll(p.remove)
+}
+
+// TestStopWithoutManifestBoundsTheKill: the SIGKILL that starts the teardown must
+// run on a context that expires. privd.Client.call sets a socket deadline only
+// when the caller's context carries one (internal/privd/client.go), and both
+// contexts that reach this path in production are deadline-free -- runLaunch's
+// cleanup and Manager.Reconcile both run on the manager's root context. An
+// unanswering privd would otherwise block the read forever while doStop holds
+// launchMu, queueing every launch, stop and release on the host behind it.
+func TestStopWithoutManifestBoundsTheKill(t *testing.T) {
+	pc := &deadlineRecordingPrivd{}
+	adapter, jailBase := orphanAdapter(t, pc)
+	vmID := "vm-bounded-kill"
+	writeOrphanChroot(t, jailBase, vmID)
+
+	// Deliberately deadline-free, exactly as runLaunch's cleanup and Reconcile call it.
+	_, _ = adapter.doStop(context.Background(), vmID, 0, true)
+
+	if !pc.signalCalled {
+		t.Fatal("signal_vm was never called; the test cannot observe the budget it is about to assert")
+	}
+	if !pc.signalHadDeadline {
+		t.Error("signal_vm ran on a context with no deadline: privd sets a socket deadline only " +
+			"when the context carries one, so an unanswering privd blocks here forever while doStop holds launchMu")
+	}
+	if pc.signalBudget > 10*time.Second {
+		t.Errorf("signal_vm budget = %s; want at most 10s, the bound doStop's own force path "+
+			"and the release two lines below already use", pc.signalBudget)
+	}
+}
+
+// deadlineRecordingPrivd answers every verb the way unreachablePrivd does, and
+// records what budget the caller gave signal_vm.
+type deadlineRecordingPrivd struct {
+	signalCalled      bool
+	signalHadDeadline bool
+	signalBudget      time.Duration
+}
+
+func (p *deadlineRecordingPrivd) AllocateNetwork(context.Context, privd.AllocateNetworkReq) error {
+	return errUnreachablePrivd
+}
+
+func (p *deadlineRecordingPrivd) ReleaseNetwork(context.Context, privd.ReleaseNetworkReq) error {
+	return errUnreachablePrivd
+}
+
+func (p *deadlineRecordingPrivd) StartVM(context.Context, privd.StartVMReq) (privd.StartVMResp, error) {
+	return privd.StartVMResp{}, errUnreachablePrivd
+}
+
+func (p *deadlineRecordingPrivd) SignalVM(ctx context.Context, _ privd.SignalVMReq) error {
+	p.signalCalled = true
+	if dl, ok := ctx.Deadline(); ok {
+		p.signalHadDeadline = true
+		p.signalBudget = time.Until(dl)
+	}
+	return errUnreachablePrivd
+}
+
+func (p *deadlineRecordingPrivd) ReleaseVM(context.Context, privd.ReleaseVMReq) error {
+	return errUnreachablePrivd
 }

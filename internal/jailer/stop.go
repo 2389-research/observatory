@@ -333,16 +333,23 @@ func (a *Adapter) doStop(ctx context.Context, vmID string, grace time.Duration, 
 // what is actually on the host.
 //
 // No jail chroot: the no-op the missing manifest suggests. privd's release_vm
-// removes <JailBase>/firecracker/<id> whole, and every ordinary path runs it -- a
-// normal stop releases the chroot and keeps the manifest, and a delete force-stops
-// (releasing the chroot) before Release removes the manifest -- so a VM that stopped
-// or deleted cleanly, and one that never launched, both leave nothing here. false,
-// nil, exactly as before.
+// removes <JailBase>/firecracker/<id> whole, and a normal stop runs it while
+// keeping the manifest, so a VM that stopped cleanly and one that never launched
+// both leave nothing here. false, nil, exactly as before.
+//
+// A delete does not always run it. Manager.Delete force-stops only from a live
+// state, and a guest that shuts itself down reaches "stopped" through
+// NotifyVMMExit without any runtime call at all (internal/runtime/manager.go), so
+// its jail chroot outlives the delete that follows. That leak never reaches this
+// seam -- the manifest is still there, so doRelease takes its ordinary path -- and
+// it is still open; releaseWithoutManifest below covers only the case where the
+// record was destroyed before the resource.
 //
 // Jail chroot present: the record is gone and the resource is not. Answering success
-// there is the lie this seam exists to prevent -- Release then early-returns nil on
-// the same missing manifest and Delete writes "deleted" over a microVM that is still
-// running.
+// there is the lie this seam exists to prevent. It used to travel: Release took the
+// same missing manifest as "already gone" and returned nil, and Delete wrote
+// "deleted" over a microVM that was still running. releaseWithoutManifest closed
+// that half; this one is still the first to notice.
 //
 // Tearing it down beats only complaining about it. The caller that reaches this state
 // most often is runLaunch's cleanup behind a failed launch, which discards
@@ -373,7 +380,18 @@ func (a *Adapter) stopWithoutManifest(ctx context.Context, vmID string) (bool, e
 	// stop. SIGKILL first: privd refuses release_vm while it can still see the
 	// process. A ledger entry that is already gone answers not_found, which is a
 	// fine outcome -- the release below then reports the chroot nobody can remove.
-	_ = a.pc.SignalVM(ctx, privd.SignalVMReq{VMID: vmID, Kind: "kill"})
+	//
+	// Its own budget, and the reason is the caller's context, not this call's cost:
+	// privd.Client.call sets a socket deadline only when the context carries one
+	// (internal/privd/client.go), and both callers that reach a manifest-less stop
+	// pass a deadline-free context -- runLaunch's cleanup and Manager.Reconcile both
+	// run on the manager's root context (internal/runtime/manager.go). A privd that
+	// accepts the connection and never answers would block this read forever while
+	// doStop holds launchMu, queueing every launch, stop and release on the host
+	// behind it. 10s is the same bound doStop's force path and the release below use.
+	signalCtx, signalCancel := context.WithTimeout(ctx, 10*time.Second)
+	_ = a.pc.SignalVM(signalCtx, privd.SignalVMReq{VMID: vmID, Kind: "kill"})
+	signalCancel()
 
 	releaseCtx, releaseCancel := context.WithTimeout(ctx, 10*time.Second)
 	releaseErr := a.releaseVMWhenDead(releaseCtx, vmID)
@@ -438,7 +456,7 @@ func (a *Adapter) doRelease(ctx context.Context, vmID string) error {
 	m, err := readManifest(a.cfg.StateDir, vmID)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil // idempotent: already gone
+			return a.releaseWithoutManifest(ctx, vmID)
 		}
 		return fmt.Errorf("jailer release %s: read manifest: %w", vmID, err)
 	}
@@ -477,6 +495,86 @@ func (a *Adapter) doRelease(ctx context.Context, vmID string) error {
 	// (Brief note: Task 7's importer prunes segments only, not VM dirs — verified.)
 
 	return nil
+}
+
+// releaseWithoutManifest answers a release for a VM whose manifest is gone, by
+// asking the host what is left instead of assuming nothing is.
+//
+// A missing manifest is not evidence of a clean VM. doRollback removes
+// <StateDir>/vms/<id> whether or not the release above it landed
+// (internal/jailer/launch.go), so the state a failed launch leaves behind is
+// exactly this one: no manifest, and possibly a jail chroot, a privd ledger
+// entry and a netns. Returning nil here made Manager.Delete write "deleted" over
+// all three, and Reconcile's retry of an interrupted delete
+// (internal/runtime/manager.go) reaches it with rows that are disproportionately
+// in that state.
+//
+// Both verbs are safe to try without a record: privd answers not_found for a
+// vm_id its ledger does not know (internal/privd/server.go), which is the
+// ordinary answer for a VM that never launched and is success here, not failure.
+//
+// release_vm runs first, and the order is not cosmetic. Every entry that reaches
+// this path has an empty VM half -- the pid is written only by a successful
+// start_vm and cleared by release_vm -- so release_network would empty the last
+// half, privd would delete the entry file, and release_vm would then answer
+// not_found without ever removing the tree. Both are attempted even when the
+// first fails: a refused release_vm leaves a non-zero pid in the entry, and
+// release_network then writes the partial entry back rather than losing it.
+//
+// The verdict comes from the host, not from what privd returned. The jail chroot
+// is the one thing here that can be stat'd, so a chroot still on disk is an
+// error whatever the release said; and a release that failed for any reason
+// other than not_found is a resource privd knows about and could not clear, so
+// that is an error too. Either one leaves Delete's row at "deleting" -- a delete
+// that lies is worse than one that has to be retried.
+func (a *Adapter) releaseWithoutManifest(ctx context.Context, vmID string) error {
+	releaseCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	vmErr := ignoreNotFound(a.releaseVMWhenDead(releaseCtx, vmID))
+	netErr := ignoreNotFound(a.pc.ReleaseNetwork(releaseCtx, privd.ReleaseNetworkReq{VMID: vmID}))
+
+	// Both tolerate a missing path, so no stage guard is needed -- and there is no
+	// manifest to read stages from anyway.
+	stageDir := filepath.Join(a.cfg.StageRoot, vmID)
+	if err := os.RemoveAll(stageDir); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("jailer release %s: remove stage dir: %w", vmID, err)
+	}
+	vmStateDir := filepath.Join(a.cfg.StateDir, "vms", vmID)
+	if err := os.RemoveAll(vmStateDir); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("jailer release %s: remove state dir: %w", vmID, err)
+	}
+
+	jailDir := filepath.Join(a.cfg.JailBase, "firecracker", vmID)
+	_, statErr := os.Stat(jailDir)
+	switch {
+	case statErr == nil && vmErr != nil:
+		return fmt.Errorf("jailer release %s: manifest gone and jail chroot %s could not be released: %w",
+			vmID, jailDir, vmErr)
+	case statErr == nil:
+		return fmt.Errorf("jailer release %s: manifest gone and jail chroot %s survives a release privd accepted",
+			vmID, jailDir)
+	case !os.IsNotExist(statErr):
+		return fmt.Errorf("jailer release %s: stat jail chroot %q: %w", vmID, jailDir, statErr)
+	}
+	if vmErr != nil {
+		return fmt.Errorf("jailer release %s: release_vm: %w", vmID, vmErr)
+	}
+	if netErr != nil {
+		return fmt.Errorf("jailer release %s: release_network: %w", vmID, netErr)
+	}
+	return nil
+}
+
+// ignoreNotFound drops privd's not_found, the answer for a vm_id its ledger has
+// no entry for. Release is idempotent by contract, so "there was nothing to
+// release" is the success case, not a failure to report.
+func ignoreNotFound(err error) error {
+	var re *privd.RemoteError
+	if errors.As(err, &re) && re.Cause == "not_found" {
+		return nil
+	}
+	return err
 }
 
 // Reconcile scans <StateDir>/vms/*/manifest.json at startup and classifies each VM.
