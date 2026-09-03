@@ -1,5 +1,18 @@
 # Specification Package Validation
 
+## Revision 10 (2026-09-02) — M1a close-out: runtime path fix, live-gate acceptance notes, deviations and session log
+
+Run after the M1a close-out landed three changes. `docs/examples/host-config.yaml` moved the example `paths.runtime` from `/run/vmobs` (a tmpfs) to `/srv/vmobs`, matching what the privd unit, `setup.sh`, and the live gate actually use, with a comment explaining that the daemon derives its staging dir and jailer chroot base from that one root; `privileged_socket` stays on `/run/vmobs` because it is a socket whose parent the unit's `RuntimeDirectory` creates. `docs/runbooks/aibox03.md` gained one paragraph in its privd section stating the `paths.runtime`/`--stage-root`/`--jail-base` coupling explicitly, so an operator editing either side sees what the other has to match (commit `86dade1`). `docs/ACCEPTANCE.md` gained a second dated status block (`L1 M1a status notes`) recording AT-001, AT-005, AT-006, AT-007, AT-009, AT-011 and AT-018 against the two consecutive real-Firecracker gate runs on aibox03, each note quoting the run's own evidence line and naming what the row still leaves uncovered. `PLAN.md` gained M1a deviation-log entries (six deferred-to-M1b items, five recorded-not-fixed deviations, two not-done-in-M1a follow-ups, and the graceful-stop-path root-cause account) and a session-log entry covering the gate run history and the seven real product bugs the live gate found that the unit suite had missed. None of these changes touch check.py logic, a schema, or a JSON/YAML example the checks parse.
+
+### Results
+
+- 46 package checks passed (`uv run docs/validation/check.py`, exit 0).
+- All revision-9 results hold; the changed files carry no schema or example content check.py inspects — `docs/examples/host-config.yaml`'s edit is a path value and a comment, and `docs/ACCEPTANCE.md`/`PLAN.md` are prose the acceptance-ID and requirement-coverage checks already covered before this revision (ID uniqueness and sequencing are unchanged; no acceptance ID was added, removed, or renumbered).
+
+### Check log
+
+- PASS — All 46 checks (identical list to revision 9; output elided for brevity).
+
 ## Revision 9 (2026-09-01) — L0 close-out: runbook, guest-protocol, schemas, images README, integration README
 
 Run after L0 Tasks 1–8 landed the following docs files: `docs/runbooks/aibox03.md` (host facts, setup.sh walkthrough, root-helper verbs, Firecracker re-pin), `docs/guest-protocol.md` (wire framing, handshake, deadlines), `docs/schemas/guest-hello.schema.json`, `docs/schemas/guest-capability.schema.json`, `images/README.md` (kernel config fragment rationale, symbol exclusions, rootfs pipeline, artifact reproducibility notes), `tests/integration/README.md` (how to run the M0 gate, env vars, evidence location). None of these files add new check.py logic; all 46 existing checks continue to pass.
