@@ -118,18 +118,24 @@ AT-001: TESTED_PASS.
   M0 note was waiting on: doctor runs, launch is refused, the failing check is named, before any
   side effect occurs (by construction, as above — not asserted).
 
-AT-005: TESTED_PASS (not a real-KVM result: fake VMM — a privd test backend's `sleep 300`
-  stand-in — with real privd, runner and guest.Agent code; labeled per this file's fake-runtime
-  rule; does not satisfy a real-KVM gate).
+AT-005: TESTED_PASS (partial — six injection points, one per provisioning verb; not injected:
+  a failure between a stage's side effect and the manifest write that records it, at the four
+  writes launch.go:130/:140/:166/:216 and inside doStage after :263, where doRollback reads a
+  manifest that does not yet name the stage and skips its release — the runner case, 4db1081,
+  is a known instance. Not a real-KVM result: fake VMM — a privd test backend's `sleep 300`
+  stand-in — with real privd, runner and guest.Agent code; labeled per this file's
+  fake-runtime rule; does not satisfy a real-KVM gate).
   Test: internal/jailer/inject_linux_test.go:TestInject (aibox03, PASS 6/6 in 14.5s at 11864b9,
     the commit that made the exact-sequence and runner-gone assertions bite; and `-race -run
-    TestInject -count=5` ok in 88.593s after e6172f8. Both runs are recorded in the M1a SDD
-    ledger, which is not tracked; PLAN.md's M1a Task 13 entry records the earlier 6/6 in 14s at
-    6747f7c, before the assertions were hardened) — manifest_write_failure,
+    TestInject -count=5` ok in 88.593s after e6172f8. Both runs are recorded in PLAN.md's M1a
+    Task 13 session-log entry, with the earlier 6/6 in 14s at 6747f7c, before the assertions
+    were hardened) — manifest_write_failure,
     staging_digest_mismatch, allocate_network_failure, start_vm_failure, runner_spawn_failure,
     wrong_token_attach_timeout.
-  Each subtest injects a failure immediately after one provisioning side effect and asserts the
-  exact backend call sequence the rollback issues, proving cleanup calls only the release verbs
+  Each subtest makes one step fail — the first manifest write, artifact verification, the
+  allocate_network verb, the start_vm verb, the runner spawn, or the guest attach (wrong
+  token, timeout) — and asserts the exact backend call sequence the rollback issues, proving
+  cleanup calls only the release verbs
   for what was actually allocated: allocate_network_failure sees exactly `[allocate_network]`
   with no release (network was never marked allocated); start_vm_failure sees exactly
   `[allocate_network, start_vm, release_network]` (the VMM never started, so nothing signals or
@@ -154,6 +160,17 @@ AT-005: TESTED_PASS (not a real-KVM result: fake VMM — a privd test backend's 
   300` stand-in recording its own real PID, and AllocateNetwork/ReleaseNetwork are no-op call
   recorders — no real netns or veth. This is not the SPEC §18 fake runtime, and it is never
   wired into a served mode.
+  Not injected: a failure between a stage's side effect and the manifest write that records it.
+  Each stage's side effect precedes its record (doStage's copies from :263 precede the write at
+  :130; allocate_network at :136 precedes :140; start_vm precedes :166; the runner spawn precedes
+  :216), and doRollback (:469-470) releases only the stages the on-disk manifest names, so a
+  failure in any of those windows leaks that stage. The stage dir is reclaimed later by Release
+  on delete (stop.go:369-370), but not by the rollback; the netns and privd ledger entry, the
+  VMM, and the runner are reclaimed by neither — Release calls release_network only for a
+  manifest that names network (stop.go:361) and never signals a VMM or a runner. The runner
+  case is a known instance (4db1081). Until this close-out the comment at launch.go:126 read
+  "No side effects beyond the state dir — rollback cleans up", which is false for a doStage
+  failure after :263; it now says what rollback leaves.
 
 AT-006: TESTED_PASS (partial — VM identity and key-reuse conflict; operation identity not
   compared, timeout replay not simulated).
