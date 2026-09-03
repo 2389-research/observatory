@@ -470,7 +470,10 @@ func (a *Adapter) waitAttached(ctx context.Context, stateFile string, cmd *exec.
 }
 
 // doRollback reads the current manifest and tears down owned resources in reverse order.
-// Tolerates already-gone resources — rollback is best-effort on each step.
+// Best-effort on each step: an already-gone resource is not an error, and a step that
+// fails does not stop the steps after it. Best-effort is not silent — a step that
+// reports the resource is still there says so on stderr, because "tolerated" and
+// "gone" are different answers and only one of them is safe to assume.
 //
 // Called with launchMu held by design (§5.3): the launch slot must not be reused
 // until the transaction is fully unwound. Two 2s sleeps (SIGTERM grace for the
@@ -502,7 +505,35 @@ func (a *Adapter) doRollback(vmID string) {
 		_ = a.pc.SignalVM(ctx, privd.SignalVMReq{VMID: vmID, Kind: "term"})
 		time.Sleep(2 * time.Second)
 		_ = a.pc.SignalVM(ctx, privd.SignalVMReq{VMID: vmID, Kind: "kill"})
-		_ = a.pc.ReleaseVM(ctx, privd.ReleaseVMReq{VMID: vmID})
+
+		// SIGKILL is asynchronous, so privd can answer the release that follows it
+		// with invalid_state "vm process is still alive; signal first" for a VM that
+		// is a millisecond from dead (gotchas #51). Reading that refusal as "already
+		// gone" leaves the chroot on disk and the ledger entry pinned, and the pinned
+		// entry then makes the release_network below write the entry back instead of
+		// deleting it — the leak this rollback exists to prevent, from the one call
+		// site that used to skip the retry. releaseVMWhenDead asks again while the
+		// cause is invalid_state and returns every other cause on the first attempt.
+		//
+		// Its own budget, not the rollback's remaining 30s: a VM wedged in
+		// uninterruptible sleep would otherwise spin here until the shared deadline
+		// expired and take the network release down with it. doStop bounds the same
+		// call the same way (stop.go).
+		releaseCtx, releaseCancel := context.WithTimeout(ctx, 10*time.Second)
+		releaseErr := a.releaseVMWhenDead(releaseCtx, vmID)
+		releaseCancel()
+		if releaseErr != nil {
+			// Swallowed, then reported. doRollback returns nothing — Launch's caller
+			// gets the error that started the rollback, which is the more useful one —
+			// and returning early here would skip the network release as well. But a
+			// failure at this point is not an already-gone resource: it means the
+			// chroot is still on disk, the ledger entry is still pinned, and the VM
+			// may still be running behind a launch that reported failure. That has to
+			// reach the daemon log; settling it needs a cleanup backlog (M1b).
+			fmt.Fprintf(os.Stderr,
+				"jailer: rollback: warn: release jail chroot for %s: %v; chroot and privd ledger entry retained, and the VM may still be running\n",
+				vmID, releaseErr)
+		}
 	}
 
 	// Release network.

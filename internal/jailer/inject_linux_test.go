@@ -1000,3 +1000,98 @@ func TestInject(t *testing.T) {
 		assertRecoveryLaunch(t, h, vmID)
 	})
 }
+
+// ---------------------------------------------------------------------------
+// F1: the rollback's release_vm must survive privd's invalid_state refusal
+// ---------------------------------------------------------------------------
+
+// TestRollbackRetriesReleaseVM: doRollback SIGKILLs the VMM and immediately asks
+// privd to release the jail chroot. SIGKILL is asynchronous, so privd legitimately
+// answers that first release with invalid_state "vm process is still alive"
+// (gotchas #51). The rollback used to call ReleaseVM bare and discard the error, so
+// one well-timed refusal left the chroot on disk and the ledger entry pinned — and a
+// pinned entry makes the release_network that follows write the entry back instead
+// of deleting it. ForceStop already retries (TestForceStopRetriesRelease); this pins
+// the same discipline on the launch-failure path.
+//
+// Shape: a broken runner binary fails the launch after stage vmm_started, which is
+// the rollback branch that owns the release. The decorator refuses twice, then
+// delegates to the real privd server, so "the retry landed" is observable at the
+// server's own backend rather than at the decorator.
+func TestRollbackRetriesReleaseVM(t *testing.T) {
+	h := buildInjectHarness(t, "", "10.118.0.0/24", 90, 0)
+	vmID := "vm-rollback-release"
+
+	refuser := &refusingReleasePrivd{PrivdClient: h.fp, refusal: aliveRefusal(), refusals: 2}
+
+	brokenCfg := jailer.Config{
+		StateDir:    h.stateDir,
+		StageRoot:   h.stageRoot,
+		JailBase:    h.jailBase,
+		SpoolRoot:   h.spoolRoot,
+		RunnerBin:   "/nonexistent/vmobs-runner",
+		RepoRoot:    h.repoRoot,
+		LockPath:    h.lockPath,
+		JailUIDBase: os.Getuid(),
+		JailGID:     os.Getgid(),
+		MaxSlots:    8,
+		CIDBase:     h.cidBase,
+		Allocator:   h.pool,
+		PrivdSocket: h.privdSock,
+		Preflight: func(ctx context.Context, refresh bool) preflight.Report {
+			return preflight.Report{Overall: preflight.StatusPass}
+		},
+	}
+	brokenAdapter, err := jailer.New(brokenCfg, refuser)
+	if err != nil {
+		t.Fatalf("jailer.New (broken runner): %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	launchErr := brokenAdapter.Launch(ctx, defaultSpec(vmID))
+	assertCleanup(t, h, vmID, "runner_spawned", launchErr)
+
+	// Two refusals then an accepted call: fewer means the rollback took the first
+	// invalid_state as an answer.
+	if refuser.calls < 3 {
+		t.Errorf("rollback release_vm attempts = %d, want >= 3 (two refusals then an accepted call): "+
+			"doRollback discarded privd's invalid_state refusal instead of retrying", refuser.calls)
+	}
+
+	// A retry that never reaches privd is the same leak — the server's backend must
+	// have run release_vm for this VM.
+	released := false
+	for _, id := range h.backend.releaseVMCalls {
+		if id == vmID {
+			released = true
+		}
+	}
+	if !released {
+		t.Errorf("privd backend never ran release_vm for %s during rollback — the jail chroot leaked "+
+			"(backend release_vm calls: %v)", vmID, h.backend.releaseVMCalls)
+	}
+
+	// The release must not have eaten the network release that follows it.
+	releasedNet := false
+	for _, id := range h.backend.releaseCalls {
+		if id == vmID {
+			releasedNet = true
+		}
+	}
+	if !releasedNet {
+		t.Errorf("rollback never released the network for %s (backend release_network calls: %v)",
+			vmID, h.backend.releaseCalls)
+	}
+
+	// The slot and the CIDR must both be reusable afterwards.
+	goodCfg := brokenCfg
+	goodCfg.RunnerBin = runnerBin
+	goodAdapter, err := jailer.New(goodCfg, h.fp)
+	if err != nil {
+		t.Fatalf("jailer.New (recovery runner): %v", err)
+	}
+	h.adapter = goodAdapter
+	assertRecoveryLaunch(t, h, vmID)
+}
