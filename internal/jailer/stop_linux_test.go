@@ -66,6 +66,9 @@ func makeStopHarnessWrapped(t *testing.T, wrap func(jailer.PrivdClient) jailer.P
 			t.Fatalf("mkdir %s: %v", d, err)
 		}
 	}
+	// Real ReleaseVM removal from here on, so Release's jail-chroot assertions
+	// have teeth instead of passing against a backend that never modeled it.
+	backend.jailBase = jailBase
 
 	repoRoot, lockPath := makeTestImagesDir(t)
 
@@ -426,6 +429,16 @@ func TestReleaseFreesAllResources(t *testing.T) {
 	vmStateDir := filepath.Join(stateDir, "vms", vmID)
 	if _, err := os.Stat(vmStateDir); !os.IsNotExist(err) {
 		t.Errorf("state dir still present after Release: %v", err)
+	}
+
+	// Jail chroot must be gone. ForceStop above already calls release_vm on its
+	// own, so this alone would pass even with doRelease's manifest-present leak
+	// still in place — TestReleaseWithManifestReclaimsTheJailChroot is what
+	// actually pins that fix; this assertion is here because the silence that
+	// let the leak ship was here too.
+	jailDir := filepath.Join(jailBase, "firecracker", vmID)
+	if _, err := os.Stat(jailDir); !os.IsNotExist(err) {
+		t.Errorf("jail chroot %s still present after Release: %v", jailDir, err)
 	}
 
 	// Spool dir must remain (importer reads it).

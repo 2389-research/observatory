@@ -198,3 +198,133 @@ func TestReleaseWithNoManifestRemovesTheStageAndStateDirs(t *testing.T) {
 			vmStateDir, statErr)
 	}
 }
+
+// TestReleaseWithManifestReclaimsTheJailChroot is the leak itself. doRelease
+// used to read a present manifest as reason enough to skip release_vm, so
+// <JailBase>/firecracker/<id> and its privd ledger entry outlived a VM that
+// shut itself down: Manager.NotifyVMMExit reaches "stopped" with no runtime
+// call at all (internal/runtime/manager.go), so the manifest is untouched
+// when Delete's force-stop skips it and goes straight to Release. This is
+// the state that leaves behind -- every stage a normal launch records, and a
+// chroot nothing has asked privd to remove.
+//
+// The order matters the same way it does with no manifest at all: an entry
+// whose VM half is already clear has release_network as its last occupied
+// half, so calling that first deletes the ledger entry and release_vm then
+// answers not_found without ever removing the tree.
+func TestReleaseWithManifestReclaimsTheJailChroot(t *testing.T) {
+	pc := &ledgerPrivd{entry: true, netCIDR: "10.0.0.0/30"}
+	adapter, jailBase := releaseAdapter(t, pc)
+	vmID := "vm-self-shutdown"
+	pc.jailDir = writeOrphanChroot(t, jailBase, vmID)
+
+	m := Manifest{
+		VMID:   vmID,
+		Slot:   0,
+		UID:    os.Getuid(),
+		GID:    os.Getgid(),
+		CID:    5,
+		CIDR:   "10.0.0.0/30",
+		Stages: []string{stageReserved, stageStaged, stageNetwork, stageVMMStarted, stageRunnerSpawned, stageAttached},
+	}
+	if err := writeManifest(adapter.cfg.StateDir, m); err != nil {
+		t.Fatalf("writeManifest: %v", err)
+	}
+
+	if err := adapter.doRelease(context.Background(), vmID); err != nil {
+		t.Fatalf("doRelease: %v; privd could reach both halves, so this had to succeed", err)
+	}
+	if _, statErr := os.Stat(pc.jailDir); !os.IsNotExist(statErr) {
+		t.Errorf("jail chroot %s survived the release (stat err: %v)", pc.jailDir, statErr)
+	}
+	if len(pc.calls) < 1 || pc.calls[0] != "release_vm" {
+		t.Errorf("privd calls = %v; release_vm has to run first: release_network empties the last "+
+			"half of the entry and privd deletes it, after which release_vm answers not_found "+
+			"and the chroot is unreachable forever", pc.calls)
+	}
+	if pc.releases != 1 {
+		t.Errorf("release_vm calls that reached the ledger = %d, want 1", pc.releases)
+	}
+}
+
+// TestReleaseWithManifestReportsASurvivingChroot: a present manifest must not
+// change the verdict when the teardown cannot land. The chroot outlives the
+// record either way, and Release has to say so rather than let Delete write
+// "deleted" over it.
+func TestReleaseWithManifestReportsASurvivingChroot(t *testing.T) {
+	adapter, jailBase := releaseAdapter(t, &unreachablePrivd{})
+	vmID := "vm-manifest-unreleasable"
+	jailDir := writeOrphanChroot(t, jailBase, vmID)
+
+	m := Manifest{
+		VMID:   vmID,
+		Stages: []string{stageReserved, stageStaged, stageNetwork, stageVMMStarted, stageRunnerSpawned, stageAttached},
+	}
+	if err := writeManifest(adapter.cfg.StateDir, m); err != nil {
+		t.Fatalf("writeManifest: %v", err)
+	}
+
+	err := adapter.doRelease(context.Background(), vmID)
+	if err == nil {
+		t.Fatalf("doRelease returned success for %s: its manifest lists every stage but %s is still on disk",
+			vmID, jailDir)
+	}
+	if !strings.Contains(err.Error(), jailDir) {
+		t.Errorf("error = %q; want it to name the chroot that survived (%s)", err, jailDir)
+	}
+	if _, statErr := os.Stat(jailDir); statErr != nil {
+		t.Errorf("stat %s: %v; the test's own premise is broken", jailDir, statErr)
+	}
+}
+
+// TestReleaseIgnoresStageRecordAndReleasesBothResources pins the lesson
+// behind every fix wave on this branch: a manifest's Stages list is a record
+// of what launch.go believed it had done, not evidence about what privd or
+// the filesystem still hold. launch.go sets currentStage = stageVMMStarted
+// before it calls StartVM and appends stageVMMStarted to the manifest only
+// after (internal/jailer/launch.go), so a VMM can be running -- and a netns
+// allocated -- with neither stage recorded. A manifest missing both stages,
+// with both resources present anyway, still has to see both release verbs
+// run and both resources go.
+func TestReleaseIgnoresStageRecordAndReleasesBothResources(t *testing.T) {
+	pc := &ledgerPrivd{entry: true, netCIDR: "10.0.0.0/30"}
+	adapter, jailBase := releaseAdapter(t, pc)
+	vmID := "vm-unrecorded-stages"
+	pc.jailDir = writeOrphanChroot(t, jailBase, vmID)
+
+	m := Manifest{
+		VMID:   vmID,
+		Stages: []string{stageReserved, stageStaged}, // vmm_started and network omitted
+	}
+	if err := writeManifest(adapter.cfg.StateDir, m); err != nil {
+		t.Fatalf("writeManifest: %v", err)
+	}
+
+	if err := adapter.doRelease(context.Background(), vmID); err != nil {
+		t.Fatalf("doRelease: %v; privd could reach both halves, so this had to succeed", err)
+	}
+
+	var sawReleaseVM, sawReleaseNetwork bool
+	for _, c := range pc.calls {
+		switch c {
+		case "release_vm":
+			sawReleaseVM = true
+		case "release_network":
+			sawReleaseNetwork = true
+		}
+	}
+	if !sawReleaseVM {
+		t.Error("release_vm was never called: the manifest's Stages omitted vmm_started")
+	}
+	if !sawReleaseNetwork {
+		t.Error("release_network was never called: the manifest's Stages omitted network")
+	}
+	if _, statErr := os.Stat(pc.jailDir); !os.IsNotExist(statErr) {
+		t.Errorf("jail chroot %s survived the release: stages omitted vmm_started, so a guard "+
+			"on the record would have skipped release_vm (stat err: %v)", pc.jailDir, statErr)
+	}
+	if pc.netCIDR != "" {
+		t.Errorf("network half of the ledger entry still held (%q): stages omitted network, "+
+			"so a guard on the record would have skipped release_network", pc.netCIDR)
+	}
+}

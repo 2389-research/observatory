@@ -74,6 +74,12 @@ type testRecordingBackend struct {
 	signalCalls    []string
 	releaseVMCalls []string
 
+	// jailBase, when set, makes ReleaseVM remove the jail chroot the way
+	// privd's RealOps.ReleaseVM does (internal/privd/vmops.go). Left empty,
+	// ReleaseVM only records the call, which is every caller's behavior
+	// before this field existed.
+	jailBase string
+
 	// sleepProcs tracks spawned sleep processes so tests can kill them.
 	sleepProcs []*sleepProc
 }
@@ -149,6 +155,13 @@ func (b *testRecordingBackend) SignalVM(entry privd.VMEntry, kind string) error 
 
 func (b *testRecordingBackend) ReleaseVM(entry privd.VMEntry) error {
 	b.releaseVMCalls = append(b.releaseVMCalls, entry.VMID)
+	if b.jailBase == "" {
+		return nil
+	}
+	jailDir := filepath.Join(b.jailBase, "firecracker", entry.VMID)
+	if err := os.RemoveAll(jailDir); err != nil {
+		return fmt.Errorf("test backend: remove jail dir %q: %w", jailDir, err)
+	}
 	return nil
 }
 
