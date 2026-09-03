@@ -311,7 +311,7 @@ const recoveryBudget = 75 * time.Second
 //
 // That caller can outlive the manager, and an operator should know what it
 // costs. HTTP handlers are not tracked by m.wg and srv.Shutdown stops waiting
-// after 5s (cmd/vmobsd/main.go), after which Manager.Close and then st.Close
+// after 10s (cmd/vmobsd/main.go), after which Manager.Close and then st.Close
 // run on the way out — so bookkeeping started just before shutdown can still be
 // writing up to recoveryBudget later, against a store that is closing under it.
 // sql.DB.Close serialises with statements already in flight, so the cost is a
@@ -1107,7 +1107,18 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 				ReleaseCompute: true,
 			})
 		case "stopping":
-			// Safe to mark stopped — we're not running, so the VMM is gone.
+			// Settle the row at stopped without observing anything. The reason
+			// this comment used to give — "we're not running, so the VMM is
+			// gone" — was false: firecracker is started --daemonize'd and
+			// reparented to init (internal/privd/vmops.go:129), so it outlives
+			// the controller. What actually stands behind the transition is the
+			// same adoption gap as "running"/"paused" above: this portable core
+			// has no runtime to ask, and NewManager runs it before the jailer
+			// adapter's own findings are consulted (cmd/vmobsd/main.go). So a
+			// stop interrupted mid-flight is recorded as completed and its
+			// compute released, and a VMM that survived keeps running behind a
+			// "stopped" row. Ledgered in PLAN.md's deviations log; the behaviour
+			// waits on real adoption (M2+) and must not change here.
 			_, _ = m.st.TransitionVM(ctx, store.TransitionInput{
 				VMID:           vm.VMID,
 				To:             "stopped",
