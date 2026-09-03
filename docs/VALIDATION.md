@@ -1,5 +1,18 @@
 # Specification Package Validation
 
+## Revision 13 (2026-09-02) — rollback leak fix: AT-005 at nine subtests, stage dir reclaimed by rollback, revision 12's comment certification withdrawn
+
+Run after the rollback-leak fix round (code at `02ea171`; this revision carries the docs). Two launch-rollback leaks are fixed: `doRollback` removes the stage dir without a stage guard, so a `doStage` failure no longer orphans it, and a failed reserved manifest write removes the state dir it made for a fresh VM. `docs/ACCEPTANCE.md`: AT-005's status parenthetical names the three remaining escape windows (`launch.go:150/:176/:226`) and the restart path instead of five windows; its Test line lists nine subtests and records the 9/9 run in a linux/arm64 container on the darwin workstation, not on aibox03; the "Each subtest makes one step fail" list now matches the real injection points — the subtest formerly named `manifest_write_failure` injected at the state-dir mkdir (`:107`) and is now `state_dir_mkdir_failure`, and two new subtests inject at the write (`:111`) — and the "Not injected" paragraph no longer says the stage dir is "reclaimed later by Release on delete": it never was, because `doRelease` returns before its stage-dir removal when the manifest is gone. `PLAN.md`: the deviation entry says the same, the allocator entry's `launch.go` citations follow the moved lines, and a session-log entry carries the mutation-proof failure lines and the container runs. Correction to revision 12: it certified the comment at `internal/jailer/launch.go:126` as corrected in place. The rewritten comment — "Rollback removes the state dir only; a stage dir doStage left is reclaimed by Release on delete" — was false for the same reason as the paragraph it echoed, and revision 12 certified it without checking the claim against `doRelease`. The comment now sits at `:136` and reads "doRollback removes the state dir and whatever doStage left in the stage dir"; this revision checked that against `doRollback` (`:513-521`) before writing it down.
+
+### Results
+
+- 46 package checks passed (`uv run docs/validation/check.py`, exit 0).
+- All revision-12 results hold; no acceptance ID was added, removed, or renumbered, and the only parsed example check.py inspects (`docs/examples/host-config.yaml`) is untouched this revision.
+
+### Check log
+
+- PASS — All 46 checks (identical list to revision 12; output elided for brevity).
+
 ## Revision 12 (2026-09-02) — M1a close-out wave B ruling: AT-005 partial, SDD evidence carried into PLAN.md, two comments corrected
 
 Run after the ruling on the wave B fix report, prose and comments only. `docs/ACCEPTANCE.md`: AT-005 is now `TESTED_PASS (partial — …)`, naming the five windows the injection suite does not cover (a failure between a stage's side effect and the manifest write that records it, where the rollback reads a manifest that does not yet name the stage), and its Test line points at PLAN.md's Task 13 entry instead of the untracked SDD ledger. `PLAN.md`: the three citations into `.superpowers/sdd/` (poweroff probes 1 and 2, the Docker-residue evidence, gate run 6) are replaced by the facts they pointed at, because that workspace is deleted at close-out; a rollback-escape deviation entry and a gate-limitation note (no runner log for a VM its subtest deletes itself) are recorded; the Task 13 entry carries the `11864b9` 6/6 run and the `-race -count=5` run. Two false comments were corrected in place with line counts unchanged, so the committed citations hold: `internal/jailer/launch.go:126` and `tests/integration/m1a_gate_test.go:1653-1655`.

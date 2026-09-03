@@ -93,7 +93,7 @@ separate test binary and is noted at its own row.
 Runtime lock at aa12929 (runtime.lock.json, unchanged since the 0881e69 rootfs re-pin): vmlinux
 b6067686…, rootfs c6a92bba…, firecracker 2fd01713…, jailer 1f3a0c1f…. The daemon verifies both
 binaries against the lock at startup (cmd/vmobsd/main.go:197) and every launch verifies both
-images against it before staging (internal/jailer/launch.go:258), so a passing run proves the
+images against it before staging (internal/jailer/launch.go:268), so a passing run proves the
 artifacts matched those digests. The evidence file itself records no digest — unlike M0's, which
 carries a "Lock artifact verification" section — so these are read from the lock at the gate
 commit, not captured on the host.
@@ -118,59 +118,86 @@ AT-001: TESTED_PASS.
   M0 note was waiting on: doctor runs, launch is refused, the failing check is named, before any
   side effect occurs (by construction, as above — not asserted).
 
-AT-005: TESTED_PASS (partial — six injection points, one per provisioning verb; not injected:
-  a failure between a stage's side effect and the manifest write that records it, at the four
-  writes launch.go:130/:140/:166/:216 and inside doStage after :263, where doRollback reads a
-  manifest that does not yet name the stage and skips its release — the runner case, 4db1081,
-  is a known instance. Not a real-KVM result: fake VMM — a privd test backend's `sleep 300`
-  stand-in — with real privd, runner and guest.Agent code; labeled per this file's
-  fake-runtime rule; does not satisfy a real-KVM gate).
-  Test: internal/jailer/inject_linux_test.go:TestInject (aibox03, PASS 6/6 in 14.5s at 11864b9,
-    the commit that made the exact-sequence and runner-gone assertions bite; and `-race -run
-    TestInject -count=5` ok in 88.593s after e6172f8. Both runs are recorded in PLAN.md's M1a
-    Task 13 session-log entry, with the earlier 6/6 in 14s at 6747f7c, before the assertions
-    were hardened) — manifest_write_failure,
-    staging_digest_mismatch, allocate_network_failure, start_vm_failure, runner_spawn_failure,
-    wrong_token_attach_timeout.
-  Each subtest makes one step fail — the first manifest write, artifact verification, the
-  allocate_network verb, the start_vm verb, the runner spawn, or the guest attach (wrong
-  token, timeout) — and asserts the exact backend call sequence the rollback issues, proving
-  cleanup calls only the release verbs
-  for what was actually allocated: allocate_network_failure sees exactly `[allocate_network]`
-  with no release (network was never marked allocated); start_vm_failure sees exactly
+AT-005: TESTED_PASS (partial — nine injection points; not injected: a failure between a
+  stage's side effect and the manifest write that records it, at the three writes
+  launch.go:150/:176/:226, where doRollback reads a manifest that does not yet name the stage
+  and skips its release — the runner case, 4db1081, is a known instance — and, on a restart
+  only, any failure before the write at :150, because the reserved write at :111 replaces the
+  stopped VM's manifest and with it the network record that rollback and Release act on. Not a
+  real-KVM result: fake VMM — a privd test backend's `sleep 300` stand-in — with real privd,
+  runner and guest.Agent code; labeled per this file's fake-runtime rule; does not satisfy a
+  real-KVM gate).
+  Test: internal/jailer/inject_linux_test.go:TestInject (PASS 9/9 in 19.95s at 02ea171, in a
+    linux/arm64 Docker container on the darwin workstation — go1.26.8, uid 1000, no KVM — not
+    on aibox03; before this round, PASS 6/6 in 14.5s on aibox03 at 11864b9, the commit that
+    made the exact-sequence and runner-gone assertions bite, and `-race -run TestInject
+    -count=5` ok in 88.593s after e6172f8. The runs are recorded in PLAN.md's M1a session log:
+    the Task 13 entry for the aibox03 runs, with the earlier 6/6 in 14s at 6747f7c before the
+    assertions were hardened, and the rollback-leak entry for the 9/9 run) —
+    state_dir_mkdir_failure, manifest_write_fresh_vm, manifest_write_restart,
+    staging_digest_mismatch, stage_copy_failure, allocate_network_failure, start_vm_failure,
+    runner_spawn_failure, wrong_token_attach_timeout.
+  Each subtest makes one step fail — the state-dir mkdir at launch.go:107 (vms/ made
+  read-only; the subtest refuses to run as root), the reserved manifest write at :111 for a
+  fresh VM and again for a restart (the launch runs in a child process under RLIMIT_FSIZE=0,
+  so writeManifest's first write fails with the state dir already made), artifact verification
+  at :268, the rootfs copy inside doStage after :273 (a directory planted where the file goes,
+  after vmlinux has been copied), the allocate_network verb at :146, the start_vm verb at
+  :162, the runner spawn at :218, or the guest attach (wrong token, timeout) — and asserts what
+  the failure leaves and the exact backend call sequence the rollback issues, proving cleanup
+  calls only the release verbs for what was actually allocated: the five failures before the
+  first privd verb see no backend call at all and, except for the restart, no state dir,
+  manifest or stage dir afterwards — manifest_write_restart instead sees the stopped VM's
+  previous manifest untouched, since it is the only record of the network Release still has to
+  free; allocate_network_failure sees exactly `[allocate_network]` with no release (network was
+  never marked allocated); start_vm_failure sees exactly
   `[allocate_network, start_vm, release_network]` (the VMM never started, so nothing signals or
   releases it); runner_spawn_failure sees the full
   `[allocate_network, start_vm, signal_vm/term, signal_vm/kill, release_vm, release_network]`
   (the VMM was running, so it is killed and released). Every subtest ends with a real recovery
   launch of the same VM ID that succeeds after the injected failure, over the same privd server
-  and prefix pool. What that proves: the VM's state dir, manifest and slot — and the uid and CID
+  and prefix pool; manifest_write_restart's recovery must keep the stopped VM's slot and CIDR.
+  What that proves: the VM's state dir, manifest and slot — and the uid and CID
   derived from the slot (launch.go:63-70) — are gone, because allocateSlot's manifest scan
   (internal/jailer/manifest.go:127) hands the slot out again. What it does not prove: the /30
   prefix is NOT returned — internal/network/alloc.go has Next() (:152) and Exclusions() (:146)
   and no release path, so a rolled-back launch keeps its prefix for the daemon's lifetime, and
-  each subtest's pool is sized for two launches (inject_linux_test.go:95); and the compute
+  each subtest's pool is sized for two launches (inject_linux_test.go:98); and the compute
   reservation is a manager-layer object this suite never touches — its release after a failed
   launch is evidenced only by TestManagerLaunchFailure (internal/runtime/manager_test.go:176,
   :212-218), a SPEC §18 fake-runtime unit test. wrong_token_attach_timeout also asserts
   the runner process is gone before recovery and that the injected wrong token never appears in
   any error string (§15.3).
   Harness: a real privd.Server and a real *privd.Client, wrapped by a decorator that injects one
-  failure on demand and records every call; a real vmobs-runner binary; and, in the last
-  subtest, a real guest.Agent-shaped listener on a real vsock UDS. The VMM itself is a `sleep
-  300` stand-in recording its own real PID, and AllocateNetwork/ReleaseNetwork are no-op call
-  recorders — no real netns or veth. This is not the SPEC §18 fake runtime, and it is never
-  wired into a served mode.
+  failure on demand and records every call; a real vmobs-runner binary; for the two
+  manifest-write subtests, the test binary re-executed as a child with RLIMIT_FSIZE lowered to
+  zero (launchWriteFailHelper), so the launch's first file write fails with EFBIG and nothing
+  else in the launch is touched; and, in the last subtest, a real guest.Agent-shaped listener
+  on a real vsock UDS. The VMM itself is a `sleep 300` stand-in recording its own real PID, and
+  AllocateNetwork/ReleaseNetwork are no-op call recorders — no real netns or veth. This is not
+  the SPEC §18 fake runtime, and it is never wired into a served mode.
   Not injected: a failure between a stage's side effect and the manifest write that records it.
-  Each stage's side effect precedes its record (doStage's copies from :263 precede the write at
-  :130; allocate_network at :136 precedes :140; start_vm precedes :166; the runner spawn precedes
-  :216), and doRollback (:469-470) releases only the stages the on-disk manifest names, so a
-  failure in any of those windows leaks that stage. The stage dir is reclaimed later by Release
-  on delete (stop.go:369-370), but not by the rollback; the netns and privd ledger entry, the
-  VMM, and the runner are reclaimed by neither — Release calls release_network only for a
-  manifest that names network (stop.go:361) and never signals a VMM or a runner. The runner
-  case is a known instance (4db1081). Until this close-out the comment at launch.go:126 read
-  "No side effects beyond the state dir — rollback cleans up", which is false for a doStage
-  failure after :263; it now says what rollback leaves.
+  Each stage's side effect precedes its record (allocate_network at :146 precedes :150; start_vm
+  at :162 precedes :176; the runner spawn at :218 precedes :226), and doRollback (:479-522)
+  releases only the stages the on-disk manifest names, so a failure in any of those three
+  windows leaks that stage past delete: the netns and privd ledger entry, the VMM, or the
+  runner is reclaimed by neither the rollback nor Release — Release calls release_network only
+  for a manifest that names network (stop.go:361) and never signals a VMM or a runner, and the
+  rollback has already deleted the manifest. The runner case is a known instance (4db1081).
+  The staging window no longer leaks: doRollback removes the stage dir without a stage guard
+  (:513-517), so a doStage failure after :273 — stage_copy_failure — and a failed write at
+  :140, which is not injected but takes the identical rollback path, both leave no stage dir.
+  Earlier revisions of this paragraph said the stage dir was "reclaimed later by Release on
+  delete"; it never was — doRelease returns before its stage-dir removal when the manifest is
+  gone (stop.go:346-347), and the rollback had just deleted it. Also not injected, and a fourth
+  escape: on a restart the reserved write at :111 replaces the stopped VM's manifest with one
+  naming only reserved, so any failure before the write at :150 rolls back without
+  release_network and deletes the record Release needed — the stopped VM's netns and ledger
+  entry leak past delete. The comment above the doStage call (launch.go:136, :126 before this
+  round) said until this round that a stage dir doStage left was "reclaimed by Release on
+  delete"; docs/VALIDATION.md revision 12 certified that text as a correction, and it was
+  false for the reason just given. It now says doRollback removes the state dir and whatever
+  doStage left in the stage dir.
 
 AT-006: TESTED_PASS (partial — VM identity and key-reuse conflict; operation identity not
   compared, timeout replay not simulated).
