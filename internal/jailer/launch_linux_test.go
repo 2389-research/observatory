@@ -38,6 +38,11 @@ var runnerBin string
 
 // TestMain builds the runner binary before running tests.
 func TestMain(m *testing.M) {
+	// Re-executed as a child of the manifest-write injection subtests: run one
+	// Launch under RLIMIT_FSIZE=0 and exit (see launchWriteFailHelper).
+	if os.Getenv(helperEnv) == helperLaunchWriteFail {
+		os.Exit(launchWriteFailHelper())
+	}
 	tmp, err := os.MkdirTemp("", "jailer-test-runner-*")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "TestMain: mkdir runner temp: %v\n", err)

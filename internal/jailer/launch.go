@@ -70,8 +70,11 @@ func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (retErr error
 	cid := a.cfg.CIDBase + uint32(slot)
 
 	// Determine CIDR: reuse from existing manifest (restart), or allocate fresh.
+	// existingErr also decides, below, whether a failed manifest write may remove
+	// the state dir: only when no manifest lived there before this launch.
 	var cidr string
-	if existing, err := readManifest(a.cfg.StateDir, vmID); err == nil && existing.CIDR != "" {
+	existing, existingErr := readManifest(a.cfg.StateDir, vmID)
+	if existingErr == nil && existing.CIDR != "" {
 		cidr = existing.CIDR
 	} else {
 		prefix, err := a.cfg.Allocator.Next()
@@ -106,6 +109,13 @@ func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (retErr error
 	}
 	m.Stages = append(m.Stages, stageReserved)
 	if err := writeManifest(a.cfg.StateDir, m); err != nil {
+		// No manifest, so doRollback would find nothing to read: reclaim the
+		// state dir the mkdir above made — but only for a fresh VM. On a restart
+		// the dir holds the previous launch's manifest, which writeManifest left
+		// intact and which Release still needs to find the network it must free.
+		if os.IsNotExist(existingErr) {
+			_ = os.RemoveAll(vmStateDir)
+		}
 		return fmt.Errorf("launch %s failed at stage reserved: write manifest: %w", vmID, err)
 	}
 
@@ -123,7 +133,7 @@ func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (retErr error
 	stageDir := filepath.Join(a.cfg.StageRoot, vmID)
 	stageErr := a.doStage(ctx, vmID, bootID, cid, uid, gid, stageDir, spec)
 	if stageErr != nil {
-		// Rollback removes the state dir only; a stage dir doStage left is reclaimed by Release on delete.
+		// doRollback removes the state dir and whatever doStage left in the stage dir.
 		return rollback(stageErr)
 	}
 	m.Stages = append(m.Stages, stageStaged)
@@ -500,11 +510,11 @@ func (a *Adapter) doRollback(vmID string) {
 		_ = a.pc.ReleaseNetwork(ctx, privd.ReleaseNetworkReq{VMID: vmID})
 	}
 
-	// Remove stage dir.
-	if stageSet[stageStaged] {
-		stageDir := filepath.Join(a.cfg.StageRoot, vmID)
-		_ = os.RemoveAll(stageDir)
-	}
+	// Remove stage dir. doStage can fail after creating it and before
+	// stageStaged is recorded, so no stage guard: os.RemoveAll on a missing
+	// path is a no-op (same as doRelease).
+	stageDir := filepath.Join(a.cfg.StageRoot, vmID)
+	_ = os.RemoveAll(stageDir)
 
 	// Remove VM state dir.
 	vmStateDir := filepath.Join(a.cfg.StateDir, "vms", vmID)

@@ -7,10 +7,12 @@ package jailer_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -88,6 +90,7 @@ type injectHarness struct {
 	lockPath  string
 	privdSock string
 	pool      *network.Allocator
+	poolCIDR  string
 	cidBase   uint32
 }
 
@@ -163,6 +166,7 @@ func buildInjectHarness(
 		lockPath:  lockPath,
 		privdSock: privdSock,
 		pool:      pool,
+		poolCIDR:  poolCIDR,
 		cidBase:   cidBase,
 	}
 }
@@ -247,10 +251,10 @@ func assertRecoveryLaunch(t *testing.T, h *injectHarness, vmID string) {
 		t.Errorf("recovery Launch for %s: %v", vmID, err)
 		// No wait here, and nothing recorded to wait with. A failed Launch has
 		// already run doRollback, which SIGKILLs the runner and then removes the
-		// manifest along with the whole VM state dir (launch.go:469-511) -- so the
+		// manifest along with the whole VM state dir (launch.go:479-522) -- so the
 		// pid is gone from the record, and the kill happened synchronously inside
 		// the Launch call that just returned. One failure escapes that: if
-		// writeManifest fails at launch.go:216 the runner is already started, but
+		// writeManifest fails at launch.go:226 the runner is already started, but
 		// the on-disk manifest doRollback re-reads records neither the pid nor
 		// stageRunnerSpawned, so the kill is skipped and this path returns with
 		// that runner still alive. The window this helper exists to close is the
@@ -441,14 +445,151 @@ func assertRunnerGone(t *testing.T, vmID string) {
 }
 
 // ---------------------------------------------------------------------------
+// Child launch under RLIMIT_FSIZE=0: the manifest-write injection
+// ---------------------------------------------------------------------------
+
+// helperEnv selects the role of a re-executed test binary (dispatched at the
+// top of TestMain). Its only value is helperLaunchWriteFail.
+const helperEnv = "VMOBS_INJECT_HELPER"
+
+// helperLaunchWriteFail names the child that runs one Launch with RLIMIT_FSIZE=0.
+const helperLaunchWriteFail = "launch-write-fail"
+
+// launchWriteFailHelper is the body of the re-executed test binary for the
+// manifest-write subtests. It lowers RLIMIT_FSIZE to zero so the first write
+// that extends a regular file fails with EFBIG (Go ignores SIGXFSZ) -- the
+// ENOSPC/EIO class of failure writeManifest meets in production, and unlike a
+// chmod it leaves the state dir writable, so what Launch leaves behind is what
+// it chose to leave rather than what it could not remove. It then runs one
+// Launch against the harness the parent describes in VMOBS_INJECT_* variables
+// and prints the error. A child holds the limit because it is process-wide: in
+// the parent, the testing package flushes its own log file whenever its buffer
+// fills, and that write would fail too.
+//
+// Exit status: 1 when Launch failed (its error on stdout), 0 when it succeeded,
+// 2 on a setup problem (details on stderr).
+func launchWriteFailHelper() int {
+	get := func(key string) string {
+		v := os.Getenv("VMOBS_INJECT_" + key)
+		if v == "" {
+			fmt.Fprintf(os.Stderr, "helper: VMOBS_INJECT_%s unset\n", key)
+			os.Exit(2)
+		}
+		return v
+	}
+	pool, err := network.NewAllocator(nil, []netip.Prefix{netip.MustParsePrefix(get("POOL"))})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "helper: NewAllocator: %v\n", err)
+		return 2
+	}
+	var cidBase uint32
+	if _, err := fmt.Sscan(get("CID_BASE"), &cidBase); err != nil {
+		fmt.Fprintf(os.Stderr, "helper: CID_BASE: %v\n", err)
+		return 2
+	}
+	cfg := jailer.Config{
+		StateDir:    get("STATE_DIR"),
+		StageRoot:   get("STAGE_ROOT"),
+		JailBase:    get("JAIL_BASE"),
+		SpoolRoot:   get("SPOOL_ROOT"),
+		RunnerBin:   get("RUNNER_BIN"),
+		RepoRoot:    get("REPO_ROOT"),
+		LockPath:    get("LOCK_PATH"),
+		JailUIDBase: os.Getuid(),
+		JailGID:     os.Getgid(),
+		MaxSlots:    8,
+		CIDBase:     cidBase,
+		Allocator:   pool,
+		PrivdSocket: get("PRIVD_SOCK"),
+		Preflight: func(ctx context.Context, refresh bool) preflight.Report {
+			return preflight.Report{Overall: preflight.StatusPass}
+		},
+	}
+	adapter, err := jailer.New(cfg, &privd.Client{SocketPath: cfg.PrivdSocket})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "helper: jailer.New: %v\n", err)
+		return 2
+	}
+	var lim syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_FSIZE, &lim); err != nil {
+		fmt.Fprintf(os.Stderr, "helper: getrlimit RLIMIT_FSIZE: %v\n", err)
+		return 2
+	}
+	lim.Cur = 0
+	if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &lim); err != nil {
+		fmt.Fprintf(os.Stderr, "helper: setrlimit RLIMIT_FSIZE=0: %v\n", err)
+		return 2
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := adapter.Launch(ctx, defaultSpec(get("VM_ID"))); err != nil {
+		fmt.Println(err.Error())
+		return 1
+	}
+	return 0
+}
+
+// launchWithWriteFail runs one Launch of vmID against h in a re-executed test
+// binary whose RLIMIT_FSIZE is zero (launchWriteFailHelper), so writeManifest
+// fails on its first write, and returns the error text the child printed. The
+// child talks to the same in-process privd server, so its privd verbs land on
+// h.backend, not on h.fp. Fails the test when the child's Launch does not fail.
+func launchWithWriteFail(t *testing.T, h *injectHarness, vmID string) string {
+	t.Helper()
+	cmd := exec.Command(os.Args[0])
+	cmd.Env = append(os.Environ(),
+		helperEnv+"="+helperLaunchWriteFail,
+		"VMOBS_INJECT_STATE_DIR="+h.stateDir,
+		"VMOBS_INJECT_STAGE_ROOT="+h.stageRoot,
+		"VMOBS_INJECT_JAIL_BASE="+h.jailBase,
+		"VMOBS_INJECT_SPOOL_ROOT="+h.spoolRoot,
+		"VMOBS_INJECT_RUNNER_BIN="+runnerBin,
+		"VMOBS_INJECT_REPO_ROOT="+h.repoRoot,
+		"VMOBS_INJECT_LOCK_PATH="+h.lockPath,
+		"VMOBS_INJECT_PRIVD_SOCK="+h.privdSock,
+		"VMOBS_INJECT_POOL="+h.poolCIDR,
+		"VMOBS_INJECT_CID_BASE="+fmt.Sprint(h.cidBase),
+		"VMOBS_INJECT_VM_ID="+vmID,
+	)
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	var exitErr *exec.ExitError
+	switch {
+	case err == nil:
+		// The child has launched a whole VM under the limit; stop its stand-in
+		// VMM so the runner it left behind shuts down.
+		h.backend.killAll()
+		t.Fatalf("child Launch of %s succeeded; the manifest write should have failed", vmID)
+	case errors.As(err, &exitErr) && exitErr.ExitCode() == 1:
+		// Launch failed, as injected.
+	default:
+		t.Fatalf("child Launch of %s: %v\nstdout: %s\nstderr: %s", vmID, err, stdout.String(), stderr.String())
+	}
+	return strings.TrimSpace(stdout.String())
+}
+
+// backendCallCount is the number of privd verbs the in-process server's backend
+// recorded, across every verb. It is the zero-calls check for a launch that ran
+// in a child process, where h.fp saw nothing.
+func backendCallCount(h *injectHarness) int {
+	b := h.backend
+	return len(b.allocateCalls) + len(b.releaseCalls) + len(b.startCalls) +
+		len(b.signalCalls) + len(b.releaseVMCalls)
+}
+
+// ---------------------------------------------------------------------------
 // TestInject: one subtest per injection point (AT-005)
 // ---------------------------------------------------------------------------
 
 func TestInject(t *testing.T) {
-	// ── Subtest 1: manifest write failure ─────────────────────────────────────
-	// The vms/ directory is made read-only before Launch so writeManifest fails.
-	// This is before any side effect — backend must see ZERO calls.
-	t.Run("manifest_write_failure", func(t *testing.T) {
+	// ── Subtest 1: state dir mkdir failure ────────────────────────────────────
+	// vms/ is made read-only before Launch so os.MkdirAll(vms/<id>) at launch.go
+	// step 2 fails. Nothing exists on disk yet and no side effect has run —
+	// backend must see ZERO calls. (writeManifest never runs here; subtests 2
+	// and 3 inject at that write.)
+	t.Run("state_dir_mkdir_failure", func(t *testing.T) {
 		// chmod 0555 cannot block root's MkdirAll — this subtest requires non-root.
 		if os.Getuid() == 0 {
 			t.Fatal("this subtest requires non-root: chmod 0555 cannot block root's MkdirAll")
@@ -473,14 +614,19 @@ func TestInject(t *testing.T) {
 		launchErr := h.adapter.Launch(ctx, defaultSpec(vmID))
 
 		// assertCleanup verifies error contains the failed stage and all artifacts are gone.
-		// Stage is "reserved": manifest write is the first operation after allocating the slot.
+		// Stage is "reserved": the state dir mkdir is the first filesystem step after
+		// allocating the slot.
 		if err := os.Chmod(vmsDir, 0o755); err != nil {
 			t.Fatalf("restore chmod before assertCleanup: %v", err)
 		}
 		assertCleanup(t, h, vmID, "reserved", launchErr)
+		// Pin the injection point: the mkdir failed, not the manifest write after it.
+		if !strings.Contains(launchErr.Error(), "mkdir state dir") {
+			t.Errorf("error = %q; want it to contain %q", launchErr.Error(), "mkdir state dir")
+		}
 		t.Logf("got expected error: %v", launchErr)
 
-		// No backend calls at all — manifest write precedes every side effect.
+		// No backend calls at all — the state dir mkdir precedes every side effect.
 		if len(h.fp.calls) != 0 {
 			t.Errorf("expected zero backend calls; got: %v", h.fp.calls)
 		}
@@ -488,7 +634,95 @@ func TestInject(t *testing.T) {
 		assertRecoveryLaunch(t, h, vmID)
 	})
 
-	// ── Subtest 2: staging digest mismatch ────────────────────────────────────
+	// ── Subtest 2: manifest write failure, fresh VM ───────────────────────────
+	// The [reserved] manifest write is the first file write of a launch. A child
+	// runs it under RLIMIT_FSIZE=0 (launchWithWriteFail) so writeManifest fails
+	// with the state dir already made and still writable. No manifest means
+	// doRollback has nothing to read: Launch must reclaim that dir itself. The
+	// backend must see ZERO calls.
+	t.Run("manifest_write_fresh_vm", func(t *testing.T) {
+		h := buildInjectHarness(t, "", "10.116.0.0/24", 70, 0)
+		vmID := "vm-inject-7"
+
+		errText := launchWithWriteFail(t, h, vmID)
+		launchErr := errors.New(errText)
+		assertCleanup(t, h, vmID, "reserved", launchErr)
+		// Pin the injection point: the mkdir succeeded, the manifest write failed.
+		if !strings.Contains(errText, "write manifest") {
+			t.Errorf("error = %q; want it to contain %q", errText, "write manifest")
+		}
+		t.Logf("got expected error: %v", launchErr)
+
+		// No backend calls at all — the manifest write precedes every side effect.
+		if n := backendCallCount(h); n != 0 {
+			t.Errorf("expected zero backend calls; got %d (allocate: %v)", n, h.backend.allocateCalls)
+		}
+
+		assertRecoveryLaunch(t, h, vmID)
+	})
+
+	// ── Subtest 3: manifest write failure, restart ────────────────────────────
+	// A stopped VM keeps its manifest, network and slot (doStop), and a restart
+	// reuses them. When the [reserved] write of that restart fails, the state dir
+	// must survive: the previous manifest in it is the only record of the network
+	// Release still has to free. Same child injection as subtest 2; the backend
+	// must see ZERO calls.
+	t.Run("manifest_write_restart", func(t *testing.T) {
+		h := buildInjectHarness(t, "", "10.117.0.0/24", 80, 0)
+		vmID := "vm-inject-8"
+
+		// The manifest a stopped VM leaves behind. Its CIDR lies outside the
+		// harness pool, so a fresh allocation can never pass for a reuse.
+		seed := jailer.Manifest{
+			VMID:   vmID,
+			BootID: "boot-" + vmID + "-previous",
+			Slot:   0,
+			UID:    os.Getuid(),
+			GID:    os.Getgid(),
+			CID:    h.cidBase,
+			CIDR:   "192.0.2.0/30",
+			Stages: []string{"reserved", "staged", "network"},
+		}
+		if err := jailer.WriteManifestExported(h.stateDir, seed); err != nil {
+			t.Fatalf("seed manifest: %v", err)
+		}
+
+		errText := launchWithWriteFail(t, h, vmID)
+		for _, want := range []string{"failed at stage reserved", "write manifest"} {
+			if !strings.Contains(errText, want) {
+				t.Errorf("error = %q; want it to contain %q", errText, want)
+			}
+		}
+		t.Logf("got expected error: %s", errText)
+
+		// The stopped VM's record must survive the failed restart unchanged.
+		got, err := jailer.ReadManifest(h.stateDir, vmID)
+		switch {
+		case err != nil:
+			t.Errorf("previous manifest gone after the failed restart: %v", err)
+		case got.CIDR != seed.CIDR || got.Slot != seed.Slot || got.BootID != seed.BootID ||
+			strings.Join(got.Stages, ",") != strings.Join(seed.Stages, ","):
+			t.Errorf("previous manifest rewritten by the failed restart:\n got %+v\nwant %+v", got, seed)
+		}
+
+		if n := backendCallCount(h); n != 0 {
+			t.Errorf("expected zero backend calls; got %d (allocate: %v)", n, h.backend.allocateCalls)
+		}
+
+		// Recovery: the restart goes through on the slot and CIDR the surviving
+		// manifest names, not on a fresh allocation from the pool.
+		assertRecoveryLaunch(t, h, vmID)
+		recovered, err := jailer.ReadManifest(h.stateDir, vmID)
+		if err != nil {
+			t.Fatalf("read manifest after recovery: %v", err)
+		}
+		if recovered.Slot != seed.Slot || recovered.CIDR != seed.CIDR {
+			t.Errorf("recovery did not reuse the stopped VM's identity: slot %d cidr %q; want slot %d cidr %q",
+				recovered.Slot, recovered.CIDR, seed.Slot, seed.CIDR)
+		}
+	})
+
+	// ── Subtest 4: staging digest mismatch ────────────────────────────────────
 	// Tamper the vmlinux on disk so the SHA-256 check inside doStage fails.
 	// Stage = "staged"; no network calls must follow.
 	t.Run("staging_digest_mismatch", func(t *testing.T) {
@@ -507,12 +741,12 @@ func TestInject(t *testing.T) {
 		launchErr := h.adapter.Launch(ctx, defaultSpec(vmID))
 		assertCleanup(t, h, vmID, "staged", launchErr)
 
-		// Exact call sequence: staging fails before any backend verb; doRollback sees
-		// stageSet[staged]=true but nothing past it, so only file cleanup runs (no privd calls).
-		// Source: launch.go doRollback — stageSet[network]=false means ReleaseNetwork is skipped,
-		// stageSet[vmm_started]=false means SignalVM/ReleaseVM are skipped.
-		wantCalls2 := []string{}
-		assertCallsEqual(t, wantCalls2, h.fp.calls)
+		// Exact call sequence: staging fails before any backend verb, and before
+		// stageStaged is recorded — the manifest doRollback reads says [reserved]
+		// only, so it makes no privd call and just removes the stage dir (absent
+		// here: verification fails before doStage creates it) and the state dir.
+		wantCalls4 := []string{}
+		assertCallsEqual(t, wantCalls4, h.fp.calls)
 		t.Logf("calls after digest mismatch: %v", h.fp.calls)
 
 		// Restore vmlinux and rewrite lock with correct SHA.
@@ -537,7 +771,42 @@ func TestInject(t *testing.T) {
 		assertRecoveryLaunch(t, h, vmID)
 	})
 
-	// ── Subtest 3: allocate_network injected failure ──────────────────────────
+	// ── Subtest 5: stage copy failure ─────────────────────────────────────────
+	// A directory planted at <stage>/<id>/rootfs.ext4 makes doStage fail inside
+	// its copy loop: after it created the stage dir and copied vmlinux, before
+	// stageStaged is recorded. Rollback must remove that half-built stage dir
+	// along with the state dir; no privd verb has run, so ZERO calls.
+	t.Run("stage_copy_failure", func(t *testing.T) {
+		h := buildInjectHarness(t, "", "10.118.0.0/24", 90, 0)
+		vmID := "vm-inject-9"
+
+		// copyFile opens its destination O_WRONLY|O_CREATE|O_TRUNC; a directory
+		// there fails it with EISDIR. vmlinux copies first, so the stage dir holds
+		// a real partial copy when the failure lands.
+		planted := filepath.Join(h.stageRoot, vmID, "rootfs.ext4")
+		if err := os.MkdirAll(planted, 0o755); err != nil {
+			t.Fatalf("plant directory at the rootfs destination: %v", err)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		launchErr := h.adapter.Launch(ctx, defaultSpec(vmID))
+		assertCleanup(t, h, vmID, "staged", launchErr)
+		// Pin the injection point: the rootfs copy, not artifact verification.
+		if !strings.Contains(launchErr.Error(), "copy rootfs") {
+			t.Errorf("error = %q; want it to contain %q", launchErr.Error(), "copy rootfs")
+		}
+		t.Logf("got expected error: %v", launchErr)
+
+		if len(h.fp.calls) != 0 {
+			t.Errorf("expected zero backend calls; got: %v", h.fp.calls)
+		}
+
+		assertRecoveryLaunch(t, h, vmID)
+	})
+
+	// ── Subtest 6: allocate_network injected failure ──────────────────────────
 	// Stages completed before failure: reserved, staged.
 	// Rollback must: remove stage dir, remove state dir.
 	// Must NOT see any release verb (network was never allocated).
@@ -555,14 +824,14 @@ func TestInject(t *testing.T) {
 		// sees stageSet[network]=false (the manifest stage was never written after the failure),
 		// so ReleaseNetwork is skipped. stageSet[vmm_started]=false, stageSet[runner_spawned]=false.
 		// Source: launch.go step 4 — rollback fires before m.Stages appends "network".
-		wantCalls3 := []string{"allocate_network"}
-		assertCallsEqual(t, wantCalls3, h.fp.calls)
+		wantCalls6 := []string{"allocate_network"}
+		assertCallsEqual(t, wantCalls6, h.fp.calls)
 		t.Logf("calls after allocate_network failure: %v", h.fp.calls)
 
 		assertRecoveryLaunch(t, h, vmID)
 	})
 
-	// ── Subtest 4: start_vm injected failure ──────────────────────────────────
+	// ── Subtest 7: start_vm injected failure ──────────────────────────────────
 	// Stages completed before failure: reserved, staged, network.
 	// Rollback must: remove stage dir, release_network, remove state dir.
 	// Must NOT see release_vm or signal_vm (VMM never started).
@@ -580,14 +849,14 @@ func TestInject(t *testing.T) {
 		// is injected to fail. doRollback sees stageSet[vmm_started]=false (manifest never updated),
 		// so SignalVM/ReleaseVM are skipped. stageSet[network]=true → ReleaseNetwork called.
 		// Source: launch.go step 5 — rollback fires before m.Stages appends "vmm_started".
-		wantCalls4 := []string{"allocate_network", "start_vm", "release_network"}
-		assertCallsEqual(t, wantCalls4, h.fp.calls)
+		wantCalls7 := []string{"allocate_network", "start_vm", "release_network"}
+		assertCallsEqual(t, wantCalls7, h.fp.calls)
 		t.Logf("calls after start_vm failure: %v", h.fp.calls)
 
 		assertRecoveryLaunch(t, h, vmID)
 	})
 
-	// ── Subtest 5: runner spawn failure ───────────────────────────────────────
+	// ── Subtest 8: runner spawn failure ───────────────────────────────────────
 	// RunnerBin → missing path so exec.Command.Start() fails.
 	// Stages completed before failure: reserved, staged, network, vmm_started.
 	// Rollback must: signal_vm/kill + release_vm + release_network + remove stage dir + remove state dir.
@@ -632,7 +901,7 @@ func TestInject(t *testing.T) {
 		// killRunnerByPID is NOT called (stageSet[runner_spawned]=false).
 		// Source: launch.go doRollback — runner block guarded by stageSet[stageRunnerSpawned];
 		// VMM block: SignalVM("term") + sleep + SignalVM("kill") + ReleaseVM (in that order).
-		wantCalls5 := []string{
+		wantCalls8 := []string{
 			"allocate_network",
 			"start_vm",
 			"signal_vm/term",
@@ -640,7 +909,7 @@ func TestInject(t *testing.T) {
 			"release_vm",
 			"release_network",
 		}
-		assertCallsEqual(t, wantCalls5, h.fp.calls)
+		assertCallsEqual(t, wantCalls8, h.fp.calls)
 		t.Logf("calls after runner spawn failure: %v", h.fp.calls)
 
 		// Restore h.adapter to the good runner for recovery.
@@ -654,7 +923,7 @@ func TestInject(t *testing.T) {
 		assertRecoveryLaunch(t, h, vmID)
 	})
 
-	// ── Subtest 6: wrong token → attach timeout ───────────────────────────────
+	// ── Subtest 9: wrong token → attach timeout ───────────────────────────────
 	// The guestd uses a different fixed CapabilityToken than what the adapter staged.
 	// The runner redials on hello refusal; attach wait burns its full budget (short here).
 	// §15.3: the wrong token value must not appear in any error string.
@@ -714,7 +983,7 @@ func TestInject(t *testing.T) {
 		// stageSet[vmm_started]=true → signal_vm/term + signal_vm/kill + release_vm.
 		// stageSet[network]=true → release_network.
 		// Source: launch.go doRollback — runner block first (killRunnerByPID), then VMM block, then net.
-		wantCalls6 := []string{
+		wantCalls9 := []string{
 			"allocate_network",
 			"start_vm",
 			"signal_vm/term",
@@ -722,7 +991,7 @@ func TestInject(t *testing.T) {
 			"release_vm",
 			"release_network",
 		}
-		assertCallsEqual(t, wantCalls6, h.fp.calls)
+		assertCallsEqual(t, wantCalls9, h.fp.calls)
 
 		// Shut down the wrong-token guestd before recovery.
 		agentCancel()
