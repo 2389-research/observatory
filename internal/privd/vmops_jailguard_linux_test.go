@@ -66,6 +66,16 @@ func startFakeFirecracker(t *testing.T, args ...string) *fakeFirecracker {
 	// before the check under test, and without this argv in /proc the check under
 	// test is reading something other than what this test staged; either way every
 	// assertion below would prove nothing.
+	//
+	// Both are waited for, because cmd.Start returning does not mean /proc has
+	// caught up. The parent is released when the child's CLOEXEC error pipe
+	// closes, which happens inside execve at the point of no return -- before the
+	// new mm's arg_start/arg_end are set, so /proc/<pid>/cmdline reads empty for
+	// a live, running process for a moment after Start. comm is set earlier in
+	// the same call, which is why only the argv read loses this race: measured
+	// at 7 empties in 500 spawns, and it made these tests fail about one run in
+	// five before the wait went in.
+	waitForArgv(t, f.pid, argv)
 	statData, err := os.ReadFile(ProcStatPath(f.pid))
 	if err != nil {
 		t.Fatalf("read %s: %v", ProcStatPath(f.pid), err)
@@ -73,13 +83,6 @@ func startFakeFirecracker(t *testing.T, args ...string) *fakeFirecracker {
 	if comm := ParseComm(string(statData)); comm != "firecracker" {
 		t.Fatalf("comm of the stand-in process = %q, want \"firecracker\": the kernel takes comm from "+
 			"the basename of the execve path, and without it this test never reaches the argv check", comm)
-	}
-	gotArgv, err := procCmdline(f.pid)
-	if err != nil {
-		t.Fatalf("read the stand-in's argv: %v", err)
-	}
-	if !reflect.DeepEqual(gotArgv, argv) {
-		t.Fatalf("argv of the stand-in process = %q, want %q", gotArgv, argv)
 	}
 	return f
 }
@@ -114,6 +117,30 @@ func (f *fakeFirecracker) alive(t *testing.T) bool {
 		return false
 	case <-time.After(500 * time.Millisecond):
 		return true
+	}
+}
+
+// waitForArgv blocks until /proc/<pid>/cmdline reads back want, which is not
+// true the instant cmd.Start returns -- see the premise block in
+// startFakeFirecracker for why. Anything other than want appearing and staying
+// is a broken premise, not a race, so the timeout reports what it last saw.
+func waitForArgv(t *testing.T, pid int, want []string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	var got []string
+	for {
+		var err error
+		got, err = procCmdline(pid)
+		if err != nil {
+			t.Fatalf("read the stand-in's argv: %v", err)
+		}
+		if reflect.DeepEqual(got, want) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("argv of the stand-in process = %q, want %q", got, want)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
