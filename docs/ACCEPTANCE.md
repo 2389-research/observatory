@@ -79,6 +79,124 @@ AT-018: SPECIFIED (seed evidence executed 2026-09-01 with the M0 gate; full row 
 
 -->
 
+<!-- L1 M1a status notes (2026-09-02)
+
+M1a live gate: aibox03 bare-metal, Ubuntu 24.04 kernel 6.8, Firecracker v1.16.1. Two consecutive
+PASS runs of TestM1aGate (tests/integration/m1a_gate_test.go), invoked both times as
+`scripts/linux 'env VMOBS_FIXTURE=1 go test ./tests/integration/ -run TestM1aGate -v -count=1
+-timeout 600s'`: run A started 2026-09-02T23:25:14Z (92.40s), run B started 2026-09-02T23:27:03Z
+(98.44s), eight subtests each, eight passes, zero skips. Evidence quoted below is run B's,
+committed at tests/integration/evidence/m1a-gate-aibox03.txt; the two runs' evidence, normalized
+for UUIDs/timestamps/pid/temp-dir, is byte-identical. A §15.3 scan of all 33 evidence lines for
+token/secret/bearer/authorization/password/key= found nothing, both runs. AT-005 draws on a
+separate test binary and is noted at its own row.
+
+AT-001: TESTED_PASS.
+  Completes the M0 note. A second real vmobsd daemon, pointed at a nonexistent privd socket, is
+  sent a real POST /vms; the refusal happens before any provisioning side effect and names the
+  failing check.
+  Test: tests/integration/m1a_gate_test.go:at001_privd_refusal (subtest of TestM1aGate; aibox03,
+    PASS both runs). Asserts status=501, cause="runtime_unavailable", and that the reason names
+    both the failing check (guest_channel) and the dial failure (cannot reach privd socket) with
+    the exact bad socket path — and does not contain the M0 stub's "not configured" wording.
+  Evidence (run B): `status=501 cause="runtime_unavailable" message="runtime not available on
+    this host: guest_channel: cannot reach privd socket: dial unix /nonexistent/privd.sock:
+    connect: no such file or directory" ... guest_channel_found=true dial_failure_found=true
+    socket_named=true not_configured_found=false`.
+  The trigger is an unreachable privd socket, not a literally-absent KVM device — the doctor
+  check that fails and is named is guest_channel, not arch_kvm. That is still the full flow the
+  M0 note was waiting on: doctor runs, launch is refused, the failing check is named, before any
+  side effect occurs.
+
+AT-005: TESTED_PASS (fake-runtime result — labeled per this file's fake-runtime rule; does not
+  satisfy a real-KVM gate).
+  Test: internal/jailer/inject_linux_test.go:TestInject (aibox03, PASS, 6 subtests, 14s —
+    manifest_write_failure, staging_digest_mismatch, allocate_network_failure, start_vm_failure,
+    runner_spawn_failure, wrong_token_attach_timeout; PLAN.md M1a Task 13 session log).
+  Each subtest injects a failure immediately after one provisioning side effect and asserts the
+  exact backend call sequence the rollback issues, proving cleanup calls only the release verbs
+  for what was actually allocated: allocate_network_failure sees exactly `[allocate_network]`
+  with no release (network was never marked allocated); start_vm_failure sees exactly
+  `[allocate_network, start_vm, release_network]` (the VMM never started, so nothing signals or
+  releases it); runner_spawn_failure sees the full
+  `[allocate_network, start_vm, signal_vm/term, signal_vm/kill, release_vm, release_network]`
+  (the VMM was running, so it is killed and released). Every subtest ends with a real recovery
+  launch that succeeds after the injected failure, over the same pool and privd server —
+  reservations are actually freed, not just marked freed. wrong_token_attach_timeout also asserts
+  the runner process is gone before recovery and that the injected wrong token never appears in
+  any error string (§15.3).
+  Harness: a real privd.Server and a real *privd.Client, wrapped by a decorator that injects one
+  failure on demand and records every call; a real vmobs-runner binary; and, in the last
+  subtest, a real guest.Agent-shaped listener on a real vsock UDS. The VMM itself is a `sleep
+  300` stand-in recording its own real PID, and AllocateNetwork/ReleaseNetwork are no-op call
+  recorders — no real netns or veth. This is not the SPEC §18 fake runtime, and it is never
+  wired into a served mode.
+
+AT-006: TESTED_PASS.
+  Test: tests/integration/m1a_gate_test.go:at006_idempotency (subtest of TestM1aGate; aibox03,
+    PASS both runs). A real POST /vms is replayed with the same idempotency key: the replay
+    returns the same VM ID with is_replay:true; a third request reusing the key with a changed
+    payload gets 409 idempotency_key_reused.
+  Evidence (run B): `first_create=201 vm_id=60271f9f-e799-469b-bf6a-df33eaabc2d7 is_replay1=false
+    replay=201 vm_id=60271f9f-e799-469b-bf6a-df33eaabc2d7 is_replay=true conflict=409
+    cause="idempotency_key_reused"`.
+
+AT-007: TESTED_PASS (partial — one of the row's four procedure elements).
+  The row asks that user jobs cannot start before guestd readiness, workspace seeding, baseline
+  creation and required sensor checks. The live gate covers guestd readiness only, as a proxy:
+  Test: tests/integration/m1a_gate_test.go:at007_ordering (subtest of TestM1aGate; aibox03, PASS
+    both runs). Creates one VM, reads its running-transition timestamp and its
+    guest.channel_established timestamp from GET /events, and asserts running never precedes the
+    channel.
+  Evidence (run B): `running_transition_at="2026-09-02T23:28:36.211898Z"
+    channel_established_at="2026-09-02T23:28:35.719357Z" running_not_before_channel=true` — a
+    real 492ms interval, not a boolean.
+  Not covered: workspace seeding and baseline creation are M4 scope (SPEC Milestone 4); required
+  sensor checks are M2 scope (SPEC Milestone 2 — process sensor and filesystem notifications do
+  not exist yet).
+
+AT-009: TESTED_PASS (partial — concurrent launch and channel establishment only).
+  Test: tests/integration/m1a_gate_test.go:at009_four_concurrent_vms (subtest of TestM1aGate;
+    aibox03, PASS both runs). Four goroutines issue four simultaneous real POST /vms; all four
+    reach running with channel_established; all four are then stopped and deleted.
+  Evidence (run B): `four VMs [76357a29-... e373cb6c-... 239a30ab-... 0ea84265-...]: created
+    concurrently (four simultaneous POST /vms launches); all reached running with
+    channel_established; all stopped and deleted`.
+  POST /vms is itself the create-and-launch request (SPEC §14); M1a has no separate "start"
+  action, so four concurrent creates are the simultaneous-launch shape the product offers. Not
+  covered: per-VM writable-disk-content isolation is AT-010's row, not this one; terminal
+  sessions do not exist yet (L1b, planned after L1a).
+
+AT-011: TESTED_PASS (partial — VM-lifecycle independence only).
+  Test: tests/integration/m1a_gate_test.go:at011_graceful_stop (subtest of TestM1aGate; aibox03,
+    PASS both runs). Stops vmA while vmB keeps running; asserts vmA's stop event carries
+    reason=graceful_stop; asserts vmB stays "running" both immediately after vmA's stop and after
+    vmA's full delete; asserts vmB records no state-change event with host_received_at after
+    vmA's stop time.
+  Evidence (run B): `vmA stopped graceful_stop=true; vmB state after vmA stop="running"; vmB
+    state after vmA delete="running"; ... vmB no state departure after stop=verified`.
+  The row's text also names terminal and network-worker continuity; M1a has neither subsystem
+  built (terminal is L1b), so this row proves VM-lifecycle independence only: a sibling's own
+  recorded state is untouched by a VM's stop or delete. No runner-ping event kind exists in the
+  registry, so state-change absence stands in as the product's actual record of an interruption.
+
+AT-018: TESTED_PASS (partial — cgroups not separately counted).
+  Test: tests/integration/m1a_gate_test.go:at018_no_resource_leaks (subtest of TestM1aGate,
+    aibox03, PASS both runs). Captures a baseline over six counters (netns, veth, jail chroot
+    entries, firecracker process count, state-dir entries, stage-dir entries), runs 5 graceful
+    create/stop/delete cycles plus 1 force-delete cycle (DELETE ?force=true with no stop first —
+    the only path that had leaked a chroot in an earlier run), recaptures within 60s, and hard-
+    asserts all six deltas at zero.
+  Evidence (run B): `baseline: netns=1 veth=1 jail=1 fc_procs=1 state_entries=1 stage_entries=1`
+    / `after 5 graceful cycles + 1 force-delete: netns=1 veth=1 jail=1 fc_procs=1
+    state_entries=1 stage_entries=1` / `delta: netns=+0 veth=+0 jail=+0 fc_procs=+0 state=+0
+    stage=+0`.
+  The row's text also names cgroups among what to compare. The baseline struct carries no
+  cgroup counter — jail/state/stage entry counts catch a leaked chroot or socket, but nothing
+  here separately counts cgroups. That gap is real and unclaimed.
+
+-->
+
 | AT-005 | R-01, R-10 | Inject a failure after every provisioning side effect. Cleanup removes only owned resources and releases reservations or reports a retryable cleanup backlog. |
 | AT-006 | R-01, R-10 | Retry the same create request across a timeout. Exactly the original VM/operation is returned; a changed payload with the same key conflicts. |
 | AT-007 | R-01, R-05 | Verify user jobs cannot start before guestd readiness, workspace seeding, baseline creation and required sensor checks. |
