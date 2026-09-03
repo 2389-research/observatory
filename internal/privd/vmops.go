@@ -298,18 +298,36 @@ func (r *RealOps) AbortStartVM(entry VMEntry) error {
 	return nil
 }
 
+// procRootLink resolves /proc/<pid>/root — the chroot the process runs under,
+// which for a jailed firecracker is its own jail root. It is a variable so a
+// test can exercise the matching case, which needs a chrooted process an
+// unprivileged test cannot create.
+var procRootLink = func(pid int) (string, error) {
+	return os.Readlink(fmt.Sprintf("/proc/%d/root", pid))
+}
+
 // killJailedVMM SIGKILLs the firecracker named by the pid file inside jailDir,
-// when there is one and the process it names really is a firecracker.
+// when there is one and the process it names really is this VM's firecracker.
 //
-// The identity check is what makes this safe to do at all. StartVM's MkdirAll
-// does not clear the tree, so a chroot left by an earlier failed start can carry
-// a pid file naming a process that exited long ago — and pids are recycled
-// (SPEC §5.5 asks for more than a pid). There is no starttime to compare
-// against, because the failure being undone is precisely that StartVM never got
-// to read one, so /proc/<pid>/stat's comm field stands in. It cannot prove this
-// is our firecracker; it does keep the kill off every process that is not one.
-// The guard only ever withholds a kill, never causes one, so a comm that fails
-// to parse costs a leaked VMM and no wrong signal.
+// Identity is what makes this safe to do at all. StartVM's MkdirAll does not
+// clear the tree, so a chroot left by an earlier failed start can carry a pid
+// file naming a process that exited long ago — and pids are recycled (SPEC §5.5
+// asks for more than a pid). There is no starttime to compare against: the
+// failure being undone is precisely that StartVM never got to read one.
+//
+// Two cheap reads stand in for it. /proc/<pid>/stat's comm keeps the kill off
+// every process that is not a firecracker at all — but on a host whose whole job
+// is running firecrackers, the process that inherits a recycled pid is
+// disproportionately another VM's VMM, and comm cannot tell two firecrackers
+// apart. So /proc/<pid>/root must also name this jail's root: the jailer chroots
+// each VMM into its own, and no other VM's process is in this one. (The kernel
+// answers with a canonical path, so a jail base reached through a symlink would
+// never match — that withholds kills, which is the safe direction.)
+//
+// Anything that leaves identity unproven — an unparsable comm, a readlink that
+// fails, a chroot that is not this jail — withholds the kill and logs it. A
+// leaked VMM costs memory and disk until an operator finds it; SIGKILLing a
+// healthy neighbour destroys a guest that was doing nothing wrong.
 func (r *RealOps) killJailedVMM(jailDir, vmID string) {
 	pidFile := filepath.Join(jailDir, "root", "firecracker.pid")
 	pidData, err := os.ReadFile(pidFile)
@@ -328,6 +346,16 @@ func (r *RealOps) killJailedVMM(jailDir, vmID string) {
 	}
 	if comm := ParseComm(string(statData)); comm != "firecracker" {
 		r.log.Printf("abort start %s: pid %d is %q, not firecracker; leaving it alone — a vmm may survive this rollback", vmID, pid, comm)
+		return
+	}
+	jailRoot := filepath.Join(jailDir, "root")
+	procRoot, err := procRootLink(pid)
+	if err != nil {
+		r.log.Printf("abort start %s: cannot read the chroot of firecracker pid %d (%v); leaving it alone — a vmm may survive this rollback", vmID, pid, err)
+		return
+	}
+	if procRoot != jailRoot {
+		r.log.Printf("abort start %s: firecracker pid %d is chrooted in %q, not this VM's jail %q; leaving it alone — a vmm may survive this rollback", vmID, pid, procRoot, jailRoot)
 		return
 	}
 	if err := unix.Kill(pid, unix.SIGKILL); err != nil {
