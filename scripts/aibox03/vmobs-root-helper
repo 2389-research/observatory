@@ -120,9 +120,9 @@ jail-start)
   ;;
 jail-stop)
   id="$1"; valid_id "$id"
-  # Jailer writes the child PID to <chroot-base>/firecracker/<id>/root/firecracker.pid.
-  # The process title is "firecracker --id=<id> ..." (= form, not space), so
-  # pgrep on the id string alone is not unambiguous; use the pid file instead.
+  # Jailer writes the child PID to <chroot-base>/firecracker/<id>/root/firecracker.pid;
+  # use it. `pgrep -f <id>` is ambiguous: every path under this jail carries the
+  # id, so it also matches any runner started against this jail's v.sock.
   pidfile="$JAIL_BASE/firecracker/$id/root/firecracker.pid"
   if [ -f "$pidfile" ]; then
     pid="$(cat "$pidfile" 2>/dev/null || true)"
