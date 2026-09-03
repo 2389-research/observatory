@@ -222,6 +222,7 @@ func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (retErr error
 	logFile.Close()
 
 	m.RunnerPID = cmd.Process.Pid
+	m.RunnerStart = readRunnerStart(cmd.Process.Pid)
 	m.Stages = append(m.Stages, stageRunnerSpawned)
 	if err := writeManifest(a.cfg.StateDir, m); err != nil {
 		return rollback(err)

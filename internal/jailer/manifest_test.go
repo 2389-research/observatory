@@ -3,9 +3,11 @@
 package jailer
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 )
 
@@ -40,6 +42,74 @@ func TestManifestRoundTrip(t *testing.T) {
 	if string(gotJSON) != string(wantJSON) {
 		t.Errorf("round-trip mismatch:\n got  %s\n want %s", gotJSON, wantJSON)
 	}
+}
+
+// TestManifestCarriesRunnerIdentity verifies that a runner's start time survives a
+// write+read cycle under the on-disk key the format promises. RunnerPID alone is not
+// an identity (SPEC §9.1): the pid can be recycled between the write and the read, and
+// runner_starttime is the only field that tells the two processes apart. The key name
+// is part of the contract because manifests outlive the process that wrote them —
+// mirror vmm_starttime, whose partner field this is.
+func TestManifestCarriesRunnerIdentity(t *testing.T) {
+	dir := t.TempDir()
+	m := Manifest{
+		VMID:        "vm-runner-identity",
+		Slot:        0,
+		RunnerPID:   4242,
+		RunnerStart: "8877665544",
+		Stages:      []string{"reserved"},
+	}
+	if err := writeManifest(dir, m); err != nil {
+		t.Fatalf("writeManifest: %v", err)
+	}
+
+	got, err := readManifest(dir, m.VMID)
+	if err != nil {
+		t.Fatalf("readManifest: %v", err)
+	}
+	if got.RunnerStart != m.RunnerStart {
+		t.Errorf("RunnerStart = %q, want %q: the runner's start time did not survive the "+
+			"manifest round-trip, so a recycled pid reads as the same runner", got.RunnerStart, m.RunnerStart)
+	}
+
+	raw, err := os.ReadFile(manifestPath(dir, m.VMID))
+	if err != nil {
+		t.Fatalf("read manifest file: %v", err)
+	}
+	var onDisk map[string]any
+	if err := json.Unmarshal(raw, &onDisk); err != nil {
+		t.Fatalf("unmarshal manifest file: %v", err)
+	}
+	if onDisk["runner_starttime"] != m.RunnerStart {
+		t.Errorf("on-disk runner_starttime = %v, want %q (keys present: %v)",
+			onDisk["runner_starttime"], m.RunnerStart, sortedKeys(onDisk))
+	}
+
+	// omitempty, like vmm_starttime: a manifest with no runner identity must not
+	// write the key at all, so an old manifest and a new one with an unread start
+	// time are the same shape on disk.
+	empty := Manifest{VMID: "vm-no-runner", Slot: 1, Stages: []string{"reserved"}}
+	if err := writeManifest(dir, empty); err != nil {
+		t.Fatalf("writeManifest (empty): %v", err)
+	}
+	rawEmpty, err := os.ReadFile(manifestPath(dir, empty.VMID))
+	if err != nil {
+		t.Fatalf("read manifest file (empty): %v", err)
+	}
+	if bytes.Contains(rawEmpty, []byte("runner_starttime")) {
+		t.Errorf("manifest without a runner identity wrote runner_starttime anyway: %s", rawEmpty)
+	}
+}
+
+// sortedKeys returns the keys of a decoded manifest in a stable order, for failure
+// messages that name what the file actually contains.
+func sortedKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // TestStageAppendOrdering verifies that stages are appended in the order written.

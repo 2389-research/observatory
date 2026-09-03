@@ -39,17 +39,23 @@ func WriteManifestExported(stateDir string, m Manifest) error {
 // Each stage is appended AFTER the corresponding operation completes
 // (§5.3: persist before the side effect, record after it completes).
 type Manifest struct {
-	VMID      string   `json:"vm_id"`
-	BootID    string   `json:"boot_id"`
-	Slot      int      `json:"slot"`
-	UID       int      `json:"uid"` // JailUIDBase + Slot
-	GID       int      `json:"gid"`
-	CID       uint32   `json:"cid"` // CIDBase + Slot
-	CIDR      string   `json:"cidr"`
-	VMMPID    int      `json:"vmm_pid,omitempty"`
-	VMMStart  string   `json:"vmm_starttime,omitempty"`
-	RunnerPID int      `json:"runner_pid,omitempty"`
-	Stages    []string `json:"stages"`
+	VMID      string `json:"vm_id"`
+	BootID    string `json:"boot_id"`
+	Slot      int    `json:"slot"`
+	UID       int    `json:"uid"` // JailUIDBase + Slot
+	GID       int    `json:"gid"`
+	CID       uint32 `json:"cid"` // CIDBase + Slot
+	CIDR      string `json:"cidr"`
+	VMMPID    int    `json:"vmm_pid,omitempty"`
+	VMMStart  string `json:"vmm_starttime,omitempty"`
+	RunnerPID int    `json:"runner_pid,omitempty"`
+	// RunnerStart is /proc/<RunnerPID>/stat field 22 read just after the spawn.
+	// It is to RunnerPID what VMMStart is to VMMPID: the pid alone cannot tell a
+	// live runner from a recycled pid (SPEC §9.1). Empty when the spawn's read
+	// failed or the manifest predates the field; runnerAlive falls back to a
+	// pid-only check for those.
+	RunnerStart string   `json:"runner_starttime,omitempty"`
+	Stages      []string `json:"stages"`
 }
 
 // Stage name constants live in launch.go (linux) and launch_other.go (stub) —

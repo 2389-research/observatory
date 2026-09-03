@@ -546,6 +546,25 @@ func TestLaunchTransactionAgainstFakePrivd(t *testing.T) {
 		}
 	}
 
+	// Assert the manifest recorded the runner's identity, not just its pid. The VM
+	// is attached, so the runner is alive and /proc must agree with what the spawn
+	// wrote — a pid without a start time is the recycled-pid hole (SPEC §9.1).
+	if m.RunnerPID <= 0 {
+		t.Errorf("manifest runner_pid = %d after a successful launch", m.RunnerPID)
+	} else {
+		if m.RunnerStart == "" {
+			t.Error("manifest runner_starttime is empty after a successful launch: " +
+				"the runner has no identity, only a pid")
+		}
+		statData, err := os.ReadFile(privd.ProcStatPath(m.RunnerPID))
+		if err != nil {
+			t.Errorf("read runner proc stat: %v", err)
+		} else if want := privd.ParseStartTime(string(statData)); m.RunnerStart != want {
+			t.Errorf("manifest runner_starttime = %q, live runner pid %d started at %q",
+				m.RunnerStart, m.RunnerPID, want)
+		}
+	}
+
 	// Assert network was allocated.
 	if len(backend.allocateCalls) == 0 {
 		t.Error("allocate_network was never called")

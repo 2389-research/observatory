@@ -138,15 +138,45 @@ func pollRunnerPhase(ctx context.Context, stateFile string, wantPhases ...string
 	}
 }
 
-// runnerAlive reports whether the runner process at pid is still alive
-// by checking /proc/<pid>/stat (Linux). A stale PID that has been recycled
-// is not considered alive if we can read the manifest's runner PID.
-func runnerAlive(pid int) bool {
+// runnerAlive reports whether the process at pid is still the runner the manifest
+// recorded.
+//
+// With a start time recorded it is a real identity check: privd.PIDAlive compares
+// /proc/<pid>/stat field 22 against it, so a pid the kernel has handed to some other
+// process reads dead (SPEC §9.1 — a pid alone is not an identity).
+//
+// With starttime empty it degrades to a bare /proc/<pid> existence check, which does
+// report a recycled pid alive. That fallback is deliberate: a manifest written before
+// runner_starttime existed, or by a spawn whose start-time read lost the race with a
+// runner that died immediately, has nothing to compare. Calling those runners dead
+// would send doStop straight past the graceful path and let Reconcile spawn a second
+// runner onto a live VM — worse than the false positive it would avoid.
+func runnerAlive(pid int, starttime string) bool {
 	if pid <= 0 {
 		return false
 	}
+	if starttime != "" {
+		return privd.PIDAlive(pid, starttime)
+	}
 	_, err := os.Stat(fmt.Sprintf("/proc/%d", pid))
 	return err == nil
+}
+
+// readRunnerStart reads a freshly spawned runner's start time from /proc/<pid>/stat
+// so the manifest records an identity rather than a bare pid.
+//
+// Best-effort by design: a runner that exits before the read, or a /proc that will
+// not answer, leaves this empty and runnerAlive falls back to the pid-only check for
+// that manifest. Failing the spawn over an unreadable stat file would trade a
+// weakened check for a dead VM. Callers must assign the result unconditionally —
+// keeping a previous boot's start time next to a new pid is worse than keeping none,
+// because it makes a live runner read dead.
+func readRunnerStart(pid int) string {
+	data, err := os.ReadFile(privd.ProcStatPath(pid))
+	if err != nil {
+		return ""
+	}
+	return privd.ParseStartTime(string(data))
 }
 
 // Stop requests a graceful shutdown of the VM, escalating to SIGTERM/SIGKILL if needed.
@@ -191,7 +221,7 @@ func (a *Adapter) doStop(ctx context.Context, vmID string, grace time.Duration, 
 
 	graceful := false
 
-	if !forceImmediate && m.RunnerPID > 0 && runnerAlive(m.RunnerPID) {
+	if !forceImmediate && m.RunnerPID > 0 && runnerAlive(m.RunnerPID, m.RunnerStart) {
 		// Runner is alive — attempt graceful shutdown via ctl.
 		graceS := int(grace.Seconds())
 		if graceS <= 0 {
@@ -445,7 +475,7 @@ func (a *Adapter) reconcileOne(ctx context.Context, vmID string) Finding {
 	s, stateErr := runner.ReadState(stateFile)
 
 	runnerAttached := stateErr == nil && s.Phase == runner.PhaseAttached &&
-		runnerAlive(m.RunnerPID)
+		runnerAlive(m.RunnerPID, m.RunnerStart)
 
 	if runnerAttached {
 		// Verify runner's recorded VMM identity matches the manifest.
@@ -532,8 +562,11 @@ func (a *Adapter) respawnRunner(_ context.Context, m Manifest) error {
 	}
 	logFile.Close()
 
-	// Update manifest with new runner PID.
+	// Update manifest with the new runner's identity. The start time is assigned
+	// unconditionally: an empty read must clear the previous runner's value, not
+	// leave it paired with the new pid.
 	m.RunnerPID = cmd.Process.Pid
+	m.RunnerStart = readRunnerStart(cmd.Process.Pid)
 	if err := writeManifest(a.cfg.StateDir, m); err != nil {
 		// Best-effort: runner is running even if manifest update fails.
 		fmt.Fprintf(os.Stderr, "jailer: reconcile: warn: update manifest runner_pid for %s: %v\n", vmID, err)
