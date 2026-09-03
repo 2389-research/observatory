@@ -123,7 +123,7 @@ func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (retErr error
 	stageDir := filepath.Join(a.cfg.StageRoot, vmID)
 	stageErr := a.doStage(ctx, vmID, bootID, cid, uid, gid, stageDir, spec)
 	if stageErr != nil {
-		// No side effects beyond the state dir — rollback cleans up.
+		// Rollback removes the state dir only; a stage dir doStage left is reclaimed by Release on delete.
 		return rollback(stageErr)
 	}
 	m.Stages = append(m.Stages, stageStaged)
