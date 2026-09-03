@@ -1116,14 +1116,40 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 				ReleaseCompute: true,
 			})
 		case "deleting":
-			// Complete the idempotent delete.
-			_, _ = m.st.TransitionVM(ctx, store.TransitionInput{
-				VMID:        vm.VMID,
-				To:          "deleted",
-				Reason:      "controller_restart",
-				OperationID: 0,
-				ReleaseAll:  true,
-			})
+			// Complete the idempotent delete, keeping the R1 invariant Delete
+			// states above: no VM row reads "deleted" while the resources
+			// Release owns -- the network allocation, the stage dir and
+			// <StateDir>/vms/<id>/ -- survive it. A controller that died
+			// mid-delete can leave the row at "deleting" with the release never
+			// attempted, and Delete refuses to retry: it returns early for both
+			// "deleted" and "deleting". So this is the only retry there is, and
+			// finalizing without it would record a reclamation that never
+			// happened -- with every surviving manifest still counted against
+			// MaxSlots by allocateSlot (internal/jailer/manifest.go), so the
+			// slot never comes back either.
+			//
+			// Tolerance mirrors Delete's exactly. An *UnavailableError is
+			// expected here -- reconcile runs at startup, where the runtime may
+			// legitimately be absent -- and must not wedge the delete. Any
+			// other failure leaves the row at "deleting" for the next restart to
+			// retry; that retained row is the record of the failure, which is
+			// why nothing is logged (this package logs nowhere) and why
+			// Reconcile does not fail: a release error must not stop the daemon
+			// from starting.
+			releaseOK := true
+			if err := m.rt.Release(ctx, vm.VMID); err != nil {
+				var ue *UnavailableError
+				releaseOK = errors.As(err, &ue)
+			}
+			if releaseOK {
+				_, _ = m.st.TransitionVM(ctx, store.TransitionInput{
+					VMID:        vm.VMID,
+					To:          "deleted",
+					Reason:      "controller_restart",
+					OperationID: 0,
+					ReleaseAll:  true,
+				})
+			}
 		}
 		// stopped, failed, deleted: no action needed.
 	}

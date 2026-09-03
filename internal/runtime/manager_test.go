@@ -1027,6 +1027,133 @@ func TestManagerReconcile(t *testing.T) {
 	check(pausedID, "failed")
 	check(stoppingID, "stopped")
 	check(deletingID, "deleted")
+
+	// R1 invariant: a delete finalized by Reconcile must release the runtime's
+	// resources first, exactly as Delete does. Without the release the row reads
+	// "deleted" while the network allocation, the stage dir and
+	// <StateDir>/vms/<id>/ survive it, and every surviving manifest burns a slot
+	// against MaxSlots that no later restart returns.
+	if !calledFor(fk, deletingID, "Release") {
+		t.Errorf("Reconcile finalized the delete without calling Release (calls: %v)", fk.MethodCalls())
+	}
+}
+
+// calledFor reports whether fk recorded a call of method against vmID.
+func calledFor(fk *runtimetest.Fake, vmID, method string) bool {
+	for _, c := range fk.CallsFor(vmID) {
+		if c.Method == method {
+			return true
+		}
+	}
+	return false
+}
+
+// newDeletingVM creates a VM and walks it to "deleting", the state a controller
+// crash mid-delete leaves behind. Returns its vm_id.
+func newDeletingVM(t *testing.T, st *store.Store, name string) string {
+	t.Helper()
+	vm, _, _, err := st.CreateVMWithOperation(t.Context(), store.CreateVMInput{
+		VMID:             uuid.NewString(),
+		Name:             name,
+		Owner:            "local_operator",
+		TemplateID:       "tmpl-test",
+		TemplateDigest:   "sha256:" + fmt.Sprintf("%064d", 1),
+		VCPUCount:        2,
+		MemoryMiB:        2048,
+		RootDiskMiB:      8192,
+		WorkspaceDiskMiB: 10240,
+		MemoryTotalMiB:   2048 + 768,
+		NetworkProfile:   "transport",
+		NetworkPolicyID:  "transport-public-web",
+		Labels:           map[string]string{},
+		Kind:             "vm.create",
+		RequestHash:      uuid.NewString(),
+		Admit:            func(store.ReservationTotals) error { return nil },
+	})
+	if err != nil {
+		t.Fatalf("create %s: %v", name, err)
+	}
+	steps := []struct {
+		to       string
+		reason   string
+		releaseC bool
+	}{
+		{"starting", "launch", false},
+		{"running", "launch_complete", false},
+		{"stopping", "stop_requested", false},
+		{"stopped", "graceful_stop", true},
+		{"deleting", "delete_requested", false},
+	}
+	for _, s := range steps {
+		if _, err := st.TransitionVM(t.Context(), store.TransitionInput{
+			VMID:           vm.VMID,
+			To:             s.to,
+			Reason:         s.reason,
+			OperationID:    0,
+			ReleaseCompute: s.releaseC,
+		}); err != nil {
+			t.Fatalf("transition %s\u2192%s: %v", vm.VMID, s.to, err)
+		}
+	}
+	return vm.VMID
+}
+
+// TestManagerReconcileDeletingToleratesUnavailableRelease: Reconcile runs at
+// startup, when the runtime may legitimately be absent. An *UnavailableError
+// from Release must not wedge the delete — the row still reaches "deleted",
+// matching Delete's own tolerance.
+func TestManagerReconcileDeletingToleratesUnavailableRelease(t *testing.T) {
+	st := openStoreForManager(t)
+	fk := runtimetest.NewFake()
+	vmID := newDeletingVM(t, st, "reconcile-release-unavailable")
+
+	// Inject before NewManager: Reconcile runs inside it.
+	fk.FailNext("Release", vmID, &runtime.UnavailableError{Reason: "test: runtime unavailable"})
+
+	mgr, err := runtime.NewManager(st, fk, defaultCfg())
+	if err != nil {
+		t.Fatalf("NewManager (reconcile): %v", err)
+	}
+	defer mgr.Close()
+
+	if !calledFor(fk, vmID, "Release") {
+		t.Errorf("Reconcile did not attempt Release (calls: %v)", fk.MethodCalls())
+	}
+	vm, err := st.GetVM(t.Context(), vmID)
+	if err != nil {
+		t.Fatalf("GetVM: %v", err)
+	}
+	if vm.ObservedState != "deleted" {
+		t.Errorf("state = %q, want deleted (UnavailableError must be tolerated)", vm.ObservedState)
+	}
+}
+
+// TestManagerReconcileDeletingKeepsRowOnReleaseError: any other Release failure
+// leaves the row at "deleting" for the next restart to retry. A "deleted" row
+// written over surviving jail resources is the lie this test exists to prevent.
+func TestManagerReconcileDeletingKeepsRowOnReleaseError(t *testing.T) {
+	st := openStoreForManager(t)
+	fk := runtimetest.NewFake()
+	vmID := newDeletingVM(t, st, "reconcile-release-error")
+
+	fk.FailNext("Release", vmID, errors.New("disk full"))
+
+	mgr, err := runtime.NewManager(st, fk, defaultCfg())
+	if err != nil {
+		t.Fatalf("NewManager (reconcile): %v", err)
+	}
+	defer mgr.Close()
+
+	if !calledFor(fk, vmID, "Release") {
+		t.Errorf("Reconcile did not attempt Release (calls: %v)", fk.MethodCalls())
+	}
+	vm, err := st.GetVM(t.Context(), vmID)
+	if err != nil {
+		t.Fatalf("GetVM: %v", err)
+	}
+	if vm.ObservedState != "deleting" {
+		t.Errorf("state = %q, want deleting (a failed release must not finalize the delete)", vm.ObservedState)
+	}
 }
 
 func TestManagerParallelLaunchCapped(t *testing.T) {
