@@ -1650,9 +1650,9 @@ performance_targets:
 		// (b) Assert B's vm.state_changed stream has no departure-from-running event
 		// with host_received_at after aStopTime. A departure event would mean B was
 		// interrupted by A's stop — which the product must prevent.
-		// Deviation: the brief asked for "ping-driven events after A's stop time" but
-		// no runner ping event kind exists in the registry (verified). State-change
-		// absence is the product's actual record of interruptions. (Filed: I2 deviation.)
+		// Deviation: the brief asked for "ping-driven events after A's stop time"; the
+		// registry's record of a dropped guest channel is guest.channel_lost, which this
+		// query does not cover — only vm.state_changed absence is asserted here.
 		bStateChanges := daemon.apiGet(t, "/events?vm_id="+vmBID+"&kind=vm.state_changed")
 		bEvts, _ := bStateChanges["events"].([]any)
 		for _, e := range bEvts {
