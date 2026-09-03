@@ -208,10 +208,13 @@ func (a *Adapter) ForceStop(ctx context.Context, vmID string) error {
 func (a *Adapter) doStop(ctx context.Context, vmID string, grace time.Duration, forceImmediate bool) (forced bool, retErr error) {
 	m, err := readManifest(a.cfg.StateDir, vmID)
 	if err != nil {
-		// No manifest — VM may already be gone or was never launched.
-		// Treat as a no-op (idempotent).
+		// No manifest. Usually the genuine no-op it looks like -- never launched,
+		// or already released -- but the record going missing is not proof the
+		// resource did. doRollback deletes the manifest unconditionally while its
+		// own release can fail, so the chroot, and the VM running inside it, can
+		// outlive the only file that names them. Ask the host, not the record.
 		if os.IsNotExist(err) {
-			return false, nil
+			return a.stopWithoutManifest(ctx, vmID)
 		}
 		return false, fmt.Errorf("read manifest: %w", err)
 	}
@@ -324,6 +327,67 @@ func (a *Adapter) doStop(ctx context.Context, vmID string, grace time.Duration, 
 	}
 
 	return forced, nil
+}
+
+// stopWithoutManifest answers a stop for a VM whose manifest is gone, by probing
+// what is actually on the host.
+//
+// No jail chroot: the no-op the missing manifest suggests. privd's release_vm
+// removes <JailBase>/firecracker/<id> whole, and every ordinary path runs it -- a
+// normal stop releases the chroot and keeps the manifest, and a delete force-stops
+// (releasing the chroot) before Release removes the manifest -- so a VM that stopped
+// or deleted cleanly, and one that never launched, both leave nothing here. false,
+// nil, exactly as before.
+//
+// Jail chroot present: the record is gone and the resource is not. Answering success
+// there is the lie this seam exists to prevent -- Release then early-returns nil on
+// the same missing manifest and Delete writes "deleted" over a microVM that is still
+// running.
+//
+// Tearing it down beats only complaining about it. The caller that reaches this state
+// most often is runLaunch's cleanup behind a failed launch, which discards
+// ForceStop's error (internal/runtime/manager.go), so an error alone would change
+// nothing on the host and leave the chroot and a possibly-live VM standing. Manager's
+// Delete takes the opposite line and aborts the delete on any non-Unavailable error
+// from its force-stop, so answering with an unconditional error would wedge the
+// delete of an orphaned VM with no way out. The teardown needs nothing from the manifest: privd's ledger is keyed
+// by vm_id and holds the pid and start time, and privd re-verifies that identity
+// itself before it signals anything.
+//
+// The verdict comes from the filesystem afterwards, not from what privd returned: an
+// error only when the chroot is still there.
+func (a *Adapter) stopWithoutManifest(ctx context.Context, vmID string) (bool, error) {
+	jailDir := filepath.Join(a.cfg.JailBase, "firecracker", vmID)
+	if _, statErr := os.Stat(jailDir); statErr != nil {
+		if os.IsNotExist(statErr) {
+			return false, nil
+		}
+		return false, fmt.Errorf("jailer stop %s: stat jail chroot %q: %w", vmID, jailDir, statErr)
+	}
+
+	fmt.Fprintf(os.Stderr,
+		"jailer: stop: warn: %s has no manifest but its jail chroot %s is still on disk; "+
+			"killing and releasing it\n", vmID, jailDir)
+
+	// Nothing here asked the guest anything, so whatever happens next is a forced
+	// stop. SIGKILL first: privd refuses release_vm while it can still see the
+	// process. A ledger entry that is already gone answers not_found, which is a
+	// fine outcome -- the release below then reports the chroot nobody can remove.
+	_ = a.pc.SignalVM(ctx, privd.SignalVMReq{VMID: vmID, Kind: "kill"})
+
+	releaseCtx, releaseCancel := context.WithTimeout(ctx, 10*time.Second)
+	releaseErr := a.releaseVMWhenDead(releaseCtx, vmID)
+	releaseCancel()
+
+	if _, statErr := os.Stat(jailDir); os.IsNotExist(statErr) {
+		return true, nil
+	}
+	if releaseErr != nil {
+		return true, fmt.Errorf("jailer stop %s: manifest gone and jail chroot %s could not be released: %w",
+			vmID, jailDir, releaseErr)
+	}
+	return true, fmt.Errorf("jailer stop %s: manifest gone and jail chroot %s survives a release privd accepted",
+		vmID, jailDir)
 }
 
 // releaseVMWhenDead asks privd to release the VM's jail chroot, retrying while
