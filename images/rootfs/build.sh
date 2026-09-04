@@ -95,6 +95,7 @@ apt-get -S ${APT_SNAPSHOT} update -qq
 echo '[rootfs] installing packages from snapshot...'
 apt-get -S ${APT_SNAPSHOT} install -y --no-install-recommends \
     systemd-sysv udev dbus \
+    vim-tiny \
     2>&1 | tail -8
 
 echo '[rootfs] copying vmobs-guestd...'
