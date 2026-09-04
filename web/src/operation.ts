@@ -10,7 +10,8 @@ export interface Operation<T> {
   result?: T
   operationId?: string
   failure?: ApiFailure
-  run: (fn: () => Promise<T>) => Promise<void>
+  /** Runs `fn` once; resolves true when it succeeded, false on failure or when one is already in flight. */
+  run: (fn: () => Promise<T>) => Promise<boolean>
   reset: () => void
 }
 
@@ -37,9 +38,16 @@ export function clearIdempotencyKey(formKey: string): void {
   sessionStorage.removeItem(KEY_PREFIX + formKey)
 }
 
-/** Anything the daemon answers with an operation id. */
+/**
+ * Where an operation id turns up in a reply.
+ *
+ * POST /vms answers {vm, operation} and POST /batches answers a batch with its
+ * own id, so the id is nested as often as it is top-level. Reading both keeps
+ * every caller from unwrapping by hand.
+ */
 interface WithOperationID {
   operation_id?: string
+  operation?: { operation_id?: string }
 }
 
 export function useOperation<T>(): Operation<T> {
@@ -50,8 +58,11 @@ export function useOperation<T>(): Operation<T> {
   // same stale state and both would fire.
   const inFlight = useRef(false)
 
+  // Returns the outcome rather than leaving the caller to read `state`: the
+  // state a caller sees right after awaiting is the one from the render that
+  // dispatched the call, not the one this run just set.
   const run = useCallback(async (fn: () => Promise<T>) => {
-    if (inFlight.current) return
+    if (inFlight.current) return false
     inFlight.current = true
     setState('in_flight')
     setFailure(undefined)
@@ -59,9 +70,11 @@ export function useOperation<T>(): Operation<T> {
       const value = await fn()
       setResult(value)
       setState('done')
+      return true
     } catch (e) {
       setFailure(e instanceof ApiFailure ? e : new ApiFailure(0, undefined))
       setState('failed')
+      return false
     } finally {
       inFlight.current = false
     }
@@ -73,7 +86,8 @@ export function useOperation<T>(): Operation<T> {
     setFailure(undefined)
   }, [])
 
-  const operationId = (result as WithOperationID | undefined)?.operation_id
+  const withID = result as WithOperationID | undefined
+  const operationId = withID?.operation_id ?? withID?.operation?.operation_id
 
   return { state, result, operationId, failure, run, reset }
 }

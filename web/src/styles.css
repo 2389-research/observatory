@@ -349,3 +349,152 @@ h2 {
   border-radius: 3px;
   padding: 0 5px;
 }
+
+/* --- launch form (§13.1) --- */
+
+.launch {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 16px;
+}
+
+.launch h3 {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--dim);
+  margin: 0 0 8px;
+}
+
+.launch-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px 16px;
+  margin: 12px 0 16px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+}
+
+.field-wide {
+  grid-column: 1 / -1;
+}
+
+.field label {
+  font-size: 12px;
+  color: var(--dim);
+}
+
+.field input,
+.field select {
+  background: var(--bg);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font: inherit;
+  min-width: 0;
+}
+
+.field input:focus-visible,
+.field select:focus-visible,
+.launch button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.field input:disabled {
+  color: var(--dim);
+  background: transparent;
+  border-style: dashed;
+}
+
+.hint {
+  font-size: 11px;
+  color: var(--dim);
+}
+
+.preview {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 12px;
+  margin-bottom: 16px;
+}
+
+.preview-line {
+  display: flex;
+  gap: 12px;
+  margin: 0 0 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.preview-label {
+  color: var(--dim);
+  min-width: 70px;
+}
+
+/* Over capacity is a warning, not a refusal: the daemon decides admission. */
+.preview-line.over {
+  color: var(--warn);
+}
+
+.deferred {
+  border: 1px dashed var(--line);
+  border-radius: 4px;
+  padding: 12px 16px 16px;
+  margin: 0 0 16px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px 16px;
+}
+
+.deferred legend {
+  font-size: 11px;
+  color: var(--dim);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 0 6px;
+}
+
+.launch-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.launch button {
+  background: var(--accent);
+  color: #04121f;
+  border: none;
+  border-radius: 4px;
+  padding: 7px 16px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.launch button:disabled {
+  background: var(--line);
+  color: var(--dim);
+  cursor: default;
+}
+
+.ok {
+  color: var(--ok);
+  margin: 12px 0 0;
+}
+
+.remediation-list {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+
+.remediation-list li {
+  color: var(--dim);
+}

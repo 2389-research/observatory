@@ -19,6 +19,24 @@ const host = {
   },
   runtime: { available: true, reason: '' },
   vms: { running: 1 },
+  admission: {
+    allow_memory_overcommit: false,
+    cpu_overcommit_ratio: 4,
+    reserve_per_vm_host_overhead_mib: 768,
+    max_parallel_provisions: 2,
+    max_batch_size: 8,
+  },
+  vm_defaults: {
+    vcpu_count: 1,
+    memory_mib: 512,
+    root_disk_mib: 4096,
+    workspace_disk_mib: 8192,
+    guest_privilege: 'unprivileged',
+    network_profile: 'transport',
+    network_policy_id: '',
+    max_terminal_sessions: 2,
+    stop_grace_seconds: 30,
+  },
 }
 
 const vms = {
@@ -46,6 +64,21 @@ const vms = {
 
 const attention = { items: [], next_after: '' }
 
+const templates = {
+  templates: [
+    {
+      template_id: 'python-dev',
+      description: 'Python dev box',
+      digest: 'sha256:abcdef0123456789',
+      kernel_image: '/srv/vmobs/images/vmlinux',
+      root_image: '/srv/vmobs/images/rootfs.img',
+      guest_privilege_profiles: ['unprivileged'],
+      sensors: ['fanotify'],
+      protocol_versions: { guestd: '1' },
+    },
+  ],
+}
+
 function jsonResponse(body: unknown, status = 200): Response {
   return {
     ok: status >= 200 && status < 300,
@@ -60,6 +93,7 @@ function routeFetch(overrides: Record<string, Response> = {}) {
       if (url.endsWith(suffix)) return res
     }
     if (url.endsWith('/host/status')) return jsonResponse(host)
+    if (url.includes('/templates')) return jsonResponse(templates)
     if (url.includes('/vms')) return jsonResponse(vms)
     if (url.includes('/attention')) return jsonResponse(attention)
     throw new Error(`unexpected fetch: ${url}`)

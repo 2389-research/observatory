@@ -564,6 +564,22 @@ func (s *Server) handleHostStatus(w http.ResponseWriter, r *http.Request) {
 		"max_batch_size":                   adm.MaxBatchSize,
 	}
 
+	// Per-VM defaults: what a create request gets for any resource it omits.
+	// The launch form prefills from these and renders the fields it cannot set
+	// yet at the value the host would apply anyway.
+	def := s.manager.DefaultParams()
+	resp["vm_defaults"] = map[string]any{
+		"vcpu_count":            def.VCPUCount,
+		"memory_mib":            def.MemoryMiB,
+		"root_disk_mib":         def.RootDiskMiB,
+		"workspace_disk_mib":    def.WorkspaceDiskMiB,
+		"guest_privilege":       def.GuestPrivilege,
+		"network_profile":       def.NetworkProfile,
+		"network_policy_id":     def.NetworkPolicyID,
+		"max_terminal_sessions": def.MaxTerminalSessions,
+		"stop_grace_seconds":    def.StopGraceSeconds,
+	}
+
 	// Preflight block: present only when the hook is wired. Never an empty fake block.
 	if s.preflight != nil {
 		refresh := r.URL.Query().Get("refresh") == "1"

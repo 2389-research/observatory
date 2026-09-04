@@ -20,6 +20,24 @@ const status = (over: Partial<HostStatus> = {}): HostStatus => ({
   },
   runtime: { available: true, reason: '' },
   vms: { running: 2, stopped: 1 },
+  admission: {
+    allow_memory_overcommit: false,
+    cpu_overcommit_ratio: 4,
+    reserve_per_vm_host_overhead_mib: 768,
+    max_parallel_provisions: 2,
+    max_batch_size: 8,
+  },
+  vm_defaults: {
+    vcpu_count: 1,
+    memory_mib: 512,
+    root_disk_mib: 4096,
+    workspace_disk_mib: 8192,
+    guest_privilege: 'unprivileged',
+    network_profile: 'transport',
+    network_policy_id: '',
+    max_terminal_sessions: 2,
+    stop_grace_seconds: 30,
+  },
   ...over,
 })
 

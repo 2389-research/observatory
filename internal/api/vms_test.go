@@ -51,6 +51,23 @@ func testAdmission() config.Admission {
 	}
 }
 
+// testVMDefaults gives the harness non-empty guest_privilege and
+// network_profile: the launch form renders those two as disabled controls at
+// their effective value, and empty strings would let a handler that published
+// nothing pass.
+func testVMDefaults() config.VMDefaults {
+	return config.VMDefaults{
+		MemoryMiB:           512,
+		VCPUCount:           1,
+		RootDiskMiB:         4096,
+		WorkspaceDiskMiB:    8192,
+		GuestPrivilege:      "unprivileged",
+		NetworkProfile:      "transport",
+		MaxTerminalSessions: 2,
+		StopGraceSeconds:    30,
+	}
+}
+
 func newTemplateServer(t *testing.T) (*httptest.Server, *store.Store, *runtimetest.Fake) {
 	t.Helper()
 	return newTemplateServerWrapped(t, nil)
@@ -78,12 +95,7 @@ func newTemplateServerWrapped(t *testing.T, wrap func(http.Handler) http.Handler
 	fake := runtimetest.NewFake()
 	mgr, err := runtime.NewManager(st, fake, runtime.ManagerConfig{
 		Admission: testAdmission(),
-		VMDefaults: config.VMDefaults{
-			MemoryMiB:        512,
-			VCPUCount:        1,
-			RootDiskMiB:      4096,
-			WorkspaceDiskMiB: 8192,
-		},
+		VMDefaults: testVMDefaults(),
 		Templates: map[string]runtime.Template{testTemplateDef.TemplateID: testTemplateDef},
 		Host:      runtime.HostResources{TotalMemoryMiB: 8192, CPUCores: 8, StateDiskFreeMiB: 100 * 1024},
 	})
@@ -989,6 +1001,85 @@ func TestHostStatusPublishesAdmissionParams(t *testing.T) {
 	if body.Admission.MaxParallelProvisions != want.MaxParallelProvisions {
 		t.Errorf("max_parallel_provisions = %d; want %d",
 			body.Admission.MaxParallelProvisions, want.MaxParallelProvisions)
+	}
+}
+
+// TestHostStatusPublishesVMDefaults pins the other half of what the launch
+// form needs: the resource values a create request gets when it omits them,
+// and the two fields the form can only display. Without these the browser
+// would prefill numbers of its own invention.
+func TestHostStatusPublishesVMDefaults(t *testing.T) {
+	srv, _, _ := newTemplateServer(t)
+	defer srv.Close()
+
+	var body struct {
+		VMDefaults struct {
+			VCPUCount        int    `json:"vcpu_count"`
+			MemoryMiB        int64  `json:"memory_mib"`
+			RootDiskMiB      int64  `json:"root_disk_mib"`
+			WorkspaceDiskMiB int64  `json:"workspace_disk_mib"`
+			GuestPrivilege   string `json:"guest_privilege"`
+			NetworkProfile   string `json:"network_profile"`
+			StopGraceSeconds int    `json:"stop_grace_seconds"`
+		} `json:"vm_defaults"`
+	}
+	getJSON(t, srv.URL+"/api/v1/host/status", http.StatusOK, &body)
+
+	want := testVMDefaults()
+	got := body.VMDefaults
+	if got.VCPUCount != want.VCPUCount || got.MemoryMiB != want.MemoryMiB ||
+		got.RootDiskMiB != want.RootDiskMiB || got.WorkspaceDiskMiB != want.WorkspaceDiskMiB {
+		t.Errorf("resources = %+v; want vcpu=%d mem=%d root=%d ws=%d", got,
+			want.VCPUCount, want.MemoryMiB, want.RootDiskMiB, want.WorkspaceDiskMiB)
+	}
+	if got.GuestPrivilege != want.GuestPrivilege {
+		t.Errorf("guest_privilege = %q; want %q", got.GuestPrivilege, want.GuestPrivilege)
+	}
+	if got.NetworkProfile != want.NetworkProfile {
+		t.Errorf("network_profile = %q; want %q", got.NetworkProfile, want.NetworkProfile)
+	}
+	if got.StopGraceSeconds != want.StopGraceSeconds {
+		t.Errorf("stop_grace_seconds = %d; want %d", got.StopGraceSeconds, want.StopGraceSeconds)
+	}
+}
+
+// TestHostStatusDefaultsAreTheDefaultsApplied is the honesty assertion for the
+// defaults block: a VM created with every resource omitted comes back holding
+// exactly the numbers /host/status published.
+func TestHostStatusDefaultsAreTheDefaultsApplied(t *testing.T) {
+	srv, _, _ := newTemplateServer(t)
+	defer srv.Close()
+
+	var status struct {
+		VMDefaults struct {
+			VCPUCount        int   `json:"vcpu_count"`
+			MemoryMiB        int64 `json:"memory_mib"`
+			RootDiskMiB      int64 `json:"root_disk_mib"`
+			WorkspaceDiskMiB int64 `json:"workspace_disk_mib"`
+		} `json:"vm_defaults"`
+	}
+	getJSON(t, srv.URL+"/api/v1/host/status", http.StatusOK, &status)
+
+	var created struct {
+		VM struct {
+			Resources struct {
+				VCPUCount        int   `json:"vcpu_count"`
+				MemoryMiB        int64 `json:"memory_mib"`
+				RootDiskMiB      int64 `json:"root_disk_mib"`
+				WorkspaceDiskMiB int64 `json:"workspace_disk_mib"`
+			} `json:"resources"`
+		} `json:"vm"`
+	}
+	postJSON(t, srv.URL+"/api/v1/vms", map[string]any{
+		"name":        "defaults-only",
+		"template_id": testTemplateDef.TemplateID,
+	}, http.StatusCreated, &created)
+
+	got := created.VM.Resources
+	pub := status.VMDefaults
+	if got.VCPUCount != pub.VCPUCount || got.MemoryMiB != pub.MemoryMiB ||
+		got.RootDiskMiB != pub.RootDiskMiB || got.WorkspaceDiskMiB != pub.WorkspaceDiskMiB {
+		t.Errorf("created VM resources %+v do not match published defaults %+v", got, pub)
 	}
 }
 

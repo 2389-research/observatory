@@ -8,8 +8,10 @@ import { useOperation, idempotencyKeyFor, clearIdempotencyKey } from './operatio
 afterEach(() => vi.unstubAllGlobals())
 beforeEach(() => sessionStorage.clear())
 
-function Probe({ fn }: { fn: () => Promise<{ operation_id?: string }> }) {
-  const op = useOperation<{ operation_id?: string }>()
+type OpReply = { operation_id?: string; operation?: { operation_id?: string } }
+
+function Probe({ fn }: { fn: () => Promise<OpReply> }) {
+  const op = useOperation<OpReply>()
   return (
     <>
       <span data-testid="state">{op.state}</span>
@@ -23,8 +25,8 @@ function Probe({ fn }: { fn: () => Promise<{ operation_id?: string }> }) {
 
 describe('useOperation', () => {
   it('moves idle to in_flight to done and publishes the operation id', async () => {
-    let release: (v: { operation_id: string }) => void = () => {}
-    const pending = new Promise<{ operation_id: string }>((r) => (release = r))
+    let release: (v: OpReply) => void = () => {}
+    const pending = new Promise<OpReply>((r) => (release = r))
     render(<Probe fn={() => pending} />)
 
     expect(screen.getByTestId('state')).toHaveTextContent('idle')
@@ -37,6 +39,13 @@ describe('useOperation', () => {
     })
     await waitFor(() => expect(screen.getByTestId('state')).toHaveTextContent('done'))
     expect(screen.getByTestId('op')).toHaveTextContent('op-77')
+  })
+
+  it('finds the operation id nested under operation, as POST /vms answers it', async () => {
+    render(<Probe fn={() => Promise.resolve({ operation: { operation_id: 'op-000042' } })} />)
+    act(() => screen.getByRole('button', { name: 'go' }).click())
+    await waitFor(() => expect(screen.getByTestId('state')).toHaveTextContent('done'))
+    expect(screen.getByTestId('op')).toHaveTextContent('op-000042')
   })
 
   it('keeps the typed failure instead of a bare message', async () => {

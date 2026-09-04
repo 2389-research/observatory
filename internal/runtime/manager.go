@@ -90,6 +90,17 @@ func (m *Manager) AdmissionParams() config.Admission {
 	return m.cfg.Admission
 }
 
+// DefaultParams returns the per-VM defaults this manager applies when a create
+// request leaves a resource at zero.
+//
+// The launch form prefills from these and shows the fields it cannot yet set
+// (guest privilege, network profile) at their effective values. A browser that
+// carried its own copy of these numbers would show a default the host does not
+// actually apply.
+func (m *Manager) DefaultParams() config.VMDefaults {
+	return m.cfg.VMDefaults
+}
+
 // ManagerConfig carries the host-level configuration the manager acts on.
 type ManagerConfig struct {
 	Admission  config.Admission

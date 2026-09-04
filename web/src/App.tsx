@@ -2,8 +2,9 @@
 // ABOUTME: Every panel comes from one poll of the API; nothing here derives numbers of its own.
 import { useCallback, useEffect, useState } from 'react'
 import { getJSON, ApiFailure } from './api'
-import type { AttentionList, HostStatus, VMList } from './types'
+import type { AttentionList, HostStatus, TemplateList, VMList } from './types'
 import { HostCapacity } from './components/HostCapacity'
+import { LaunchForm } from './components/LaunchForm'
 import { AttentionQueue } from './components/AttentionQueue'
 import { VMTable } from './components/VMTable'
 
@@ -13,6 +14,7 @@ interface Fleet {
   host: HostStatus
   vms: VMList
   attention: AttentionList
+  templates: TemplateList
 }
 
 export function App() {
@@ -22,12 +24,13 @@ export function App() {
 
   const load = useCallback(async () => {
     try {
-      const [host, vms, attention] = await Promise.all([
+      const [host, vms, attention, templates] = await Promise.all([
         getJSON<HostStatus>('/host/status'),
         getJSON<VMList>('/vms?limit=100'),
         getJSON<AttentionList>('/attention?limit=10'),
+        getJSON<TemplateList>('/templates'),
       ])
-      setFleet({ host, vms, attention })
+      setFleet({ host, vms, attention, templates })
       setFailure(null)
       setAsOf(new Date())
     } catch (e) {
@@ -82,6 +85,9 @@ export function App() {
           <section>
             <h2>Attention</h2>
             <AttentionQueue items={fleet.attention.items} />
+          </section>
+          <section>
+            <LaunchForm host={fleet.host} templates={fleet.templates.templates} onLaunched={() => void load()} />
           </section>
           <section>
             <h2>VMs</h2>

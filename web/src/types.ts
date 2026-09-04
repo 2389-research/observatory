@@ -13,11 +13,50 @@ export interface Capacity {
   active_vms: number
 }
 
+/** What the host charges and caps when admitting a VM. */
+export interface Admission {
+  allow_memory_overcommit: boolean
+  cpu_overcommit_ratio: number
+  reserve_per_vm_host_overhead_mib: number
+  max_parallel_provisions: number
+  max_batch_size: number
+}
+
+/** What a create request gets for every field it leaves out. */
+export interface VMDefaults {
+  vcpu_count: number
+  memory_mib: number
+  root_disk_mib: number
+  workspace_disk_mib: number
+  guest_privilege: string
+  network_profile: string
+  network_policy_id: string
+  max_terminal_sessions: number
+  stop_grace_seconds: number
+}
+
 export interface HostStatus {
   capacity: Capacity
   runtime: { available: boolean; reason: string }
   vms: Record<string, number>
+  admission: Admission
+  vm_defaults: VMDefaults
   preflight?: unknown
+}
+
+export interface Template {
+  template_id: string
+  description: string
+  digest: string
+  kernel_image: string
+  root_image: string
+  guest_privilege_profiles: string[]
+  sensors: string[]
+  protocol_versions: Record<string, string>
+}
+
+export interface TemplateList {
+  templates: Template[]
 }
 
 export interface VMResources {
