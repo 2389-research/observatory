@@ -12,7 +12,12 @@ proves scrollback replays but leaves "commands do not rerun" to AT-026; AT-025 m
 not host RSS; AT-028 records pause/resume as `inconclusive` because `Adapter.Pause` returns a typed
 `UnavailableError` in M1a and no `reboot` action exists, so its new-boot proof goes stop then start.
 AT-026 carries the §8.2 deviation it depends on: input sequence numbers are per connection, not per
-session. AT-029's browser half is asserted by `web/src/Terminal.test.tsx`, not by the Go gate, and
+session. The block opens by mapping SPEC §18's own M1 gate line onto the four subtests that satisfy
+it and naming the clause that is only partly satisfied: §18 says demonstrate, and the plan asked for
+storage and stop actions driven "through the web UI's own controls", while this gate drives them
+through the public API the UI is a client of. The controls have their own vitest coverage against
+real components; no run in this milestone drove a real browser against a real daemon, and the block
+says so rather than letting the reader infer it. AT-029's browser half is asserted by `web/src/Terminal.test.tsx`, not by the Go gate, and
 the entry says so. The gate found two product defects on its way to green, both fixed before the
 evidence was recorded and both named in the block: a terminal event stream bound API-wide when
 `internal/store/append.go` scopes a source stream to one VM, so every VM after the first lost its
@@ -22,7 +27,7 @@ boot's exit notice fail the boot after it (`320cfe1`). No requirement was weaken
 ### Results
 
 - 46 package checks passed (`uv run docs/validation/check.py`, exit 0).
-- All revision-14 results hold. The edit adds 179 lines to `docs/ACCEPTANCE.md`, all of them inside
+- All revision-14 results hold. The edit adds 200 lines to `docs/ACCEPTANCE.md`, all of them inside
   one HTML comment: no acceptance ID was added, removed or renumbered, no matrix row changed, no
   fenced code block was opened or closed (the block contains none), and check.py logic is untouched.
   The twelve IDs the block discusses, AT-019 through AT-030, already existed in the matrix.

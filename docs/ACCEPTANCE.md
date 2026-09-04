@@ -322,6 +322,27 @@ regression test first:
     an exit notice naming a different boot is ignored. Fixed at 320cfe1. This is what made AT-028
     fail with `409 invalid_transition from "failed" to "running"` over a live firecracker.
 
+SPEC §18's own M1 gate line — "demonstrate two simultaneously running VMs with independent
+terminals, storage and stop actions", gated on "no host shell proxy masquerading as a guest
+terminal; reconnect does not spawn a duplicate shell" — is satisfied by four of the subtests
+below, and one clause of it is only partly satisfied. Two simultaneous VMs with independent
+terminals and independent storage: at025_session_isolation, which writes each VM's own id into
+/tmp/m1b.mark inside that guest and reads it back, with neither stream ever carrying the other's
+marker. No host shell proxy: at019_real_guest_pty, where tty names a guest /dev/pts device,
+/proc/self/cgroup and ls /dev/vd* answer as the guest, and no new descendant of vmobsd or
+vmobs-runner appears for the duration. Reconnect spawns no duplicate shell: at022, same guest pid
+across a drop and reattach with one replay, and at026, which asserts the guest re-ran nothing.
+Stop actions: at028, stop then start, with a new boot id.
+
+The partial clause is how those actions were driven. §18 says demonstrate; the plan's Task 14
+step 7 asked for storage and stop actions "through the web UI's own controls". This gate drives
+them through the public API the UI is a client of, not through a browser. The controls themselves
+are asserted in vitest against real components with fetch and WebSocket stubbed
+(web/src/components/BulkActions.test.tsx, VMTable.test.tsx, LaunchForm.test.tsx, LaunchBatch.test.tsx,
+web/src/VMDetail.test.tsx, Terminal.test.tsx), so both halves are tested and neither half is
+tested against the other. No run in this milestone drove a real browser against a real daemon.
+That end-to-end run is unrun, and nothing below should be read as claiming it.
+
 AT-019: TESTED_PASS.
   Test: m1b_gate_test.go:at019_real_guest_pty. Asserts the session's tty is a guest pts, that the
     guest's hostname and kernel differ from the host's, that guest-only paths exist (/dev/vd*,
