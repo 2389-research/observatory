@@ -48,6 +48,12 @@ type Query struct {
 	After  string  // "": from the start
 	Until  string  // "": no upper bound (inclusive); decimal event_id
 	Limit  int     // 0: DefaultPageLimit
+	// Tail takes the page from the newest end of the range instead of the
+	// oldest. The page itself is still ordered oldest-first and NextAfter is
+	// still the highest cursor on it, so a reader that starts at the tail and
+	// then walks forward with After needs no special case. Without this a
+	// "recent" view has to read the whole history to reach the last page.
+	Tail bool
 }
 
 // QueryResult always states how far the store goes (LatestEventID) so an empty
@@ -131,8 +137,12 @@ func (s *Store) Query(ctx context.Context, q Query) (QueryResult, error) {
 	}
 	args = append(args, limit)
 
+	order := "ASC"
+	if q.Tail {
+		order = "DESC"
+	}
 	rows, err := s.readers.QueryContext(ctx,
-		`SELECT event_id, payload FROM events WHERE `+where+` ORDER BY event_id ASC LIMIT ?`, args...)
+		`SELECT event_id, payload FROM events WHERE `+where+` ORDER BY event_id `+order+` LIMIT ?`, args...)
 	if err != nil {
 		return zero, fmt.Errorf("query events: %w", err)
 	}
@@ -152,10 +162,19 @@ func (s *Store) Query(ctx context.Context, q Query) (QueryResult, error) {
 		cursor := strconv.FormatInt(id, 10)
 		env.EventID = &cursor
 		result.Events = append(result.Events, env)
-		result.NextAfter = cursor
 	}
 	if err := rows.Err(); err != nil {
 		return zero, fmt.Errorf("iterate events: %w", err)
+	}
+	if q.Tail {
+		// The scan read newest-first to find the end of the range; the page a
+		// caller sees is always oldest-first.
+		for i, j := 0, len(result.Events)-1; i < j; i, j = i+1, j-1 {
+			result.Events[i], result.Events[j] = result.Events[j], result.Events[i]
+		}
+	}
+	if n := len(result.Events); n > 0 {
+		result.NextAfter = *result.Events[n-1].EventID
 	}
 
 	var latest int64

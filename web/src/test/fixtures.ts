@@ -1,6 +1,6 @@
 // ABOUTME: The API-shaped fixtures every web test reads, in one place.
 // ABOUTME: A second copy would drift, and a drifted fixture hides a real wire change.
-import type { HostStatus, Template, VM } from '../types'
+import type { EventEnvelope, HostStatus, Template, VM } from '../types'
 
 export const testHost: HostStatus = {
   capacity: {
@@ -68,5 +68,40 @@ export function testVM(overrides: Partial<VM> = {}): VM {
     updated_at: '2026-09-04T10:00:05Z',
     links: { self: '/api/v1/vms/vm-1' },
     ...overrides,
+  }
+}
+
+/**
+ * One `operation.state_changed` event, shaped the way the daemon emits it: the
+ * envelope's vm_id is null and the VM is named inside `data` (internal/store).
+ */
+export function testOperationEvent(
+  o: {
+    event_id?: string
+    operation_id?: string
+    kind?: string
+    vm_id?: string
+    phase?: string
+    state?: string
+    attempt?: number
+    error?: { cause: string; message: string }
+    host_received_at?: string
+  } = {},
+): EventEnvelope {
+  return {
+    event_id: o.event_id ?? '1',
+    kind: 'operation.state_changed',
+    vm_id: null,
+    provenance: 'host_observed',
+    host_received_at: o.host_received_at ?? '2026-09-04T10:00:00Z',
+    data: {
+      operation_id: o.operation_id ?? 'op-000001',
+      kind: o.kind ?? 'vm.create',
+      vm_id: o.vm_id ?? 'vm-1',
+      phase: o.phase ?? 'running',
+      state: o.state ?? 'running',
+      attempt: o.attempt ?? 1,
+      ...(o.error ? { error: o.error } : {}),
+    },
   }
 }

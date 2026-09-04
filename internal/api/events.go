@@ -112,6 +112,30 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		q.Limit = limit
 	}
+	// Strict, unlike the destructive force= flag whose safe reading of a typo
+	// is "no". A misspelled tail= that quietly meant false would hand back the
+	// oldest page to a caller who asked for the newest, and nothing in the
+	// response would say so.
+	if raw := params.Get("tail"); raw != "" {
+		switch raw {
+		case "true":
+			q.Tail = true
+		case "false":
+		default:
+			writeError(w, http.StatusBadRequest, Error{
+				Code:      "malformed_request",
+				Message:   fmt.Sprintf("tail %q is not true or false", raw),
+				Retryable: false,
+				Cause:     "query_parameter_invalid",
+				Remediation: []Remediation{{
+					Action:    "get",
+					Params:    map[string]any{"path": basePath + "/events", "tail": "true"},
+					Rationale: "tail=true returns the newest page in the range; leaving it off pages forward from after",
+				}},
+			})
+			return
+		}
+	}
 	q.After = params.Get("after")
 
 	result, err := s.store.Query(r.Context(), q)

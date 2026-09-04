@@ -172,3 +172,28 @@ export interface BatchReply {
   members: BatchMember[]
   is_replay?: boolean
 }
+
+/**
+ * One event as GET /events returns it. Only the fields this UI reads are named;
+ * the wire envelope carries more (SPEC §12.1).
+ *
+ * Store-synthesized events — `vm.*`, `operation.*`, `run.*` — ride the host-wide
+ * stream with a null envelope `vm_id` and name their VM inside `data`, so a
+ * reader that wants the VM must look in both places.
+ */
+export interface EventEnvelope {
+  event_id: string
+  kind: string
+  vm_id: string | null
+  provenance: string
+  host_received_at: string
+  data: Record<string, unknown>
+}
+
+export interface EventPage {
+  events: EventEnvelope[]
+  /** Resume cursor: the highest event_id on this page. */
+  next_after: string
+  /** How far the store goes, so an empty page reads as quiet, not as a gap. */
+  latest_event_id: string
+}

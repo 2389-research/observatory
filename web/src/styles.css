@@ -186,7 +186,7 @@ h2 {
 /* Honest gaps */
 
 .unknown {
-  color: #6e7681;
+  color: var(--dim);
   font-style: italic;
   font-size: 12px;
 }
@@ -480,7 +480,7 @@ h2 {
 }
 
 .launch button:disabled {
-  background: var(--line);
+  background: #21262d;
   color: var(--dim);
   cursor: default;
 }
@@ -532,14 +532,14 @@ h2 {
 .link-button {
   background: none;
   border: none;
-  color: var(--dim);
+  color: var(--accent);
   text-decoration: underline;
   cursor: pointer;
   padding: 0;
   font-size: 0.85rem;
 }
 .link-button:disabled {
-  color: var(--line);
+  color: var(--dim);
   cursor: default;
   text-decoration: none;
 }
@@ -722,4 +722,95 @@ h2 {
 .vms input:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
+}
+
+/* Lifecycle filter (SPEC §13.7): the same axis GET /vms takes, in the URL. */
+
+.filter {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 12px 10px;
+  margin: 0 0 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+}
+.filter legend {
+  color: var(--dim);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 0 4px;
+}
+.filter-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.filter input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* The singled-out row: ?vm= names it, and it is announced as current. */
+.vm-row.selected {
+  background: #21262d;
+}
+
+/* Recent operations — the host's own event stream, not this tab's history. */
+
+.operations {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.operation {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 12px;
+}
+.op-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+}
+.op-id {
+  color: var(--ink);
+}
+.op-kind {
+  color: var(--ink);
+  font-weight: 600;
+}
+.op-state {
+  font-weight: 600;
+}
+.op-running {
+  color: var(--accent);
+}
+.op-succeeded {
+  color: var(--ok);
+}
+.op-failed {
+  color: var(--bad);
+}
+.op-phase,
+.op-age,
+.op-provenance,
+.op-vm {
+  color: var(--dim);
+}
+.op-age,
+.op-provenance {
+  margin-left: auto;
+}
+.op-error {
+  color: var(--bad);
+  margin-top: 4px;
 }

@@ -488,3 +488,49 @@ func TestParallelAppendsSerialize(t *testing.T) {
 		t.Errorf("latest cursor = %q", latest)
 	}
 }
+
+// TestQueryTailReadsTheNewestPage covers the read every "recent" view needs.
+// Ascending pages answer "what happened after this cursor"; nothing answers
+// "what happened last" without walking the whole history, which P-01 forbids.
+// Tail selects the highest ids inside the same bounds and still hands them back
+// oldest-first, so next_after remains a forward cursor and a poller started
+// from a tail read keeps working unchanged.
+func TestQueryTailReadsTheNewestPage(t *testing.T) {
+	s := openStore(t)
+	vm, boot := testUUID(1), testUUID(2)
+	for i := 1; i <= 250; i++ {
+		mustAppend(t, s, fsModify(testUUID(9), strconv.Itoa(i), &vm, &boot))
+	}
+
+	page := queryAll(t, s, store.Query{Tail: true, Limit: 20})
+	if len(page.Events) != 20 {
+		t.Fatalf("tail page = %d events, want 20", len(page.Events))
+	}
+	if got := *page.Events[0].EventID; got != "231" {
+		t.Errorf("first event on tail page = %s, want 231 (newest 20 of 250)", got)
+	}
+	if got := *page.Events[19].EventID; got != "250" {
+		t.Errorf("last event on tail page = %s, want 250; tail pages stay oldest-first", got)
+	}
+	// next_after is the highest id on the page, not the lowest: a poller that
+	// starts at the tail and walks forward must not re-read what it just saw.
+	if page.NextAfter != "250" || page.LatestEventID != "250" {
+		t.Errorf("tail cursors: next %q latest %q, want 250/250", page.NextAfter, page.LatestEventID)
+	}
+
+	// Bounds still apply: tail means "the newest inside the range", not "the
+	// newest in the store".
+	bounded := queryAll(t, s, store.Query{Tail: true, Limit: 5, Until: "100"})
+	if len(bounded.Events) != 5 || *bounded.Events[0].EventID != "96" || bounded.NextAfter != "100" {
+		t.Errorf("bounded tail: %d events, first %v, next %q", len(bounded.Events),
+			*bounded.Events[0].EventID, bounded.NextAfter)
+	}
+
+	// An empty tail page is still evidence of quiet, with the same cursors an
+	// empty forward page carries.
+	empty := queryAll(t, s, store.Query{Tail: true, Kind: "telemetry.loss"})
+	if len(empty.Events) != 0 || empty.NextAfter != "" || empty.LatestEventID != "250" {
+		t.Errorf("empty tail: %d events, next %q, latest %q", len(empty.Events),
+			empty.NextAfter, empty.LatestEventID)
+	}
+}

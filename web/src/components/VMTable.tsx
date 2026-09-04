@@ -46,9 +46,19 @@ function Labels({ labels }: { labels: Record<string, string> | null }) {
   )
 }
 
-export function VMTable({ vms, controls }: { vms: VM[]; controls: FleetControls }) {
+interface Props {
+  vms: VM[]
+  controls: FleetControls
+  /** A lifecycle filter is active, so an empty table is not an empty host. */
+  filtered?: boolean
+  /** The VM singled out in the URL (SPEC §13.7), if any. */
+  selectedVM?: string
+  onSelectVM?: (vmID: string) => void
+}
+
+export function VMTable({ vms, controls, filtered = false, selectedVM, onSelectVM }: Props) {
   if (vms.length === 0) {
-    return <p className="empty">No VMs on this host.</p>
+    return <p className="empty">{filtered ? 'No VMs match this filter.' : 'No VMs on this host.'}</p>
   }
   return (
     <table className="vms">
@@ -72,7 +82,12 @@ export function VMTable({ vms, controls }: { vms: VM[]; controls: FleetControls 
       </thead>
       <tbody>
         {vms.map((vm) => (
-          <tr key={vm.vm_id} data-testid={`vm-row-${vm.vm_id}`}>
+          <tr
+            key={vm.vm_id}
+            data-testid={`vm-row-${vm.vm_id}`}
+            className={vm.vm_id === selectedVM ? 'vm-row selected' : 'vm-row'}
+            aria-current={vm.vm_id === selectedVM ? 'true' : undefined}
+          >
             <td>
               <input
                 type="checkbox"
@@ -83,7 +98,20 @@ export function VMTable({ vms, controls }: { vms: VM[]; controls: FleetControls 
             </td>
             <td>
               <div className="name" data-testid="vm-name">
-                {neutralize(vm.name)}
+                {onSelectVM ? (
+                  // Singling out a row writes ?vm= so a reload, or a colleague
+                  // opening the link, lands on the same VM.
+                  <button
+                    type="button"
+                    className="link-button"
+                    onClick={() => onSelectVM(vm.vm_id)}
+                    aria-pressed={vm.vm_id === selectedVM}
+                  >
+                    {neutralize(vm.name)}
+                  </button>
+                ) : (
+                  neutralize(vm.name)
+                )}
               </div>
               <div className="sub">
                 <code>{vm.vm_id.slice(0, 8)}</code>
