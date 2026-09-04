@@ -1,5 +1,41 @@
 # Specification Package Validation
 
+## Revision 16 (2026-09-04) — a real browser against a real daemon, and the capacity leak it found
+
+Run after the M1b live gate's last open clause was closed by hand. SPEC §18 asks for storage and stop
+actions to be demonstrated, and revision 15 recorded honestly that the Go gate drives them through
+the public API rather than through a browser — the one thing in the M1 gate line no automated run had
+covered. That run has now happened: a real Chrome loaded `/ui/` from a real `vmobsd` on aibox03 with
+three VMs up, and demo-3 was stopped and started again by clicking its own buttons in the fleet
+table. The two sentences saying the run was unrun are replaced by what it did, with the numbers the
+page rendered and the operation ids the host recorded, all of them re-derivable from
+`/api/v1/host/status` and `/api/v1/vms`.
+
+The run earned its keep. With all three VMs running again, host status reported `active_vms: 3`
+alongside `reserved_memory_mib: 2560` and `reserved_vcpu: 2` — two VMs' worth — while reserved disk
+stayed correct at three VMs' worth. Stopping a VM releases its compute reservation and starting it
+never takes the reservation back: `internal/store/vms.go` writes `compute_released` in two places
+and both set it to 1, and the `start` case in `internal/runtime/manager.go` never touches the
+reservation row. Admission sums those rows, so a VM that has been stopped and started once is
+invisible to the check that keeps the host from overcommitting. It is filed as kata `r799` (P1) and
+unfixed at this commit; the acceptance block names it, states it is not an M1 gate blocker because no
+AT asserts capacity across a stop/start, and says why it is recorded there anyway. Fixing it inside
+the gate task would have changed the binaries the two recorded PASS runs were measured against.
+
+### Results
+
+- 46 package checks passed (`uv run docs/validation/check.py`, exit 0).
+- All revision-15 results hold. The edit changes 31 lines and removes 6 in `docs/ACCEPTANCE.md`, all
+  of them inside the same "L1 M1b status notes" HTML comment: no acceptance ID was added, removed or
+  renumbered, no matrix row changed, no fenced code block was opened or closed, and check.py logic is
+  untouched.
+- Revision 15's claim that no browser run had happened is superseded, not deleted; a dated correction
+  clause on that revision points here.
+
+### Check log
+
+- PASS — All 46 checks (identical list to revision 15; output elided for brevity).
+
 ## Revision 15 (2026-09-04) — M1b live-gate evidence: AT-019..AT-030 recorded, four of them partial
 
 Run after the M1b terminal gate went green on aibox03 (code at `37d2e1b`; this revision carries the
@@ -17,7 +53,8 @@ it and naming the clause that is only partly satisfied: §18 says demonstrate, a
 storage and stop actions driven "through the web UI's own controls", while this gate drives them
 through the public API the UI is a client of. The controls have their own vitest coverage against
 real components; no run in this milestone drove a real browser against a real daemon, and the block
-says so rather than letting the reader infer it. AT-029's browser half is asserted by `web/src/Terminal.test.tsx`, not by the Go gate, and
+says so rather than letting the reader infer it. (Corrected 2026-09-04: that browser run was done
+later the same day and is recorded in revision 16, which rewrites those two sentences of the block.) AT-029's browser half is asserted by `web/src/Terminal.test.tsx`, not by the Go gate, and
 the entry says so. The gate found two product defects on its way to green, both fixed before the
 evidence was recorded and both named in the block: a terminal event stream bound API-wide when
 `internal/store/append.go` scopes a source stream to one VM, so every VM after the first lost its

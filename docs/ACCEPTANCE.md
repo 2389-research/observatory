@@ -334,14 +334,39 @@ vmobs-runner appears for the duration. Reconnect spawns no duplicate shell: at02
 across a drop and reattach with one replay, and at026, which asserts the guest re-ran nothing.
 Stop actions: at028, stop then start, with a new boot id.
 
-The partial clause is how those actions were driven. §18 says demonstrate; the plan's Task 14
-step 7 asked for storage and stop actions "through the web UI's own controls". This gate drives
-them through the public API the UI is a client of, not through a browser. The controls themselves
-are asserted in vitest against real components with fetch and WebSocket stubbed
+One clause needs a word about how those actions were driven. §18 says demonstrate; the plan's
+Task 14 step 7 asked for storage and stop actions "through the web UI's own controls". This gate
+drives them through the public API the UI is a client of, not through a browser. The controls
+themselves are asserted in vitest against real components with fetch and WebSocket stubbed
 (web/src/components/BulkActions.test.tsx, VMTable.test.tsx, LaunchForm.test.tsx, LaunchBatch.test.tsx,
 web/src/VMDetail.test.tsx, Terminal.test.tsx), so both halves are tested and neither half is
-tested against the other. No run in this milestone drove a real browser against a real daemon.
-That end-to-end run is unrun, and nothing below should be read as claiming it.
+tested against the other. The gate below is API-driven throughout; nothing in it is browser
+evidence.
+
+That browser run was then done separately, and it is the record for §18's "storage and stop
+actions" clause. On 2026-09-04 a real Chrome (agent-browser, 1440x900) loaded /ui/ from a real
+vmobsd on aibox03 serving three VMs at 1 vCPU / 512 MiB / 2048 MiB root / 1024 MiB workspace,
+launched by scripts/aibox03/demo. Storage: the fleet page's capacity panel read `Disk 9216 /
+35966 MiB, 26750 MiB free` and each VM row read `2048 MiB root / 1024 MiB workspace`, both
+matching GET /api/v1/host/status. Stop: demo-3's own Stop button was clicked, and the API then
+reported that VM `stopped/stopped rev 5` with `op-000005 succeeded`; its Start button, disabled
+while it ran, became enabled and the other four actions took their disabled reasons ("Pause needs
+a running VM; this one is stopped"). Start: that Start button was clicked, and the VM returned to
+`running/running rev 7` with `op-000006 succeeded`. Screenshots of all three states were taken
+and are not committed — the numbers they show are quoted above and are reproducible from
+/api/v1/host/status and /api/v1/vms.
+
+That run found a defect the API-driven gate did not. After the round trip, with all three VMs
+running, host status reported `active_vms: 3` but `reserved_memory_mib: 2560` and `reserved_vcpu:
+2` — two VMs' worth — while `reserved_disk_mib: 9216` stayed correct at three. Stopping a VM
+releases its compute reservation and starting it never takes the reservation back:
+internal/store/vms.go writes `compute_released` in exactly two places (lines 579 and 585) and
+both set it to 1, and the start case at internal/runtime/manager.go:753 never touches the
+reservation row. Admission sums those rows, so every VM that has been stopped and started once
+is invisible to the check that keeps the host from overcommitting. Filed as kata r799 (P1),
+unfixed at this commit. It is not an M1 gate blocker — no AT below asserts capacity accounting
+across a stop/start — and it is recorded here because the gate's evidence must say what the gate
+did not cover.
 
 AT-019: TESTED_PASS.
   Test: m1b_gate_test.go:at019_real_guest_pty. Asserts the session's tty is a guest pts, that the
