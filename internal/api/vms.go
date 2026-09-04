@@ -561,7 +561,10 @@ func (s *Server) handleHostStatus(w http.ResponseWriter, r *http.Request) {
 		"cpu_overcommit_ratio":             adm.CPUOvercommitRatio,
 		"reserve_per_vm_host_overhead_mib": adm.ReservePerVMHostOverheadMiB,
 		"max_parallel_provisions":          adm.MaxParallelProvisions,
-		"max_batch_size":                   adm.MaxBatchSize,
+		// The enforced cap, not the raw config field: a host that never set
+		// max_batch_size still enforces SPEC §6.3's default, and a form that
+		// warned at 0 would warn at a threshold nothing applies.
+		"max_batch_size": s.maxBatchSize(),
 	}
 
 	// Per-VM defaults: what a create request gets for any resource it omits.

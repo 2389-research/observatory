@@ -15,10 +15,20 @@ import (
 	"github.com/2389-research/observatory-v2/internal/store"
 )
 
-// MaxBatchSize is the maximum number of members allowed in a single batch.
-// It lives in the API layer because it is a protocol constraint, not a
-// store or admission constraint.
-const MaxBatchSize = 50
+// DefaultMaxBatchSize is SPEC §6.3's published batch size limit, applied when
+// a host's admission config leaves max_batch_size unset. A host that sets it
+// gets its own number: the cap the API enforces, the cap GET /meta publishes
+// and the cap GET /host/status publishes are one number, so a UI that warns
+// before submitting warns at the threshold the daemon actually applies.
+const DefaultMaxBatchSize = 8
+
+// maxBatchSize is the members-per-request cap this host enforces.
+func (s *Server) maxBatchSize() int {
+	if n := s.manager.AdmissionParams().MaxBatchSize; n > 0 {
+		return n
+	}
+	return DefaultMaxBatchSize
+}
 
 func renderBatchID(id int64) string { return fmt.Sprintf("batch-%06d", id) }
 
@@ -178,13 +188,13 @@ func (s *Server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if len(body.Members) > MaxBatchSize {
+	if maxMembers := s.maxBatchSize(); len(body.Members) > maxMembers {
 		writeError(w, http.StatusBadRequest, Error{
 			Code:      "malformed_request",
-			Message:   fmt.Sprintf("batch has %d members, maximum is %d", len(body.Members), MaxBatchSize),
+			Message:   fmt.Sprintf("batch has %d members, maximum is %d", len(body.Members), maxMembers),
 			Retryable: false,
 			Cause:     "batch_too_large",
-			Details:   map[string]any{"max_batch_size": MaxBatchSize},
+			Details:   map[string]any{"max_batch_size": maxMembers},
 		})
 		return
 	}

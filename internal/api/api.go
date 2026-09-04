@@ -194,7 +194,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 			AnnotationTextMaxBytes:    store.AnnotationTextMaxBytes,
 			AttentionQueueMaxItems:    s.engine.Config().QueueMaxItems,
 			SituationMaxResponseBytes: s.engine.Config().SituationMaxResponseBytes,
-			MaxBatchSize:              MaxBatchSize,
+			MaxBatchSize:              s.maxBatchSize(),
 		},
 		// The active set is enabled-intersect-implemented, straight from the
 		// engine: config alone must not claim a watch no code performs (P-03).

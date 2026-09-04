@@ -73,11 +73,27 @@ func newTemplateServer(t *testing.T) (*httptest.Server, *store.Store, *runtimete
 	return newTemplateServerWrapped(t, nil)
 }
 
+// newTemplateServerAdmission is newTemplateServer on a host with different
+// admission settings, for tests about what those settings change.
+func newTemplateServerAdmission(t *testing.T, adm config.Admission) (*httptest.Server, *store.Store, *runtimetest.Fake) {
+	t.Helper()
+	return newTemplateServerFull(t, nil, adm)
+}
+
 // newTemplateServerWrapped is newTemplateServer with a middleware hook. wrap is
 // applied to the API handler before it is served; nil means serve it unwrapped.
 // Tests that need to observe the request context itself (client disconnect) use
 // the hook instead of guessing at timing.
 func newTemplateServerWrapped(t *testing.T, wrap func(http.Handler) http.Handler) (*httptest.Server, *store.Store, *runtimetest.Fake) {
+	t.Helper()
+	return newTemplateServerFull(t, wrap, testAdmission())
+}
+
+func newTemplateServerFull(
+	t *testing.T,
+	wrap func(http.Handler) http.Handler,
+	adm config.Admission,
+) (*httptest.Server, *store.Store, *runtimetest.Fake) {
 	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "events.sqlite"))
 	if err != nil {
@@ -94,7 +110,7 @@ func newTemplateServerWrapped(t *testing.T, wrap func(http.Handler) http.Handler
 	})
 	fake := runtimetest.NewFake()
 	mgr, err := runtime.NewManager(st, fake, runtime.ManagerConfig{
-		Admission:  testAdmission(),
+		Admission:  adm,
 		VMDefaults: testVMDefaults(),
 		Templates:  map[string]runtime.Template{testTemplateDef.TemplateID: testTemplateDef},
 		Host:       runtime.HostResources{TotalMemoryMiB: 8192, CPUCores: 8, StateDiskFreeMiB: 100 * 1024},

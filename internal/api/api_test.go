@@ -159,7 +159,7 @@ func TestMetaIsHonest(t *testing.T) {
 	if meta.Limits["annotation_text_max_bytes"] != store.AnnotationTextMaxBytes ||
 		meta.Limits["attention_queue_max_items"] != 500 ||
 		meta.Limits["situation_max_response_bytes"] != 65536 ||
-		meta.Limits["max_batch_size"] != api.MaxBatchSize {
+		meta.Limits["max_batch_size"] != api.DefaultMaxBatchSize {
 		t.Errorf("working-set limits missing: %v", meta.Limits)
 	}
 	// The active set is enabled-intersect-implemented, never the raw config.

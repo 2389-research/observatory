@@ -3,6 +3,7 @@
 package api_test
 
 import (
+	"fmt"
 	"net/http"
 	"testing"
 
@@ -89,7 +90,7 @@ func TestCreateBatchUnknownTemplate(t *testing.T) {
 func TestCreateBatchTooLarge(t *testing.T) {
 	srv, _, _ := newTemplateServer(t)
 
-	names := make([]string, api.MaxBatchSize+1)
+	names := make([]string, api.DefaultMaxBatchSize+1)
 	for i := range names {
 		names[i] = "vm"
 	}
@@ -98,6 +99,94 @@ func TestCreateBatchTooLarge(t *testing.T) {
 		batchBody("atomic_reservation", "keep_successful", names...),
 		http.StatusBadRequest, &e)
 	requireTeaching(t, e, "malformed_request")
+}
+
+// TestBatchSizeCapIsTheConfiguredOne pins SPEC §6.3's limits table ("Batch
+// size limit: 8 per request") to the host's own admission config rather than a
+// constant in this package. Two different numbers under the name
+// max_batch_size — one in GET /meta, one in GET /host/status — would leave the
+// UI warning at a threshold the daemon does not enforce.
+func TestBatchSizeCapIsTheConfiguredOne(t *testing.T) {
+	adm := testAdmission()
+	adm.MaxBatchSize = 3
+	srv, _, _ := newTemplateServerAdmission(t, adm)
+
+	var meta struct {
+		Limits map[string]int64 `json:"limits"`
+	}
+	getJSON(t, srv.URL+"/api/v1/meta", http.StatusOK, &meta)
+	if meta.Limits["max_batch_size"] != 3 {
+		t.Errorf("meta limits max_batch_size = %d; want the configured 3", meta.Limits["max_batch_size"])
+	}
+
+	var status struct {
+		Admission struct {
+			MaxBatchSize int `json:"max_batch_size"`
+		} `json:"admission"`
+	}
+	getJSON(t, srv.URL+"/api/v1/host/status", http.StatusOK, &status)
+	if int64(status.Admission.MaxBatchSize) != meta.Limits["max_batch_size"] {
+		t.Errorf("host/status says %d and meta says %d; one name, one number",
+			status.Admission.MaxBatchSize, meta.Limits["max_batch_size"])
+	}
+
+	var e api.Error
+	doRequest(t, http.MethodPost, srv.URL+"/api/v1/vm-batches",
+		batchBody("atomic_reservation", "keep_successful", "a", "b", "c", "d"),
+		http.StatusBadRequest, &e)
+	requireTeaching(t, e, "malformed_request")
+	if e.Cause != "batch_too_large" {
+		t.Errorf("cause = %q; want batch_too_large", e.Cause)
+	}
+
+	// Exactly at the cap is admitted: the refusal is for more than the cap.
+	doRequest(t, http.MethodPost, srv.URL+"/api/v1/vm-batches",
+		batchBody("atomic_reservation", "keep_successful", "a", "b", "c"),
+		http.StatusCreated, nil)
+}
+
+// TestBatchSizeCapUnconfiguredIsTheSpecDefault covers the host that never set
+// max_batch_size. The published number must be the one the API enforces, so a
+// zero in the config cannot become a zero on the wire.
+func TestBatchSizeCapUnconfiguredIsTheSpecDefault(t *testing.T) {
+	adm := testAdmission()
+	adm.MaxBatchSize = 0
+	srv, _, _ := newTemplateServerAdmission(t, adm)
+
+	var status struct {
+		Admission struct {
+			MaxBatchSize int `json:"max_batch_size"`
+		} `json:"admission"`
+	}
+	getJSON(t, srv.URL+"/api/v1/host/status", http.StatusOK, &status)
+	if status.Admission.MaxBatchSize != api.DefaultMaxBatchSize {
+		t.Errorf("host/status max_batch_size = %d; want the enforced default %d",
+			status.Admission.MaxBatchSize, api.DefaultMaxBatchSize)
+	}
+
+	var meta struct {
+		Limits map[string]int64 `json:"limits"`
+	}
+	getJSON(t, srv.URL+"/api/v1/meta", http.StatusOK, &meta)
+	if meta.Limits["max_batch_size"] != int64(api.DefaultMaxBatchSize) {
+		t.Errorf("meta max_batch_size = %d; want %d", meta.Limits["max_batch_size"], api.DefaultMaxBatchSize)
+	}
+
+	names := make([]string, api.DefaultMaxBatchSize+1)
+	for i := range names {
+		names[i] = fmt.Sprintf("vm-%d", i)
+	}
+	var e api.Error
+	doRequest(t, http.MethodPost, srv.URL+"/api/v1/vm-batches",
+		batchBody("atomic_reservation", "keep_successful", names...),
+		http.StatusBadRequest, &e)
+	if e.Cause != "batch_too_large" {
+		t.Errorf("cause = %q; want batch_too_large", e.Cause)
+	}
+	// JSON numbers decode as float64; compare as text so 8 and 8.0 agree.
+	if got := e.Details["max_batch_size"]; fmt.Sprint(got) != fmt.Sprint(api.DefaultMaxBatchSize) {
+		t.Errorf("error details max_batch_size = %v; want %d", got, api.DefaultMaxBatchSize)
+	}
 }
 
 func TestCreateBatchEmpty(t *testing.T) {
