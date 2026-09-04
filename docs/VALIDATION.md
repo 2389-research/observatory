@@ -1,5 +1,36 @@
 # Specification Package Validation
 
+## Revision 15 (2026-09-04) — M1b live-gate evidence: AT-019..AT-030 recorded, four of them partial
+
+Run after the M1b terminal gate went green on aibox03 (code at `37d2e1b`; this revision carries the
+docs). `docs/ACCEPTANCE.md` gained one HTML comment block, "L1 M1b status notes (2026-09-04)",
+recording what two consecutive PASS runs of `TestM1bGate` establish and — as importantly — what they
+do not. Each of AT-019..AT-030 gets a status, the test function that produced it, the assertion that
+bites, and a quoted line from `tests/integration/evidence/m1b-gate-aibox03.txt`. Four entries are
+labelled partial and say which half is unproven: AT-021 exercises `bg` and never sends `fg`; AT-022
+proves scrollback replays but leaves "commands do not rerun" to AT-026; AT-025 measures the wire and
+not host RSS; AT-028 records pause/resume as `inconclusive` because `Adapter.Pause` returns a typed
+`UnavailableError` in M1a and no `reboot` action exists, so its new-boot proof goes stop then start.
+AT-026 carries the §8.2 deviation it depends on: input sequence numbers are per connection, not per
+session. AT-029's browser half is asserted by `web/src/Terminal.test.tsx`, not by the Go gate, and
+the entry says so. The gate found two product defects on its way to green, both fixed before the
+evidence was recorded and both named in the block: a terminal event stream bound API-wide when
+`internal/store/append.go` scopes a source stream to one VM, so every VM after the first lost its
+session events (`114a03e`); and a `vm.vmm_exited` that crossed the spool boot-blind, letting one
+boot's exit notice fail the boot after it (`320cfe1`). No requirement was weakened to pass a test.
+
+### Results
+
+- 46 package checks passed (`uv run docs/validation/check.py`, exit 0).
+- All revision-14 results hold. The edit adds 179 lines to `docs/ACCEPTANCE.md`, all of them inside
+  one HTML comment: no acceptance ID was added, removed or renumbered, no matrix row changed, no
+  fenced code block was opened or closed (the block contains none), and check.py logic is untouched.
+  The twelve IDs the block discusses, AT-019 through AT-030, already existed in the matrix.
+
+### Check log
+
+- PASS — All 46 checks (identical list to revision 14; output elided for brevity).
+
 ## Revision 14 (2026-09-03) — the jailer's argv spelling is `--id <id>`, not `--id=<id>`
 
 Run after the rollback kill-target fix (code at `e3fb98d`; this revision carries the docs). `docs/runbooks/aibox03.md` asserted in its `jail-stop` paragraph that "the process title is `firecracker --id=<id> ...` (using `=`, not space)". That is false, and it points the wrong way at exactly the moment it matters: privd's `AbortStartVM` now proves a kill target by `--id` and the VM id as two adjacent argv elements, so an operator or agent reading the runbook would conclude the predicate can never match and undo it. Jailer v1.16.1 builds the child command with `.args(["--id", &self.id])` (`src/jailer/src/env.rs`) — two separate elements — and a live `/proc/<pid>/cmdline` sample from aibox03 agrees; on that same sampled line `--config-file fc-config.json` and `--api-sock api.sock` are unambiguously four elements, so the sampler was not rendering `=` as a space. The paragraph keeps its conclusion — the pid file is authoritative — on reasons that hold: every path under the jail carries the VM id, so `pgrep -f <id>` also matches a runner dialing that jail's `v.sock`, and any pattern that pins the flag bets on jailer's argv spelling. The same claim was corrected outside the validated package, in `gotchas.md` (the entry now leads with the pid file as the handle and records the upstream spelling) and in `scripts/aibox03/vmobs-root-helper`'s `jail-stop` comment (commit `c3c7dae`). `PLAN.md`'s L0 Task 1 entry carried the claim as that session believed it; rather than rewrite a dated log, a `Corrected 2026-09-03:` clause was appended to it, following the same practice the deviations log above already uses — the entry keeps what that session concluded and says what is true.

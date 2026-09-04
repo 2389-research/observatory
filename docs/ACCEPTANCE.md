@@ -289,6 +289,185 @@ AT-018: TESTED_PASS (partial — six host-side counters, delta-zero against an i
 
 -->
 
+<!-- L1 M1b status notes (2026-09-04)
+
+M1b live gate: aibox03 bare-metal, Ubuntu 24.04 kernel 6.8, Firecracker v1.16.1, guest kernel
+6.1.186. Two consecutive PASS runs of TestM1bGate (tests/integration/m1b_gate_test.go), invoked
+both times as `scripts/linux 'env -u GOROOT VMOBS_FIXTURE=1 go test ./tests/integration/ -run
+TestM1bGate -v -count=1 -timeout 25m'`: run A recorded 2026-09-04T19:52:56Z (53.05s), run B
+recorded 2026-09-04T19:54:30Z (53.21s), twelve subtests each, twelve passes, zero skips. Evidence
+quoted below is run A's, committed at tests/integration/evidence/m1b-gate-aibox03.txt; the two
+runs' evidence, normalized for UUIDs, timestamps, pids and guest pids, differs in one field — the
+byte offset at which the guest declared its dropped range under AT-027 (from=65590 in run A,
+from=54 in run B), which is where the flood happened to be when the browser stalled.
+
+The whole gate runs with require_authentication: true against a real vmobsd on the real jailer
+runtime; AT-030's denials are meaningless otherwise. A §15.3 scan of the 90 evidence lines for
+token/secret/bearer/authorization/password/key= returns two lines, both clean: AT-030 prints the
+intruder token's record id (auth.Store.CreateToken returns the secret separately from the record,
+tokens.go:99, and the gate prints rec.ID), and one HTTP message contains the words "bearer token".
+
+Runtime lock unchanged from the M1a note: vmlinux b6067686…, firecracker 2fd01713…, jailer
+1f3a0c1f…. Gate commit 37d2e1b.
+
+Two product defects were found by running this gate and fixed before it passed, both with a
+regression test first:
+  - Terminal lifecycle events were recorded for the first VM only. A source stream binds to one
+    VM scope (internal/store/append.go), and the API emitted every VM's terminal events on one
+    stream, so every later VM's session_opened/session_closed was refused at ingest and survived
+    as a log line. Fixed at 114a03e: one source stream per VM.
+  - A VM stopped and started inside one spool-importer poll was marked failed by its own previous
+    boot. NotifyVMMExit was boot-blind, so the first boot's vmm_exited — delivered 4s later, into
+    the second boot — read as the current VMM dying. The VM row now records the boot it is on and
+    an exit notice naming a different boot is ignored. Fixed at 320cfe1. This is what made AT-028
+    fail with `409 invalid_transition from "failed" to "running"` over a live firecracker.
+
+AT-019: TESTED_PASS.
+  Test: m1b_gate_test.go:at019_real_guest_pty. Asserts the session's tty is a guest pts, that the
+    guest's hostname and kernel differ from the host's, that guest-only paths exist (/dev/vd*,
+    a guestd cgroup), that `sleep 120 &; jobs` yields a job table, that a foreground reader sees
+    a typed line twice (pty echo plus the program), and that vmobsd gains no shell descendant on
+    the host across the whole subtest.
+  Evidence: `guest tty="/dev/pts/0" hostname="localhost" kernel="6.1.186"` against `host
+    hostname="aibox03" kernel="6.8.0-138-generic"`; `guest /dev/vd*="/dev/vda  /dev/vdb
+    /dev/vdc"`; `job control: ... [1] + Running                    sleep 120`; `vmobsd
+    descendants before="vmobs-runner=2" after="vmobs-runner=2" (no shell in either)`.
+
+AT-020: TESTED_PASS.
+  Test: m1b_gate_test.go:at020_fullscreen_and_encoding. Resizes four times and reads the guest's
+    own `stty size` back each time; asserts café, 日本, an SGR color sequence and the alternate-
+    screen enter/leave pair arrive verbatim; sends an ESC[200~…ESC[201~ paste into `cat > file`
+    and reads the file back with `od -c`; runs the installed `vi` and `top`, asserts each paints
+    a screen and that the shell answers after each quits.
+  Evidence: `resize: 40 120->"40 120" 30 100->"30 100" 50 132->"50 132" 24 80->"24 80"`;
+    `utf8 café/日本=true color CSI=true alt-screen 1049h/l=true`; the od dump shows
+    `033   [   2   0   0   ~   p   a   s   t   e   d   -   t   e   x   t 033   [   2   0   1   ~`;
+    `vi drew a screen and exited=true; top drew a screen and exited=true`.
+
+AT-021: TESTED_PASS (partial — `bg` is exercised, `fg` is not).
+  Test: m1b_gate_test.go:at021_signals_and_jobs. Asserts Ctrl-C on a foreground `sleep` leaves
+    the shell answering, that Ctrl-Z produces a suspended job in `jobs`, and that Ctrl-D on an
+    empty line closes the session with a terminal control message.
+  Evidence: `ctrl-c interrupted the foreground process and left the shell alive=true`;
+    `ctrl-z jobs: ... [1] + Stopped                    sleep 300`; `after bg, jobs: ... [1] +
+    Running                    sleep 300`; `ctrl-d on session ... closed it=true reason="exited"
+    exit_code=0`.
+  The row names foreground/background job commands. The subtest sends `bg %1` and records the
+  job back in Running, but asserts only that Ctrl-Z produced a Stopped job — the post-`bg`
+  Running line is recorded, not asserted — and it never sends `fg`.
+
+AT-022: TESTED_PASS (partial — "commands do not rerun" is AT-026's assertion, not this one).
+  Test: m1b_gate_test.go:at022_reconnect_same_shell. Reads the guest shell's `$$` before the
+    disconnect and after reattaching by session id and asserts they match; asserts a canary
+    printed before the disconnect appears exactly once in everything the reattached connection
+    received.
+  Evidence: `pid_before=715 pid_after=715 canary_occurrences_after_reattach=1`;
+    `writer_on_reattach=false (lease grace window held by the departed connection), steal
+    succeeded`.
+  The reattach lands read-only and has to steal the writer lease: the departed connection's lease
+  survives its disconnect for the grace window (internal/terminal/lease.go). That is what the
+  UI's own button does, and it is recorded rather than worked around.
+
+AT-023: TESTED_PASS.
+  Test: m1b_gate_test.go:at023_replay_gap. Prints a canary, disconnects, floods past the retained
+    window, reattaches, and asserts the host declares a gap rather than presenting the ring as
+    continuous history — and that the pre-disconnect canary is genuinely gone from the replay.
+  Evidence: `gap=true resume_offset=837965 replay_bytes=262144`; `pre-disconnect canary
+    "GAP-CANARY-4471" still in the replay=false (false is the point: it aged out)`.
+
+AT-024: TESTED_PASS.
+  Test: m1b_gate_test.go:at024_writer_lease. Attaches two connections to one session; asserts the
+    second is read-only, that its keystrokes and its resize are both refused with a lease message,
+    that the guest's `stty size` is unchanged by the refused resize, that a steal demotes the
+    first connection, and that the demoted writer's next keystroke is refused.
+  Evidence: `second attached read-only, holder="9851e6e5-…"`; `read-only input refused with a
+    lease message=true reason="this connection is read-only, so those keystrokes were not
+    delivered; steal the writer lease to type"`; `guest stty size after the refused resize="24 80"
+    (unchanged)`; `steal demoted the old writer=true`; `old writer's next keystroke refused=true`.
+
+AT-025: TESTED_PASS (partial — cwd, shell state, pid and dimensions; exit state is AT-021's).
+  Test: m1b_gate_test.go:at025_session_isolation. Asserts two VMs' streams carry only their own
+    markers, then within one VM asserts two sessions have different cwds, that a shell variable
+    set in one is unset in the other, that they report different guest pids, and that resizing
+    one does not change the other's `stty size`.
+  Evidence: `cross_vm_leak=false marker_a_seen_in_a=true marker_b_seen_in_b=true`; `same_vm
+    sessions=… pid1=701 pid2=702 cwd1="/tmp/one" cwd2="/tmp/two"`; `resize session1 -> 40x120;
+    stty size: session1="40 120" session2="24 80"`.
+  The row also names exit state. This subtest never exits a session; AT-021 closes one with
+  Ctrl-D and reads its exit reason and code, on a different session in the same VM.
+
+AT-026: TESTED_PASS, with a recorded deviation from SPEC §8.2.
+  Test: m1b_gate_test.go:at026_duplicate_input. Sends one input frame twice under the same
+    sequence number and asserts the command ran once; reconnects and asserts the guest re-ran
+    nothing.
+  Evidence: `frame seq=2 sent twice; the command ran 1 time(s)`; `after a reconnect the guest
+    re-ran nothing: 0 occurrence(s) of the marker`.
+  Deviation: SPEC §8.2 describes the input high-water mark as per session. The implementation
+  keeps it per connection (internal/api/terminal_stream.go, streamRelay.lastClientSeq), and
+  web/src/terminalSocket.ts resets its sequence to 0 on every open and never resends across a
+  reconnect — so no duplicate typing is reachable through the product's own client, and the
+  subtest proves that directly. A client that did resend across a reconnect would not be caught
+  by the host.
+
+AT-027: TESTED_PASS (partial — the ceiling is measured on the wire, not in host memory).
+  Test: m1b_gate_test.go:at027_slow_browser. Reads the in-flight ceiling the attach announced,
+    stops acking, floods PTY output, and asserts the host never sends more than the ceiling in
+    unacked bytes, that control messages are still answered while the window is full, that the
+    guest declares the range it dropped, and that the stream resumes after an ack.
+  Evidence: `max_inflight_bytes=1048576`; `bytes delivered to a browser that stopped acking:
+    1048576 (ceiling 1048576)`; `control channel answered while the window was full=true`;
+    `guest declared a dropped range=true from=65590 to=595377`; `stream resumed once the browser
+    acked again=true`.
+  The row says memory stays bounded. What is asserted is the unacked-byte ceiling on the wire and
+  a declared drop; no host RSS or buffer occupancy is measured.
+
+AT-028: TESTED_PASS (partial — pause and resume are INCONCLUSIVE; this build has no reboot).
+  Test: m1b_gate_test.go:at028_lifecycle_while_attached. Posts pause the way the UI's button
+    does and records what came back; asserts a refused action leaves the VM running with its
+    attached shell still working; stops the VM while attached and asserts the stream ends while
+    the session stays listed; starts it again and asserts the old session id cannot attach to the
+    new boot.
+  Evidence: `pause: INCONCLUSIVE — this runtime does not implement VMM pause. POST
+    /vms/…/actions {action: pause} -> HTTP 501 cause="runtime_unavailable" message="runtime not
+    available on this host: pause not supported in M1a" … The VM stayed "running" and the attached
+    session survived the refusal: shell still works=true.` / `resume: INCONCLUSIVE — paired with
+    pause (internal/jailer/adapter.go).` / `stop: the attached stream ended=true; session still
+    listed on the VM=true state="open"` / `new boot via stop+start (this build has no reboot
+    action): reattach with the old session id -> HTTP 503 cause="attach_refused"`.
+  Two parts of the row are unproven and say so. Adapter.Pause and Adapter.Resume return a typed
+  UnavailableError by design (internal/jailer/adapter.go; the M1a scope decision is recorded in
+  PLAN.md Task 10), so the gate records the refusal rather than inventing a pass. There is no
+  reboot action in the API at all (§5.3 lists start, pause, resume, stop, force_stop), so the new
+  boot the row wants is produced by stop then start, which is the same claim about session
+  identity across boots.
+
+AT-029: TESTED_PASS (partial — the host half here, the browser half in the web suite).
+  Test: m1b_gate_test.go:at029_hostile_output asserts the relay delivers `<img src=x
+    onerror=alert(1)>`, an OSC 0 title, an OSC 52 clipboard write and an OSC 8 javascript:
+    hyperlink to the browser byte for byte, and that the served config declares
+    automatic_clipboard_write=false and automatic_download=false.
+  Evidence: all four `delivered verbatim=true`; `config automatic_clipboard_write=false: true;
+    automatic_download=false: true`.
+  The row's required result is about the browser: no DOM execution, no automatic clipboard write,
+  no automatic download. This Go gate runs no DOM and does not claim to — it proves the relay is
+  byte-transparent and interprets nothing. The browser half is web/src/Terminal.test.tsx, which
+  drives real xterm.js and asserts OSC 52 never reaches navigator.clipboard and that hostile
+  output renders as text. Two suites, one row, and neither one covers it alone.
+
+AT-030: TESTED_PASS.
+  Test: m1b_gate_test.go:at030_denied_upgrades. Attempts the WebSocket upgrade on a live session
+    four ways — no credentials, a wrong Origin, a valid token owned by someone else, an expired
+    session cookie — and asserts each is denied with its own typed cause, and that the VM's count
+    of open sessions is unchanged, so no PTY was reached.
+  Evidence: `unauthenticated HTTP 401 cause="no_credentials"` / `wrong_origin HTTP 403
+    cause="origin_rejected"` / `wrong_owner HTTP 404 cause="terminal_session_unknown"` /
+    `expired_session HTTP 401 cause="session_invalid_or_expired"`; `open sessions on the VM
+    before=1 after=1 (no PTY was reached)`.
+  The wrong-owner denial is a 404 naming no session rather than a 403: a token that owns nothing
+  on this host is told the session does not exist, which is the non-enumerable answer.
+
+-->
+
 | AT-005 | R-01, R-10 | Inject a failure after every provisioning side effect. Cleanup removes only owned resources and releases reservations or reports a retryable cleanup backlog. |
 | AT-006 | R-01, R-10 | Retry the same create request across a timeout. Exactly the original VM/operation is returned; a changed payload with the same key conflicts. |
 | AT-007 | R-01, R-05 | Verify user jobs cannot start before guestd readiness, workspace seeding, baseline creation and required sensor checks. |
