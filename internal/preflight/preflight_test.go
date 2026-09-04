@@ -379,7 +379,11 @@ func TestAPIBindingHTTPSWithAuth(t *testing.T) {
 	}
 }
 
-func TestAPIBindingBadConfig(t *testing.T) {
+// Loopback with authentication is the strictest binding this daemon can hold:
+// unreachable from the network AND credentialed. config.Validate accepts it —
+// it makes require_authentication: false the exception on loopback, not the
+// rule — so the doctor must not report the tighter setting as unsafe.
+func TestAPIBindingLoopbackWithAuth(t *testing.T) {
 	r := preflight.New(preflight.Config{DataDir: t.TempDir(), APIMode: "loopback_only", RequireAuth: true})
 	report := r.Run(t.Context())
 
@@ -387,8 +391,22 @@ func TestAPIBindingBadConfig(t *testing.T) {
 	if ab == nil {
 		t.Fatal("api_binding not in report")
 	}
+	if ab.Status != preflight.StatusPass {
+		t.Errorf("api_binding loopback+auth = %q, want pass", ab.Status)
+	}
+}
+
+// The unsafe combination: reachable off-host with no credential asked for.
+func TestAPIBindingHTTPSWithoutAuth(t *testing.T) {
+	r := preflight.New(preflight.Config{DataDir: t.TempDir(), APIMode: "https", RequireAuth: false})
+	report := r.Run(t.Context())
+
+	ab := findCheck(report.Checks, "api_binding")
+	if ab == nil {
+		t.Fatal("api_binding not in report")
+	}
 	if ab.Status != preflight.StatusFail {
-		t.Errorf("api_binding loopback+auth = %q, want fail", ab.Status)
+		t.Errorf("api_binding https+no-auth = %q, want fail", ab.Status)
 	}
 }
 

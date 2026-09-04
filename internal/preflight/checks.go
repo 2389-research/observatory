@@ -385,11 +385,12 @@ func (r *Runner) checkDirPermissions() Check {
 func (r *Runner) checkAPIBinding() Check {
 	id := "api_binding"
 
-	// The only safe configurations are:
-	//   loopback_only + require_auth=false  → pass (host-ACL trust)
+	// The safe configurations, mirroring config.Validate:
+	//   loopback_only + require_auth=false  → pass (host-ACL trust, dev)
+	//   loopback_only + require_auth=true   → pass (unreachable off-host AND credentialed)
 	//   https + require_auth=true           → pass
-	// Anything else is the config invariant the daemon already enforces;
-	// we mirror it here for the doctor report.
+	// Anything else — an https binding that asks for no credential, or a mode
+	// this daemon does not serve — is what the doctor reports.
 	apiMode := r.cfg.APIMode
 	requireAuth := r.cfg.RequireAuth
 
@@ -402,6 +403,16 @@ func (r *Runner) checkAPIBinding() Check {
 			Evidence: []string{
 				"mode: loopback_only",
 				"require_authentication: false",
+			},
+		}
+	case apiMode == "loopback_only" && requireAuth:
+		return Check{
+			ID:      id,
+			Status:  StatusPass,
+			Summary: "loopback-only mode with authentication required",
+			Evidence: []string{
+				"mode: loopback_only",
+				"require_authentication: true",
 			},
 		}
 	case apiMode == "https" && requireAuth:
@@ -425,7 +436,7 @@ func (r *Runner) checkAPIBinding() Check {
 			},
 			Remediation: &Remediation{
 				Cause:  "insecure_binding",
-				Action: "use loopback_only+no-auth (dev) or https+authentication (production)",
+				Action: "use loopback_only (dev) or https+authentication (production)",
 			},
 		}
 	}
