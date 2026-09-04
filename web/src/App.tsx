@@ -1,4 +1,4 @@
-// ABOUTME: The fleet page (SPEC §13.1): host capacity, attention head, VM table.
+// ABOUTME: The two views (SPEC §13.1, §13.2) and the URL that chooses between them.
 // ABOUTME: Every panel comes from one poll of the API; nothing here derives numbers of its own.
 import { useCallback, useEffect, useState } from 'react'
 import { getJSON, ApiFailure } from './api'
@@ -12,6 +12,7 @@ import { OperationFailure } from './components/OperationFailure'
 import { RecentOperations } from './components/RecentOperations'
 import { VMTable } from './components/VMTable'
 import { BulkActions, useFleetControls } from './components/BulkActions'
+import { VMDetail } from './VMDetail'
 
 const REFRESH_MS = 5000
 
@@ -55,13 +56,45 @@ function vmsQuery(states: string): string {
   return `/vms?${params.toString()}`
 }
 
+/**
+ * The router. `?vm=` names the VM detail workspace (§13.2), which replaces the
+ * fleet rather than sitting under it: it is a workspace, and §13.2's terminal
+ * wants the whole window.
+ *
+ * The URL is written here, in one place, from `view` alone. Only the two keys
+ * url.ts owns can reach it, which is why no credential has a path into a link
+ * an operator pastes into a ticket.
+ */
 export function App() {
-  const [fleet, setFleet] = useState<Fleet | null>(null)
-  const [failure, setFailure] = useState<ApiFailure | null>(null)
-  const [asOf, setAsOf] = useState<Date | null>(null)
   // The view state arrives from the URL, so a reload and a pasted link land on
   // the same view (SPEC §13.7).
   const [view, setView] = useState<FleetState>(() => readState(window.location.search))
+
+  useEffect(() => {
+    const search = writeState(view, window.location.search)
+    window.history.replaceState(null, '', window.location.pathname + search + window.location.hash)
+  }, [view])
+
+  if (view.selectedVM !== undefined) {
+    return (
+      <VMDetail
+        vmID={view.selectedVM}
+        onBack={() => setView((v) => ({ ...v, selectedVM: undefined }))}
+      />
+    )
+  }
+  return <FleetPage view={view} setView={setView} />
+}
+
+interface FleetPageProps {
+  view: FleetState
+  setView: (update: (v: FleetState) => FleetState) => void
+}
+
+function FleetPage({ view, setView }: FleetPageProps) {
+  const [fleet, setFleet] = useState<Fleet | null>(null)
+  const [failure, setFailure] = useState<ApiFailure | null>(null)
+  const [asOf, setAsOf] = useState<Date | null>(null)
 
   const stateFilterKey = view.stateFilter.join(',')
 
@@ -93,13 +126,6 @@ export function App() {
     return () => clearInterval(t)
   }, [load])
 
-  // Only the two keys url.ts owns are written, and only from `view`. No
-  // credential has a path into the address bar through here.
-  useEffect(() => {
-    const search = writeState(view, window.location.search)
-    window.history.replaceState(null, '', window.location.pathname + search + window.location.hash)
-  }, [view])
-
   const toggleStateFilter = (state: string) =>
     setView((v) => ({
       ...v,
@@ -108,8 +134,9 @@ export function App() {
         : [...v.stateFilter, state],
     }))
 
-  const selectVM = (vmID: string) =>
-    setView((v) => ({ ...v, selectedVM: v.selectedVM === vmID ? undefined : vmID }))
+  // Naming a VM opens its workspace; there is nothing to toggle back to from
+  // here, because the fleet is what the workspace's own back control returns to.
+  const selectVM = (vmID: string) => setView((v) => ({ ...v, selectedVM: vmID }))
 
   if (failure?.status === 401) {
     return (

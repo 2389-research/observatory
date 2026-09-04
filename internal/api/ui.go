@@ -61,6 +61,11 @@ func serveShell(w http.ResponseWriter, r *http.Request, assets fs.FS) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// The rest of the policy travels with the page, in index.html's meta tag,
+	// so a dist/ served by anything else keeps it. frame-ancestors cannot: a
+	// browser ignores it in a meta tag, and an unframeable shell is what keeps
+	// a guest terminal from being clicked through an invisible iframe (§8.4).
+	w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
 	// The shell is content-addressed only in the assets it names, so it must
 	// never be cached: a stale shell points at asset hashes that no longer exist.
 	w.Header().Set("Cache-Control", "no-cache")

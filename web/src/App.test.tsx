@@ -106,6 +106,10 @@ function routeFetch(overrides: Record<string, Response> = {}) {
     if (url.includes('/events')) return jsonResponse(operations)
     if (url.includes('/auth/session')) return jsonResponse({ owner: 'local_operator', method: 'none' })
     if (url.includes('/templates')) return jsonResponse(templates)
+    // Ordered before the list: /vms/<id> and /vms/<id>/terminals both contain
+    // '/vms', and answering either with the list is the wrong shape.
+    if (url.includes('/terminals')) return jsonResponse({ terminals: [], next_after: '', limit: 20 })
+    if (/\/vms\/[^/?]+$/.test(url)) return jsonResponse(vms.vms[0])
     if (url.includes('/vms')) return jsonResponse(vms)
     if (url.includes('/attention')) return jsonResponse(attention)
     throw new Error(`unexpected fetch: ${url}`)
@@ -233,17 +237,26 @@ describe('App fleet state in the URL (SPEC §13.7)', () => {
     expect(await screen.findByText(/no vms match this filter/i)).toBeInTheDocument()
   })
 
-  it('singles out a VM in the URL and takes it back out', async () => {
+  it('opens a VM workspace from the URL and comes back to the fleet', async () => {
     vi.stubGlobal('fetch', routeFetch())
     render(<App />)
-    const name = await screen.findByRole('button', { name: 'agent-03' })
 
-    await userEvent.click(name)
+    await userEvent.click(await screen.findByRole('button', { name: 'agent-03' }))
     await waitFor(() => expect(window.location.search).toBe('?vm=7f3a9c21-0000-4000-8000-000000000001'))
-    expect(screen.getByTestId('vm-row-7f3a9c21-0000-4000-8000-000000000001')).toHaveAttribute('aria-current', 'true')
+    // The workspace replaces the fleet (§13.2), so the table is gone, not dimmed.
+    expect(await screen.findByTestId('vm-identity')).toHaveTextContent('agent-03')
+    expect(screen.queryByRole('table')).toBeNull()
 
-    await userEvent.click(name)
+    await userEvent.click(screen.getByRole('button', { name: /back to the fleet/i }))
     await waitFor(() => expect(window.location.search).toBe(''))
+    expect(await screen.findByRole('table')).toBeInTheDocument()
+  })
+
+  it('boots straight into the workspace when the URL already names a VM', async () => {
+    window.history.replaceState(null, '', '/?vm=7f3a9c21-0000-4000-8000-000000000001')
+    vi.stubGlobal('fetch', routeFetch())
+    render(<App />)
+    expect(await screen.findByTestId('vm-identity')).toBeInTheDocument()
   })
 
   it('writes only the two keys it owns, and never a credential', async () => {

@@ -3,9 +3,22 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!--
+      SPEC 8.4: a restrictive policy, no remote script, no third-party analytics.
+      'unsafe-inline' is granted to styles alone because xterm.js writes a <style>
+      element and per-element styles as it measures a character cell; scripts get
+      no such grant. connect-src 'self' covers the same-origin ws:// upgrade — CSP3
+      matches ws against 'self' when the host and port match.
+      frame-ancestors is absent on purpose: a browser ignores it in a meta tag, so
+      the daemon sends it as a header instead (internal/api/ui.go).
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'"
+    />
     <title>Firecracker Observatory</title>
-    <script type="module" crossorigin src="/ui/assets/index-D97e55Ee.js"></script>
-    <link rel="stylesheet" crossorigin href="/ui/assets/index-BF6Og7ig.css">
+    <script type="module" crossorigin src="/ui/assets/index-BQ4MkJDM.js"></script>
+    <link rel="stylesheet" crossorigin href="/ui/assets/index-D5u8rEtK.css">
   </head>
   <body>
     <div id="root"></div>

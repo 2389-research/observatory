@@ -197,3 +197,38 @@ export interface EventPage {
   /** How far the store goes, so an empty page reads as quiet, not as a gap. */
   latest_event_id: string
 }
+
+/**
+ * One terminal session, as POST and GET /vms/{id}/terminals return it (§8.2).
+ * `state` is `open` or `closed`.
+ */
+export interface TerminalSession {
+  session_id: string
+  vm_id: string
+  /** The boot this session belongs to. A reboot makes the session stale. */
+  boot_id: string
+  owner: string
+  state: string
+  rows: number
+  cols: number
+  argv: string[]
+  pid: number
+  created_at: string
+  /** Decimal strings: byte counters outgrow Number.MAX_SAFE_INTEGER. */
+  output_bytes: string
+  input_bytes: string
+  /** The connection holding the writer lease, or empty when nobody holds it. */
+  writer_holder: string
+  writer_available: boolean
+  closed_at?: string
+  reason?: string
+  exit_code?: number
+  signal?: string
+  links: Record<string, string>
+}
+
+export interface TerminalSessionList {
+  terminals: TerminalSession[]
+  next_after: string
+  limit: number
+}

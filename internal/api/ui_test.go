@@ -216,3 +216,21 @@ func between(s, start, end string) string {
 	}
 	return rest[:j]
 }
+
+// A same-site session cookie plus a framed shell is a clickjacked guest shell:
+// the operator's clicks land on a terminal they cannot see. §8.4 asks for a
+// restrictive CSP, and frame-ancestors is the one directive a <meta> tag in
+// index.html cannot express — a browser ignores it there. So it is a header.
+func TestUIShellRefusesToBeFramed(t *testing.T) {
+	srv, _ := newServer(t)
+	for _, path := range []string{"/ui/", "/ui/vms/abc"} {
+		res, err := noRedirect(t).Get(srv.URL + path)
+		if err != nil {
+			t.Fatalf("get %s: %v", path, err)
+		}
+		res.Body.Close()
+		if got := res.Header.Get("Content-Security-Policy"); got != "frame-ancestors 'none'" {
+			t.Errorf("%s CSP = %q, want frame-ancestors 'none'", path, got)
+		}
+	}
+}

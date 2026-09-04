@@ -1,6 +1,6 @@
 // ABOUTME: The API-shaped fixtures every web test reads, in one place.
 // ABOUTME: A second copy would drift, and a drifted fixture hides a real wire change.
-import type { EventEnvelope, HostStatus, Template, VM } from '../types'
+import type { EventEnvelope, HostStatus, Template, TerminalSession, VM } from '../types'
 
 export const testHost: HostStatus = {
   capacity: {
@@ -103,5 +103,26 @@ export function testOperationEvent(
       attempt: o.attempt ?? 1,
       ...(o.error ? { error: o.error } : {}),
     },
+  }
+}
+
+export function testTerminalSession(overrides: Partial<TerminalSession> = {}): TerminalSession {
+  return {
+    session_id: 'sess-1',
+    vm_id: 'vm-1',
+    boot_id: 'boot-1',
+    owner: 'local_operator',
+    state: 'open',
+    rows: 24,
+    cols: 80,
+    argv: ['/bin/sh'],
+    pid: 412,
+    created_at: '2026-09-04T10:01:00Z',
+    output_bytes: '0',
+    input_bytes: '0',
+    writer_holder: '',
+    writer_available: true,
+    links: { stream: '/api/v1/terminals/sess-1/stream' },
+    ...overrides,
   }
 }
