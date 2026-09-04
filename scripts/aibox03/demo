@@ -238,10 +238,19 @@ stop() {
     # for ever (SPEC §5.4), so an unfiltered list never drains and this loop
     # would spend its whole budget every time.
     live="state=provisioning&state=starting&state=running&state=paused&state=stopping&state=deleting"
+    left=""
     for _ in $(seq 1 60); do
-      # -o then wc: the response is one line, so grep -c would answer 1 for any
-      # number of VMs and the message below would understate what is left.
-      left=$(curl -fsS "$API/vms?$live" 2>/dev/null | grep -o '"vm_id"' | wc -l | tr -d ' ')
+      if ! body=$(curl -fsS "$API/vms?$live" 2>/dev/null); then
+        echo "demo:   API stopped answering during teardown — check $LOG" >&2
+        break
+      fi
+      # `|| true` because grep exits 1 when it matches nothing, which here is
+      # the answer this loop waits for, not an error. Under `set -o pipefail`
+      # that status escapes the substitution and `set -e` kills the teardown on
+      # this very line — before it ever stops the daemon, printing nothing.
+      # -o then wc: the body is one line, so grep -c would answer 1 for any
+      # number of VMs and the warning below would understate what is left.
+      left=$(printf '%s' "$body" | { grep -o '"vm_id"' || true; } | wc -l | tr -d ' ')
       [ "$left" = "0" ] && break
       sleep 1
     done
