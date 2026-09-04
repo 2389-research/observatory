@@ -3,7 +3,6 @@
 package terminal_test
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -315,15 +314,14 @@ func TestTheFirstAttachWritesAndTheSecondWatches(t *testing.T) {
 	}
 
 	// A read-only attachment's input never reaches the guest.
-	_, err = second.Write(ptyInput(t, 1, "rm -rf /\n"))
+	err = second.WriteInput([]byte("rm -rf /\n"))
 	if !errors.Is(err, terminal.ErrReadOnly) {
 		t.Fatalf("a read-only write returned %v, want ErrReadOnly", err)
 	}
 
 	// The writer's does.
-	input := ptyInput(t, 1, "echo hi\n")
-	go func() { _, _ = first.Write(input) }()
-	if got := readPTYFrame(t, guestA); got != "echo hi\n" {
+	go func() { _ = first.WriteInput([]byte("echo hi\n")) }()
+	if _, got := readPTYFrame(t, guestA); got != "echo hi\n" {
 		t.Errorf("the guest received %q", got)
 	}
 }
@@ -358,14 +356,56 @@ func TestStealTakesTheShellFromTheOldWriter(t *testing.T) {
 	if first.IsWriter() {
 		t.Fatal("the old writer still holds the shell after a steal")
 	}
-	if _, err := first.Write(ptyInput(t, 2, "still here\n")); !errors.Is(err, terminal.ErrReadOnly) {
+	if err := first.WriteInput([]byte("still here\n")); !errors.Is(err, terminal.ErrReadOnly) {
 		t.Fatalf("the demoted writer's input returned %v, want ErrReadOnly", err)
 	}
 
-	input := ptyInput(t, 1, "mine now\n")
-	go func() { _, _ = second.Write(input) }()
-	if got := readPTYFrame(t, guestB); got != "mine now\n" {
+	go func() { _ = second.WriteInput([]byte("mine now\n")) }()
+	if _, got := readPTYFrame(t, guestB); got != "mine now\n" {
 		t.Errorf("the guest received %q", got)
+	}
+}
+
+// The guest drops any input sequence it has already seen. If each attachment
+// counted from one, everything the thief typed after a steal would be dropped
+// silently — the exact failure §8.2 forbids for a keystroke.
+func TestInputSequenceBelongsToTheSessionNotTheAttachment(t *testing.T) {
+	g := newFakeGuest(t)
+	r := newRegistry(t, g)
+	s := mustCreate(t, g, r, "vm-1", "boot-a")
+
+	first, err := r.Attach(context.Background(), terminal.AttachRequest{
+		SessionID: s.ID, BootID: "boot-a", ConnID: "conn-a",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	guestA := g.nextAttach()
+
+	go func() { _ = first.WriteInput([]byte("one\n")) }()
+	firstSeq, got := readPTYFrame(t, guestA)
+	if got != "one\n" {
+		t.Fatalf("the guest received %q", got)
+	}
+
+	second, err := r.Attach(context.Background(), terminal.AttachRequest{
+		SessionID: s.ID, BootID: "boot-a", ConnID: "conn-b", Steal: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	guestB := g.nextAttach()
+
+	go func() { _ = second.WriteInput([]byte("two\n")) }()
+	secondSeq, got := readPTYFrame(t, guestB)
+	if got != "two\n" {
+		t.Fatalf("the guest received %q", got)
+	}
+	if secondSeq <= firstSeq {
+		t.Errorf("the thief typed at seq %d after the old writer reached %d; the guest will drop it",
+			secondSeq, firstSeq)
 	}
 }
 
@@ -412,7 +452,7 @@ func TestGuestOutputReachesTheAttachment(t *testing.T) {
 	copy(payload[8:], "hello")
 	go func() { _ = proto.WriteFrame(guest, proto.FramePTY, payload) }()
 
-	typ, got, err := proto.ReadFrame(att)
+	typ, got, err := att.ReadFrame()
 	if err != nil {
 		t.Fatalf("read frame: %v", err)
 	}
@@ -427,21 +467,9 @@ func TestGuestOutputReachesTheAttachment(t *testing.T) {
 	}
 }
 
-// ptyInput builds one host→guest PTY frame: [seq: 8 BE][input bytes], through
-// the real codec so a change to the wire breaks this test rather than passing it.
-func ptyInput(t *testing.T, seq uint64, s string) []byte {
-	t.Helper()
-	head := make([]byte, 8)
-	binary.BigEndian.PutUint64(head, seq)
-	var buf bytes.Buffer
-	if err := proto.WriteFrame(&buf, proto.FramePTY, append(head, s...)); err != nil {
-		t.Fatalf("build pty frame: %v", err)
-	}
-	return buf.Bytes()
-}
-
-// readPTYFrame reads one frame off the guest side and returns its input bytes.
-func readPTYFrame(t *testing.T, guest net.Conn) string {
+// readPTYFrame reads one frame off the guest side and returns its sequence
+// number and input bytes.
+func readPTYFrame(t *testing.T, guest net.Conn) (uint64, string) {
 	t.Helper()
 	if err := guest.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		t.Fatal(err)
@@ -456,7 +484,7 @@ func readPTYFrame(t *testing.T, guest net.Conn) string {
 	if len(payload) < 8 {
 		t.Fatalf("frame payload %d bytes, want at least the 8-byte seq", len(payload))
 	}
-	return string(payload[8:])
+	return binary.BigEndian.Uint64(payload[:8]), string(payload[8:])
 }
 
 func TestRequestLeaseRoundTrip(t *testing.T) {
@@ -530,8 +558,7 @@ func TestClosingASessionClosesItsAttachments(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		buf := make([]byte, 1)
-		_, err := att.Read(buf)
+		_, _, err := att.ReadFrame()
 		done <- err
 	}()
 	select {

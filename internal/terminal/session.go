@@ -147,6 +147,11 @@ type sessionState struct {
 	// must not serialize against the registry's map.
 	outputBytes atomic.Uint64
 	inputBytes  atomic.Uint64
+
+	// inputSeq numbers keystrokes for the whole session, not per attachment.
+	// The guest drops any sequence it has already seen, so a second attachment
+	// starting its own count would have everything it typed silently ignored.
+	inputSeq atomic.Uint64
 }
 
 // snapshot copies a session's record with its live byte counts folded in.

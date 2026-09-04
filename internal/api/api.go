@@ -98,7 +98,6 @@ func New(
 		{"POST", "/vm-batches", "vm_batches", s.handleCreateBatch},
 		{"GET", "/vm-batches/{id}", "vm_batches", s.handleGetBatch},
 		{"", "/events/stream", "events_stream", nil},
-		{"", "/terminals/{id}/stream", "terminals", nil},
 		{"", "/vms/{id}/execs", "execs", nil},
 		{"", "/execs/{id}", "execs", nil},
 		{"", "/execs/{id}/cancel", "execs", nil},
@@ -152,6 +151,7 @@ func (s *Server) terminalRoutes() []route {
 			{"", "/vms/{id}/terminals", "terminals", nil},
 			{"", "/terminals/{id}", "terminals", nil},
 			{"", "/terminals/{id}/lease", "terminals", nil},
+			{"", "/terminals/{id}/stream", "terminals", nil},
 		}
 	}
 	return []route{
@@ -159,6 +159,7 @@ func (s *Server) terminalRoutes() []route {
 		{"GET", "/vms/{id}/terminals", "terminals", s.handleListTerminals},
 		{"DELETE", "/terminals/{id}", "terminals", s.handleCloseTerminal},
 		{"POST", "/terminals/{id}/lease", "terminals", s.handleTerminalLease},
+		{"GET", "/terminals/{id}/stream", "terminals", s.handleTerminalStream},
 	}
 }
 

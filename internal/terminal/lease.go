@@ -25,6 +25,11 @@ type Lease struct {
 	// which is what makes an idle holder's lease permanent and a departed
 	// one's expire.
 	releasedAt time.Time
+
+	// changed is closed and replaced whenever the holder changes. A demoted
+	// writer has to hear about it without polling: §8.2 takes the shell at the
+	// instant of the steal, and a browser still showing a writer badge lies.
+	changed chan struct{}
 }
 
 // NewLease builds a lease with the given grace window. A nil clock uses
@@ -36,7 +41,7 @@ func NewLease(grace time.Duration, now func() time.Time) *Lease {
 	if grace < 0 {
 		grace = 0
 	}
-	return &Lease{grace: grace, now: now}
+	return &Lease{grace: grace, now: now, changed: make(chan struct{})}
 }
 
 // Acquire takes the lease for connID. It reports whether connID may now type
@@ -47,6 +52,9 @@ func (l *Lease) Acquire(connID string) (bool, string) {
 	defer l.mu.Unlock()
 	l.expireLocked()
 	if l.holder == "" || l.holder == connID {
+		if l.holder != connID {
+			l.notifyLocked()
+		}
 		l.holder = connID
 		l.releasedAt = time.Time{}
 		return true, connID
@@ -80,6 +88,7 @@ func (l *Lease) Steal(connID string) string {
 	if previous == connID {
 		return ""
 	}
+	l.notifyLocked()
 	return previous
 }
 
@@ -109,5 +118,21 @@ func (l *Lease) expireLocked() {
 	if l.now().Sub(l.releasedAt) >= l.grace {
 		l.holder = ""
 		l.releasedAt = time.Time{}
+		l.notifyLocked()
 	}
+}
+
+// Changed returns a channel closed the next time the holder changes. Callers
+// re-read it after each wake: the channel is replaced, not reused, so a stale
+// one never fires twice.
+func (l *Lease) Changed() <-chan struct{} {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.changed
+}
+
+// notifyLocked wakes everyone watching and arms the next wait.
+func (l *Lease) notifyLocked() {
+	close(l.changed)
+	l.changed = make(chan struct{})
 }

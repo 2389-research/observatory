@@ -37,6 +37,80 @@ type AuthConfig struct {
 	LoginDelay     time.Duration // delay on failed login to bound volume
 }
 
+// isWebSocketUpgrade reports whether r is asking to become a WebSocket. Both
+// headers are token lists, so a bare equality test would miss a browser that
+// sends "keep-alive, Upgrade".
+func isWebSocketUpgrade(r *http.Request) bool {
+	if !headerHasToken(r.Header, "Connection", "upgrade") {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(r.Header.Get("Upgrade")), "websocket")
+}
+
+// headerHasToken reports whether a comma-separated header carries a token.
+func headerHasToken(h http.Header, name, token string) bool {
+	for _, v := range h.Values(name) {
+		for _, part := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(part), token) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// originAllowed enforces §8.4's D3 rule for an upgrade: the Origin header must
+// equal the configured public origin exactly. It writes the refusal itself and
+// reports whether the request may continue.
+//
+// An absent Origin is refused rather than waved through. Every browser sends
+// one on an upgrade, so a request without it is not the browser this route
+// exists for, and treating "absent" as "same origin" is how the cross-site
+// hole reopens.
+func (s *Server) originAllowed(w http.ResponseWriter, r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	switch {
+	case s.auth.ac.PublicOrigin == "":
+		writeError(w, http.StatusForbidden, Error{
+			Code:      "forbidden",
+			Message:   "this host has no public_origin configured, so no WebSocket origin can be accepted",
+			Retryable: false,
+			Cause:     "public_origin_unset",
+			Remediation: []Remediation{{
+				Action:    "set_config",
+				Params:    map[string]any{"key": "server.public_origin"},
+				Rationale: "an upgrade is accepted only from the configured public origin; with none set there is nothing to match",
+			}},
+		})
+		return false
+	case origin == "":
+		writeError(w, http.StatusForbidden, Error{
+			Code:      "forbidden",
+			Message:   "a WebSocket upgrade must carry an Origin header",
+			Retryable: false,
+			Cause:     "origin_rejected",
+			Remediation: []Remediation{{
+				Action:    "check_origin",
+				Rationale: "browsers always send Origin on an upgrade; open the terminal from the configured public_origin",
+			}},
+		})
+		return false
+	case origin != s.auth.ac.PublicOrigin:
+		writeError(w, http.StatusForbidden, Error{
+			Code:      "forbidden",
+			Message:   "the Origin header does not match the configured public origin",
+			Retryable: false,
+			Cause:     "origin_rejected",
+			Remediation: []Remediation{{
+				Action:    "check_origin",
+				Rationale: "requests must originate from the configured public_origin",
+			}},
+		})
+		return false
+	}
+	return true
+}
+
 // authState is the per-Server auth state embedded in Server.
 type authState struct {
 	ac         AuthConfig
@@ -51,6 +125,16 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 		// Exempt: GET /meta and POST /auth/login pass through with no identity.
 		if isExempt(r) {
 			next.ServeHTTP(w, r)
+			return
+		}
+
+		// A WebSocket upgrade is origin-checked whatever the auth mode, and
+		// before anything else. Same-origin policy does not cover WebSocket:
+		// a page on any site can open one to 127.0.0.1 and, with auth off or a
+		// cookie riding along, drive a shell. §8.4 (D3) answers that with an
+		// exact match, so the check cannot be skipped by the mode that has no
+		// password.
+		if isWebSocketUpgrade(r) && !s.originAllowed(w, r) {
 			return
 		}
 

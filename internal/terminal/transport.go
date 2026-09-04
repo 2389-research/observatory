@@ -4,11 +4,13 @@ package terminal
 
 import (
 	"context"
+	"encoding/binary"
 	"io"
 	"path/filepath"
 	"strconv"
 	"sync"
 
+	"github.com/2389-research/observatory-v2/internal/guest/proto"
 	"github.com/2389-research/observatory-v2/internal/runner"
 )
 
@@ -35,8 +37,9 @@ type AttachRequest struct {
 	Steal bool
 }
 
-// Attachment is one caller's view of a session's byte stream. It is an opaque
-// pipe: it counts bytes and checks the lease, and it never looks at a PTY byte.
+// Attachment is one caller's view of a session's byte stream. It reads and
+// writes frames so it can count what the shell actually carried and gate input
+// on the lease; the PTY payload itself is passed through untouched.
 type Attachment struct {
 	SessionID string
 	// ResumeOffset is the stream position the guest will send from.
@@ -110,6 +113,18 @@ func (r *Registry) Attach(ctx context.Context, req AttachRequest) (*Attachment, 
 	}
 	att.window = NewWindow(r.opts.MaxInflightBrowserBytes, att.ResumeOffset)
 
+	// The runner names the boot it is supervising right now. The caller's
+	// BootID above is an assertion a host record could have made stale; this
+	// one comes from the process that owns the VM, so it is the answer §8.2
+	// wants when a reboot has ended the shell underneath a reattach.
+	if reply.Terminal != nil && reply.Terminal.BootID != "" && s.BootID != "" &&
+		reply.Terminal.BootID != s.BootID {
+		stream.Close()
+		return nil, newError("session_stale",
+			"terminal session %s belongs to boot %s and VM %s is now on boot %s; the reboot ended that shell",
+			s.ID, s.BootID, s.VMID, reply.Terminal.BootID)
+	}
+
 	if req.Steal {
 		st.lease.Steal(req.ConnID)
 	} else {
@@ -131,23 +146,63 @@ func (r *Registry) Attach(ctx context.Context, req AttachRequest) (*Attachment, 
 	return att, nil
 }
 
-// Read returns frames from the guest, counting what the session has produced.
-func (a *Attachment) Read(p []byte) (int, error) {
-	n, err := a.stream.Read(p)
-	a.state.outputBytes.Add(uint64(n))
-	return n, err
+// ptyHeaderBytes is the 8-byte big-endian prefix every PTY frame carries: the
+// absolute stream offset on output, the input sequence number on input.
+const ptyHeaderBytes = 8
+
+// maxPTYInputBytes is the largest keystroke payload one frame can hold.
+const maxPTYInputBytes = proto.MaxBinaryFrame - ptyHeaderBytes
+
+// ReadFrame returns one frame from the guest and counts the shell output it
+// carried. The count is of the payload, not the wire: an operator reading
+// output_bytes should not have to subtract framing to learn what the shell
+// printed.
+func (a *Attachment) ReadFrame() (typ byte, payload []byte, err error) {
+	typ, payload, err = proto.ReadFrame(a.stream)
+	if err == nil && typ == proto.FramePTY && len(payload) >= ptyHeaderBytes {
+		a.state.outputBytes.Add(uint64(len(payload) - ptyHeaderBytes))
+	}
+	return typ, payload, err
 }
 
-// Write sends frames to the guest, and refuses when this attachment does not
-// hold the writer lease. The refusal is an error rather than a silent drop:
-// input that vanishes is indistinguishable from a hung shell.
-func (a *Attachment) Write(p []byte) (int, error) {
+// WriteInput sends keystrokes to the guest, and refuses when this attachment
+// does not hold the writer lease. The refusal is an error rather than a silent
+// drop: input that vanishes is indistinguishable from a hung shell.
+//
+// The sequence number is the session's, not the attachment's. The guest drops
+// any seq it has already seen, so two attachments counting privately would
+// silently swallow everything the second one typed after a steal.
+func (a *Attachment) WriteInput(b []byte) error {
 	if !a.lease.IsWriter(a.connID) {
-		return 0, ErrReadOnly
+		return ErrReadOnly
 	}
-	n, err := a.stream.Write(p)
-	a.state.inputBytes.Add(uint64(n))
-	return n, err
+	// A paste arrives as one browser message and can exceed a frame. Split it
+	// rather than refuse it: a shell cannot tell where one frame ended.
+	for first := true; first || len(b) > 0; first = false {
+		chunk := b
+		if len(chunk) > maxPTYInputBytes {
+			chunk = chunk[:maxPTYInputBytes]
+		}
+		frame := make([]byte, ptyHeaderBytes+len(chunk))
+		binary.BigEndian.PutUint64(frame[:ptyHeaderBytes], a.state.inputSeq.Add(1))
+		copy(frame[ptyHeaderBytes:], chunk)
+		if err := proto.WriteFrame(a.stream, proto.FramePTY, frame); err != nil {
+			return err
+		}
+		a.state.inputBytes.Add(uint64(len(chunk)))
+		b = b[len(chunk):]
+	}
+	return nil
+}
+
+// WriteControl sends one control message on this session's stream. It is
+// writer-gated for the same reason input is: a resize reshapes the shell that
+// a read-only viewer is only watching.
+func (a *Attachment) WriteControl(kind string, data any) error {
+	if !a.lease.IsWriter(a.connID) {
+		return ErrReadOnly
+	}
+	return proto.WriteControl(a.stream, kind, data)
 }
 
 // Close releases the writer lease — after its grace window, so a reload does
@@ -181,6 +236,17 @@ func (a *Attachment) Ack(offset uint64) { a.window.Ack(offset) }
 
 // InFlight is the bytes sent to the browser and not yet acknowledged.
 func (a *Attachment) InFlight() int64 { return a.window.InFlight() }
+
+// MaxInflight is the window's ceiling, which a relay needs to size the pieces
+// it hands the browser: a chunk larger than the window can never be reserved.
+func (a *Attachment) MaxInflight() int64 { return a.window.Max() }
+
+// LeaseChanged returns a channel closed the next time the writer changes, so a
+// relay can tell its browser it lost the shell instead of leaving a stale badge.
+func (a *Attachment) LeaseChanged() <-chan struct{} { return a.lease.Changed() }
+
+// ConnID is this attachment's identity to the writer lease.
+func (a *Attachment) ConnID() string { return a.connID }
 
 // forget drops an attachment from its session's live set.
 func (r *Registry) forget(sessionID string, a *Attachment) {

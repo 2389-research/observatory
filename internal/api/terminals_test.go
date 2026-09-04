@@ -38,6 +38,13 @@ type fakeRunner struct {
 	created []runner.TerminalCtlRequest
 	closed  []string
 	open    map[string]bool
+
+	// resumeOffset and gap are what an attach reports back; a test that cares
+	// about replay sets them before dialling.
+	resumeOffset string
+	gap          bool
+	// attached carries the guest end of each attach's pipe to the test.
+	attached chan net.Conn
 }
 
 func newFakeRunner(t *testing.T) *fakeRunner {
@@ -52,9 +59,11 @@ func newFakeRunner(t *testing.T) *fakeRunner {
 	t.Cleanup(func() { os.RemoveAll(dir) })
 
 	f := &fakeRunner{
-		sockPath: filepath.Join(dir, "runner.sock"),
-		bootID:   testBootID,
-		open:     map[string]bool{},
+		sockPath:     filepath.Join(dir, "runner.sock"),
+		bootID:       testBootID,
+		open:         map[string]bool{},
+		resumeOffset: "0",
+		attached:     make(chan net.Conn, 8),
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -86,12 +95,35 @@ func newFakeRunner(t *testing.T) *fakeRunner {
 			}
 			return runner.TerminalCtlReply{Sessions: out}, nil
 		},
+		TerminalAttach: func(_ context.Context, req runner.TerminalCtlRequest) (*runner.Relay, runner.TerminalCtlReply, error) {
+			hostSide, guestSide := net.Pipe()
+			f.attached <- guestSide
+			return runner.NewRelay(hostSide, 0), runner.TerminalCtlReply{
+				SessionID:    req.SessionID,
+				ResumeOffset: f.resumeOffset,
+				Gap:          f.gap,
+				BootID:       f.bootID,
+			}, nil
+		},
 	})
 	if listenErr != nil {
 		t.Fatalf("listen ctl: %v", listenErr)
 	}
 	t.Cleanup(srv.Close)
 	return f
+}
+
+// nextAttach returns the guest end of the connection the last attach opened.
+func (f *fakeRunner) nextAttach(t *testing.T) net.Conn {
+	t.Helper()
+	select {
+	case c := <-f.attached:
+		t.Cleanup(func() { c.Close() })
+		return c
+	case <-time.After(5 * time.Second):
+		t.Fatal("no attach reached the guest")
+		return nil
+	}
 }
 
 // newTerminalServer is the shared VM harness with a terminal registry wired to

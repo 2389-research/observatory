@@ -59,6 +59,11 @@ func (w *Window) Ack(offset uint64) {
 // InFlight is the number of sent-but-unacknowledged bytes.
 func (w *Window) InFlight() int64 { return int64(w.sentMinusAcked()) }
 
+// Max is the window's ceiling. A relay needs it to split one large payload
+// into pieces the window can actually admit; a chunk bigger than the ceiling
+// would wait for an acknowledgement that can never come.
+func (w *Window) Max() int64 { return w.max }
+
 // Available is the room left before Reserve starts refusing.
 func (w *Window) Available() int64 { return w.max - int64(w.sentMinusAcked()) }
 

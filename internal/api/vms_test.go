@@ -121,12 +121,20 @@ func newTemplateServerFull(
 		t.Fatalf("create manager: %v", err)
 	}
 	t.Cleanup(func() { mgr.Close() })
-	h := api.New(st, eng, mgr, api.AuthConfig{Enabled: false}, nil, tr)
+	// Unstarted first: the listener is already bound, so the server can be told
+	// its own public origin. A WebSocket upgrade is refused unless Origin
+	// matches it exactly, and a harness with no origin could not test that.
+	srv := httptest.NewUnstartedServer(nil)
+	t.Cleanup(srv.Close)
+	h := api.New(st, eng, mgr, api.AuthConfig{
+		Enabled:      false,
+		PublicOrigin: "http://" + srv.Listener.Addr().String(),
+	}, nil, tr)
 	if wrap != nil {
 		h = wrap(h)
 	}
-	srv := httptest.NewServer(h)
-	t.Cleanup(srv.Close)
+	srv.Config.Handler = h
+	srv.Start()
 	return srv, st, fake
 }
 
