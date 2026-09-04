@@ -765,6 +765,45 @@ func TestManagerActionWrongStateIsInvalidTransition(t *testing.T) {
 	}
 }
 
+// TestDeleteReleaseFailureIsTyped: a release that fails leaves real resources on
+// the host — a live VMM, a jail chroot, privd's ledger entry — and the row at
+// "deleting" so the operator can see it. An untyped error reaches the API as a
+// 500 blaming storage, which sends them to the database instead. Observed on
+// aibox03: a delete answered {"cause":"storage_failure"} while two firecracker
+// processes were still running.
+func TestDeleteReleaseFailureIsTyped(t *testing.T) {
+	st := openStoreForManager(t)
+	fk := runtimetest.NewFake()
+	mgr := newManager(t, st, fk)
+
+	vm := launchedVM(t, st, mgr, "release-fails")
+	fk.FailNext("Release", vm.VMID, errors.New("privd: invalid_state"))
+
+	_, err := mgr.Delete(t.Context(), vm.VMID, true, nil)
+	if err == nil {
+		t.Fatal("delete returned no error when release failed")
+	}
+	var rel *runtime.ErrReleaseFailed
+	if !errors.As(err, &rel) {
+		t.Fatalf("error is %T (%v), want *runtime.ErrReleaseFailed", err, err)
+	}
+	if rel.VMID != vm.VMID {
+		t.Errorf("VMID = %q, want %q", rel.VMID, vm.VMID)
+	}
+	if !strings.Contains(rel.Reason, "invalid_state") {
+		t.Errorf("Reason = %q, should carry the runtime's own words", rel.Reason)
+	}
+
+	// The row must stay at "deleting": that is the record that resources survive.
+	got, err := st.GetVM(t.Context(), vm.VMID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ObservedState != "deleting" {
+		t.Errorf("observed_state = %q, want deleting", got.ObservedState)
+	}
+}
+
 func TestManagerForceStopFromPaused(t *testing.T) {
 	// §5.2: force-stop from paused must not wait for guest cooperation.
 	st := openStoreForManager(t)

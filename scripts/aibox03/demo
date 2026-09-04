@@ -224,14 +224,28 @@ stop() {
     while read -r id; do
       [ -n "$id" ] || continue
       echo "demo: deleting $id"
-      curl -fsS -X DELETE "$API/vms/$id" > /dev/null 2>&1 || echo "demo:   delete $id failed" >&2
+      # force=true: the API refuses to delete a live VM without it, and every VM
+      # this script creates is live. Without force the teardown reports success
+      # while leaving firecracker processes and their disk behind.
+      # --fail-with-body: a 4xx must be a failure here, and its typed body is
+      # the only thing that says why. Plain -sS treats a refusal as success.
+      if ! err=$(curl -sS --fail-with-body -X DELETE "$API/vms/$id?force=true" 2>&1); then
+        echo "demo:   delete $id failed: $err" >&2
+      fi
     done < "$VMLIST"
-    # Deletion is asynchronous; give release a chance to land before the daemon goes.
+    # Deletion is asynchronous; give release a chance to land before the daemon
+    # goes. Count only VMs still holding resources: a deleted VM keeps its row
+    # for ever (SPEC §5.4), so an unfiltered list never drains and this loop
+    # would spend its whole budget every time.
+    live="state=provisioning&state=starting&state=running&state=paused&state=stopping&state=deleting"
     for _ in $(seq 1 60); do
-      left=$(curl -fsS "$API/vms" 2>/dev/null | grep -c '"vm_id"' || true)
+      # -o then wc: the response is one line, so grep -c would answer 1 for any
+      # number of VMs and the message below would understate what is left.
+      left=$(curl -fsS "$API/vms?$live" 2>/dev/null | grep -o '"vm_id"' | wc -l | tr -d ' ')
       [ "$left" = "0" ] && break
       sleep 1
     done
+    [ "${left:-0}" = "0" ] || echo "demo:   $left VM(s) still live after 60s — check $LOG" >&2
     rm -f "$VMLIST"
   fi
   if running; then

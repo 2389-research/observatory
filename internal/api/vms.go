@@ -384,6 +384,34 @@ func writeVMError(w http.ResponseWriter, err error) {
 		return
 	}
 
+	// 500: the runtime could not release a VM's resources. Retryable, and named
+	// so the operator looks at the host rather than the database: the row is
+	// still readable at "deleting", and whatever survived the release is still
+	// on the machine.
+	var relErr *runtime.ErrReleaseFailed
+	if errors.As(err, &relErr) {
+		writeError(w, http.StatusInternalServerError, Error{
+			Code:      "internal",
+			Message:   "could not release the VM's host resources: " + relErr.Reason,
+			Retryable: true,
+			Cause:     "resource_release_failed",
+			Details:   map[string]any{"vm_id": relErr.VMID, "reason": relErr.Reason},
+			Remediation: []Remediation{
+				{
+					Action:    "get",
+					Params:    map[string]any{"path": basePath + "/vms/{id}"},
+					Rationale: "the VM stays in deleting until its resources are released",
+				},
+				{
+					Action:    "delete",
+					Params:    map[string]any{"path": basePath + "/vms/{id}?force=true"},
+					Rationale: "retry the delete once the cause of the release failure is cleared",
+				},
+			},
+		})
+		return
+	}
+
 	// 404: VM not found.
 	if errors.Is(err, store.ErrVMUnknown) {
 		writeError(w, http.StatusNotFound, Error{

@@ -56,6 +56,21 @@ type ErrInvalidRequest struct{ Reason string }
 
 func (e *ErrInvalidRequest) Error() string { return "invalid request: " + e.Reason }
 
+// ErrReleaseFailed is returned by Delete when the runtime could not release a
+// VM's resources. It exists so the failure keeps its own name on the wire: an
+// untyped error falls through the API's mapping to a 500 that blames storage,
+// which sends the operator to the database while the actual leak — a live VMM,
+// a jail chroot, a ledger entry — sits on the host. The VM row stays at
+// "deleting", so the remediation is to read it and retry.
+type ErrReleaseFailed struct {
+	VMID   string
+	Reason string
+}
+
+func (e *ErrReleaseFailed) Error() string {
+	return fmt.Sprintf("release vm resources for %s: %s", e.VMID, e.Reason)
+}
+
 // ErrUnknownAction is returned when Action receives an unrecognised action name.
 type ErrUnknownAction struct{ Known []string }
 
@@ -1066,7 +1081,7 @@ func (m *Manager) Delete(ctx context.Context, vmID string, force bool, expectedR
 	if err := m.rt.Release(ctx, vmID); err != nil {
 		var ue *UnavailableError
 		if !errors.As(err, &ue) {
-			return nil, fmt.Errorf("release vm resources: %w", err)
+			return nil, &ErrReleaseFailed{VMID: vmID, Reason: err.Error()}
 		}
 		// UnavailableError is tolerated: an absent runtime must not wedge deletes.
 	}

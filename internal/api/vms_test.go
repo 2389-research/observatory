@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -738,6 +739,40 @@ func TestDeleteVMForceStalePinRefused(t *testing.T) {
 	getJSON(t, srv.URL+"/api/v1/vms/"+vmID, http.StatusOK, &after)
 	if state, _ := after["observed_state"].(string); state != "running" {
 		t.Errorf("observed_state after refused delete = %q, want running", state)
+	}
+}
+
+// TestDeleteVMReleaseFailureTeaches: when the runtime cannot release a VM's
+// resources, something is still on the host — a live VMM, a jail chroot, a
+// ledger entry — and the row stays at "deleting" to say so. The answer has to
+// name that, not fall through to the catch-all 500 that blames storage and
+// sends the operator to the database. Seen for real on aibox03.
+func TestDeleteVMReleaseFailureTeaches(t *testing.T) {
+	srv, _, fake := newTemplateServer(t)
+	vmID := createRunningVM(t, srv.URL, fake)
+	fake.FailNext("Release", vmID, errors.New("privd: invalid_state"))
+
+	var e api.Error
+	doRequest(t, http.MethodDelete, srv.URL+"/api/v1/vms/"+vmID+"?force=true",
+		nil, http.StatusInternalServerError, &e)
+	requireTeaching(t, e, "internal")
+	if e.Cause != "resource_release_failed" {
+		t.Errorf("cause = %q, want resource_release_failed", e.Cause)
+	}
+	if !e.Retryable {
+		t.Error("a release failure is retryable once its cause is cleared")
+	}
+	if len(e.Remediation) == 0 {
+		t.Error("a release failure must tell the operator what to do next")
+	}
+	if !strings.Contains(e.Message, "invalid_state") {
+		t.Errorf("message %q should carry the runtime's own words", e.Message)
+	}
+
+	var after map[string]any
+	getJSON(t, srv.URL+"/api/v1/vms/"+vmID, http.StatusOK, &after)
+	if state, _ := after["observed_state"].(string); state != "deleting" {
+		t.Errorf("observed_state = %q, want deleting — the row is the record that resources survive", state)
 	}
 }
 
