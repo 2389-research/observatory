@@ -144,6 +144,13 @@ type Hello struct {
 	// integers are decimal strings in this repo; keep it a string everywhere.
 	ResumeCursor string `json:"resume_cursor"`
 	AuthProof    string `json:"auth_proof"`
+
+	// SessionID and AfterOffset are set only on a session byte stream: the
+	// same handshake authenticates that port, so a stream connection names
+	// the session it wants and where to resume rather than opening a second
+	// negotiation. AfterOffset is a decimal string like every other offset.
+	SessionID   string `json:"session_id,omitempty"`
+	AfterOffset string `json:"after_offset,omitempty"`
 }
 
 // HelloAck is the guest's response to a Hello. If Accepted is false, Reason
@@ -151,6 +158,11 @@ type Hello struct {
 type HelloAck struct {
 	Accepted bool   `json:"accepted"`
 	Reason   string `json:"reason,omitempty"`
+
+	// ResumeOffset and Gap answer a session stream's hello: the offset the
+	// first frame will carry, and whether replay was lost reaching it.
+	ResumeOffset string `json:"resume_offset,omitempty"`
+	Gap          bool   `json:"gap,omitempty"`
 }
 
 // CapabilityManifest is the guest's response to get_capabilities. Schema is

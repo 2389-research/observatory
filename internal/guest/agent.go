@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/2389-research/observatory-v2/internal/guest/proto"
+	"github.com/2389-research/observatory-v2/internal/guest/pty"
 )
 
 const (
@@ -28,6 +29,7 @@ type Agent struct {
 	cfg      *BootConfig
 	manifest proto.CapabilityManifest
 	token    []byte // pre-converted for constant-time compare
+	broker   *pty.Broker
 
 	// PoweroffFunc is called after the agent sends shutdown_ack. Tests override
 	// this to avoid actually powering off the machine. Production default execs
@@ -63,6 +65,7 @@ func NewAgent(cfg *BootConfig, manifest proto.CapabilityManifest) *Agent {
 		cfg:          cfg,
 		manifest:     manifest,
 		token:        []byte(cfg.CapabilityToken),
+		broker:       pty.NewBroker(pty.BrokerConfig{}),
 		PoweroffFunc: defaultPoweroff,
 	}
 }
@@ -70,6 +73,13 @@ func NewAgent(cfg *BootConfig, manifest proto.CapabilityManifest) *Agent {
 // ServeControl accepts connections from ln until ctx is cancelled or ln is closed.
 // Each connection runs in its own goroutine; the listener is NOT closed by ServeControl.
 func (a *Agent) ServeControl(ctx context.Context, ln net.Listener) error {
+	return a.accept(ctx, ln, a.handleConn)
+}
+
+// accept runs one listener's accept loop until ctx is cancelled or ln is
+// closed, handing each connection to handle in its own goroutine. The listener
+// is NOT closed by accept.
+func (a *Agent) accept(ctx context.Context, ln net.Listener, handle func(context.Context, net.Conn)) error {
 	// Close ln when ctx is done so Accept unblocks.
 	go func() {
 		<-ctx.Done()
@@ -90,25 +100,30 @@ func (a *Agent) ServeControl(ctx context.Context, ln net.Listener) error {
 			}
 			return fmt.Errorf("accept: %w", err)
 		}
-		go a.handleConn(ctx, conn)
+		go handle(ctx, conn)
 	}
+}
+
+// closeOnCancel closes conn when ctx is cancelled, so a connection does not
+// coast to its own idle deadline after the agent is shutting down. The
+// returned func stops the watcher; a double close of conn is harmless.
+func closeOnCancel(ctx context.Context, conn net.Conn) func() {
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			conn.Close()
+		case <-done:
+		}
+	}()
+	return func() { close(done) }
 }
 
 // handleConn runs the per-connection protocol: handshake, then serve until idle or error.
 func (a *Agent) handleConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 
-	// Close the conn when ctx is cancelled so it doesn't coast until the
-	// 60s idle deadline. Double-close is harmless.
-	connDone := make(chan struct{})
-	defer close(connDone)
-	go func() {
-		select {
-		case <-ctx.Done():
-			conn.Close() // unblocks any pending read/write; double-close later is harmless
-		case <-connDone:
-		}
-	}()
+	defer closeOnCancel(ctx, conn)()
 
 	// --- Phase 1: handshake (10s total deadline) ---
 	handshakeDeadline := time.Now().Add(handshakeTimeout)
@@ -134,27 +149,8 @@ func (a *Agent) handleConn(ctx context.Context, conn net.Conn) {
 		return
 	}
 
-	// Check protocol version.
-	if hello.ProtocolVersion != proto.ProtocolVersion {
-		ack := proto.HelloAck{
-			Accepted: false,
-			Reason:   fmt.Sprintf("protocol version mismatch: got %d, want %d", hello.ProtocolVersion, proto.ProtocolVersion),
-		}
-		_ = a.writeControl(conn, proto.KindHelloAck, ack)
-		return
-	}
-
-	// Constant-time token compare. Only compare when lengths are equal to
-	// not leak length via timing — subtle.ConstantTimeCompare returns 0 on
-	// length mismatch anyway, but making it explicit keeps the intent clear.
-	proof := []byte(hello.AuthProof)
-	var tokenOK bool
-	if len(proof) == len(a.token) {
-		tokenOK = subtle.ConstantTimeCompare(proof, a.token) == 1
-	}
-	if !tokenOK {
-		ack := proto.HelloAck{Accepted: false, Reason: "authentication failed"}
-		_ = a.writeControl(conn, proto.KindHelloAck, ack)
+	if reason := a.authHello(hello); reason != "" {
+		_ = a.writeControl(conn, proto.KindHelloAck, proto.HelloAck{Accepted: false, Reason: reason})
 		return
 	}
 
@@ -166,6 +162,24 @@ func (a *Agent) handleConn(ctx context.Context, conn net.Conn) {
 
 	// --- Phase 2: serve requests with 60s rolling idle timeout ---
 	a.serveRequests(conn)
+}
+
+// authHello applies the connection admission rule to a hello: right protocol
+// version, right capability token. It returns the refusal reason, or "" when
+// the hello is good. Both the control channel and every session byte stream
+// go through it, so the rule has one definition.
+func (a *Agent) authHello(hello proto.Hello) string {
+	if hello.ProtocolVersion != proto.ProtocolVersion {
+		return fmt.Sprintf("protocol version mismatch: got %d, want %d", hello.ProtocolVersion, proto.ProtocolVersion)
+	}
+	// Constant-time token compare. Only compare when lengths are equal to
+	// not leak length via timing — subtle.ConstantTimeCompare returns 0 on
+	// length mismatch anyway, but making it explicit keeps the intent clear.
+	proof := []byte(hello.AuthProof)
+	if len(proof) != len(a.token) || subtle.ConstantTimeCompare(proof, a.token) != 1 {
+		return "authentication failed"
+	}
+	return ""
 }
 
 // serveRequests handles authenticated verbs until EOF, idle timeout, or shutdown.
@@ -197,6 +211,13 @@ func (a *Agent) serveRequests(conn net.Conn) {
 			}
 			a.PoweroffFunc()
 			return
+		case proto.KindTerminalCreate, proto.KindTerminalClose, proto.KindTerminalList:
+			// A terminal verb that fails answers terminal.error and the
+			// channel stays up: one bad session id must not cost the VM its
+			// control connection. Only a transport error ends the loop.
+			if err := a.serveTerminal(conn, env); err != nil {
+				return
+			}
 		default:
 			a.sendError(conn, fmt.Sprintf("unknown kind %q", env.Kind))
 			return

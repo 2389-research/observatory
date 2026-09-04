@@ -96,6 +96,11 @@ type runner struct {
 	// finalizeCh receives a single signal when a finalize ctl arrives.
 	finalizeCh chan struct{}
 
+	// terminalCh carries terminal control verbs to the supervision loop, which
+	// owns the single guest control connection. It is unbuffered: a request
+	// only lands when the loop is attached and free to send it.
+	terminalCh chan terminalRequest
+
 	// shutdownRequested is set when a shutdown_guest ctl was accepted this boot.
 	mu                sync.Mutex
 	shutdownRequested bool
@@ -108,6 +113,7 @@ func Run(ctx context.Context, cfg Config) error {
 		cfg:        cfg,
 		shutdownCh: make(chan shutdownRequest, 1),
 		finalizeCh: make(chan struct{}, 1),
+		terminalCh: make(chan terminalRequest),
 	}
 	return r.run(ctx)
 }
@@ -151,7 +157,14 @@ func (r *runner) run(ctx context.Context) error {
 	}
 
 	// Start control socket.
-	ctlSrv, err := ListenCtl(ctx, r.cfg.CtlSock, r.doShutdown, r.doFinalize)
+	ctlSrv, err := ListenCtl(ctx, r.cfg.CtlSock, CtlHandlers{
+		Shutdown:       r.doShutdown,
+		Finalize:       r.doFinalize,
+		TerminalCreate: r.terminalCreate,
+		TerminalClose:  r.terminalClose,
+		TerminalList:   r.terminalList,
+		TerminalAttach: r.terminalAttach,
+	})
 	if err != nil {
 		_ = sw.Close()
 		return fmt.Errorf("runner: listen ctl: %w", err)
@@ -301,10 +314,26 @@ func (r *runner) pingLoop(ctx context.Context, conn net.Conn, vmmGone <-chan str
 		}
 	}
 
+	// pendingTerm holds the one terminal request in flight on this connection.
+	// While it is set, the terminal channel is read as nil below — a nil
+	// channel in a select blocks forever, which is what serializes requests
+	// over a connection that carries exactly one answer at a time.
+	var pendingTerm chan terminalResult
+	var pendingTimeout <-chan time.Time
+	finishTerm := func(res terminalResult) {
+		if pendingTerm == nil {
+			return
+		}
+		pendingTerm <- res
+		pendingTerm, pendingTimeout = nil, nil
+	}
+
 	defer func() {
 		conn.Close()
 		// If a shutdown handler is still waiting, unblock it.
 		routeAck(fmt.Errorf("channel closed"))
+		// Same for a terminal caller: a lost channel is an answer.
+		finishTerm(terminalResult{err: fmt.Errorf("the guest control channel closed")})
 	}()
 
 	pingTicker := time.NewTicker(r.cfg.PingInterval)
@@ -315,12 +344,28 @@ func (r *runner) pingLoop(ctx context.Context, conn net.Conn, vmmGone <-chan str
 	pingsPending := 0
 
 	for {
+		termCh := r.terminalCh
+		if pendingTerm != nil {
+			termCh = nil
+		}
+
 		select {
 		case <-ctx.Done():
 			return "", "ctx_done"
 
 		case <-vmmGone:
 			return "", "vmm_gone"
+
+		case req := <-termCh:
+			if err := proto.WriteControl(conn, req.kind, req.payload); err != nil {
+				req.result <- terminalResult{err: fmt.Errorf("write %s: %w", req.kind, err)}
+				return fmt.Sprintf("terminal write: %v", err), "redial"
+			}
+			pendingTerm = req.result
+			pendingTimeout = time.After(terminalRequestTimeout)
+
+		case <-pendingTimeout:
+			finishTerm(terminalResult{err: fmt.Errorf("the guest did not answer within %s", terminalRequestTimeout)})
 
 		case <-r.finalizeCh:
 			return "", "finalize"
@@ -370,6 +415,12 @@ func (r *runner) pingLoop(ctx context.Context, conn net.Conn, vmmGone <-chan str
 				pingsPending = 0
 			case proto.KindShutdownAck:
 				routeAck(nil)
+			case proto.KindTerminalCreated, proto.KindTerminalClosed,
+				proto.KindTerminalSessions, proto.KindTerminalError, proto.KindError:
+				// KindError is in this set on purpose: a guestd too old to know
+				// the terminal verbs answers "error", and routing it here fails
+				// the request now instead of parking the caller until timeout.
+				finishTerm(terminalResult{env: env})
 			default:
 				// Unknown kinds are silently ignored.
 			}

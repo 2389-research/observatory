@@ -144,7 +144,7 @@ func TestCtlProtocolShutdownGuest(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	srv, err := runner.ListenCtl(ctx, sockPath, shutdownFn, nil)
+	srv, err := runner.ListenCtl(ctx, sockPath, runner.CtlHandlers{Shutdown: shutdownFn})
 	if err != nil {
 		t.Fatalf("ListenCtl: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestCtlProtocolShutdownGuestError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	srv, err := runner.ListenCtl(ctx, sockPath, shutdownFn, nil)
+	srv, err := runner.ListenCtl(ctx, sockPath, runner.CtlHandlers{Shutdown: shutdownFn})
 	if err != nil {
 		t.Fatalf("ListenCtl: %v", err)
 	}
@@ -236,7 +236,7 @@ func TestCtlProtocolFinalize(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	srv, err := runner.ListenCtl(ctx, sockPath, nil, finalizeFn)
+	srv, err := runner.ListenCtl(ctx, sockPath, runner.CtlHandlers{Finalize: finalizeFn})
 	if err != nil {
 		t.Fatalf("ListenCtl: %v", err)
 	}
@@ -273,7 +273,7 @@ func TestCtlProtocolUnknownCmd(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	srv, err := runner.ListenCtl(ctx, sockPath, nil, nil)
+	srv, err := runner.ListenCtl(ctx, sockPath, runner.CtlHandlers{})
 	if err != nil {
 		t.Fatalf("ListenCtl: %v", err)
 	}
@@ -369,7 +369,7 @@ func TestCtlSocketMode0600(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	srv, err := runner.ListenCtl(ctx, sockPath, nil, nil)
+	srv, err := runner.ListenCtl(ctx, sockPath, runner.CtlHandlers{})
 	if err != nil {
 		t.Fatalf("ListenCtl: %v", err)
 	}
@@ -420,7 +420,7 @@ func TestMultipleCtlConnections(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	srv, err := runner.ListenCtl(ctx, sockPath, nil, finalizeFn)
+	srv, err := runner.ListenCtl(ctx, sockPath, runner.CtlHandlers{Finalize: finalizeFn})
 	if err != nil {
 		t.Fatalf("ListenCtl: %v", err)
 	}

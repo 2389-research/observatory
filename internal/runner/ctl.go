@@ -1,5 +1,5 @@
 // ABOUTME: Control socket for the runner: newline-delimited JSON over unix socket.
-// ABOUTME: One command per connection; supports shutdown_guest and finalize commands.
+// ABOUTME: One command per connection, except terminal-attach, which becomes a stream.
 package runner
 
 import (
@@ -8,32 +8,52 @@ import (
 	"fmt"
 	"net"
 	"os"
+
+	"github.com/2389-research/observatory-v2/internal/guest/proto"
 )
 
 // ctlRequest is decoded from the incoming command connection.
 type ctlRequest struct {
 	Cmd    string `json:"cmd"`
 	GraceS int    `json:"grace_s"`
+	// Terminal carries the arguments of a terminal-* command. It is a nested
+	// block rather than more top-level fields so the two command families
+	// cannot collide as either grows.
+	Terminal *TerminalCtlRequest `json:"terminal,omitempty"`
 }
 
 // ctlReply is encoded back to the caller.
 type ctlReply struct {
-	OK    bool   `json:"ok"`
-	Error string `json:"error,omitempty"`
+	OK       bool              `json:"ok"`
+	Error    string            `json:"error,omitempty"`
+	Terminal *TerminalCtlReply `json:"terminal,omitempty"`
+}
+
+// CtlHandlers are the commands a ctl server can serve. A nil handler answers
+// "not available" rather than failing the connection.
+type CtlHandlers struct {
+	Shutdown func(graceS int) error
+	Finalize func() error
+
+	TerminalCreate func(context.Context, TerminalCtlRequest) (TerminalCtlReply, error)
+	TerminalClose  func(context.Context, TerminalCtlRequest) (TerminalCtlReply, error)
+	TerminalList   func(context.Context) (TerminalCtlReply, error)
+	// TerminalAttach returns a relay that owns the guest side of a session
+	// stream. The caller's connection becomes the other side of it.
+	TerminalAttach func(context.Context, TerminalCtlRequest) (*Relay, TerminalCtlReply, error)
 }
 
 // CtlServer listens on a unix socket and dispatches commands to registered handlers.
 type CtlServer struct {
-	ln       net.Listener
-	shutdown func(grace int) error
-	finalize func() error
+	ln net.Listener
+	h  CtlHandlers
 }
 
 // ListenCtl creates a unix socket at sockPath (mode 0600) and starts serving
-// ctl connections. shutdown and finalize may be nil if those commands should
-// return a "not supported" error. Connections are handled one-at-a-time per
+// ctl connections. Any handler in h may be nil, in which case that command
+// returns a "not available" error. Connections are handled one-at-a-time per
 // goroutine; the listener stays open until Close is called.
-func ListenCtl(ctx context.Context, sockPath string, shutdown func(int) error, finalize func() error) (*CtlServer, error) {
+func ListenCtl(ctx context.Context, sockPath string, h CtlHandlers) (*CtlServer, error) {
 	// Remove stale socket if it exists.
 	_ = os.Remove(sockPath)
 
@@ -45,11 +65,7 @@ func ListenCtl(ctx context.Context, sockPath string, shutdown func(int) error, f
 		return nil, fmt.Errorf("runner ctl: listen %s: %w", sockPath, lnErr)
 	}
 
-	srv := &CtlServer{
-		ln:       ln,
-		shutdown: shutdown,
-		finalize: finalize,
-	}
+	srv := &CtlServer{ln: ln, h: h}
 	go srv.serve(ctx)
 	return srv, nil
 }
@@ -70,12 +86,14 @@ func (s *CtlServer) serve(ctx context.Context) {
 		if err != nil {
 			return
 		}
-		go s.handle(conn)
+		go s.handle(ctx, conn)
 	}
 }
 
 // handle reads one command from conn, dispatches it, and writes the reply.
-func (s *CtlServer) handle(conn net.Conn) {
+// terminal-attach is the exception: its reply is followed by a frame stream,
+// so it keeps the connection for as long as the session is attached.
+func (s *CtlServer) handle(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 	var req ctlRequest
 	dec := json.NewDecoder(conn)
@@ -86,27 +104,110 @@ func (s *CtlServer) handle(conn net.Conn) {
 		return
 	}
 
+	if req.Cmd == "terminal-attach" {
+		s.attach(ctx, conn, dec, req)
+		return
+	}
+
 	var reply ctlReply
 	switch req.Cmd {
 	case "shutdown_guest":
-		if s.shutdown == nil {
+		if s.h.Shutdown == nil {
 			reply = ctlReply{OK: false, Error: "shutdown not available"}
-		} else if err := s.shutdown(req.GraceS); err != nil {
+		} else if err := s.h.Shutdown(req.GraceS); err != nil {
 			reply = ctlReply{OK: false, Error: err.Error()}
 		} else {
 			reply = ctlReply{OK: true}
 		}
 	case "finalize":
-		if s.finalize == nil {
+		if s.h.Finalize == nil {
 			reply = ctlReply{OK: false, Error: "finalize not available"}
-		} else if err := s.finalize(); err != nil {
+		} else if err := s.h.Finalize(); err != nil {
 			reply = ctlReply{OK: false, Error: err.Error()}
 		} else {
 			reply = ctlReply{OK: true}
 		}
+	case "terminal-create":
+		reply = terminalReply(func() (TerminalCtlReply, error) {
+			if s.h.TerminalCreate == nil {
+				return TerminalCtlReply{}, errNotAvailable("terminal-create")
+			}
+			if req.Terminal == nil {
+				return TerminalCtlReply{}, errNeedsTerminalBlock("terminal-create")
+			}
+			return s.h.TerminalCreate(ctx, *req.Terminal)
+		})
+	case "terminal-close":
+		reply = terminalReply(func() (TerminalCtlReply, error) {
+			if s.h.TerminalClose == nil {
+				return TerminalCtlReply{}, errNotAvailable("terminal-close")
+			}
+			if req.Terminal == nil {
+				return TerminalCtlReply{}, errNeedsTerminalBlock("terminal-close")
+			}
+			return s.h.TerminalClose(ctx, *req.Terminal)
+		})
+	case "terminal-list":
+		reply = terminalReply(func() (TerminalCtlReply, error) {
+			if s.h.TerminalList == nil {
+				return TerminalCtlReply{}, errNotAvailable("terminal-list")
+			}
+			return s.h.TerminalList(ctx)
+		})
 	default:
 		reply = ctlReply{OK: false, Error: fmt.Sprintf("unknown cmd %q", req.Cmd)}
 	}
 
 	_ = json.NewEncoder(conn).Encode(reply)
+}
+
+func errNotAvailable(cmd string) error { return fmt.Errorf("%s not available", cmd) }
+func errNeedsTerminalBlock(c string) error {
+	return fmt.Errorf("%s needs a terminal block", c)
+}
+
+// terminalReply runs one terminal command and renders its outcome.
+func terminalReply(run func() (TerminalCtlReply, error)) ctlReply {
+	out, err := run()
+	if err != nil {
+		return ctlReply{OK: false, Error: err.Error()}
+	}
+	return ctlReply{OK: true, Terminal: &out}
+}
+
+// attach answers a terminal-attach and then hands the connection to the relay.
+// The reply goes first because it carries the offset the caller's first frame
+// will be stamped with; frames follow it on the same connection.
+func (s *CtlServer) attach(ctx context.Context, conn net.Conn, dec *json.Decoder, req ctlRequest) {
+	enc := json.NewEncoder(conn)
+	if s.h.TerminalAttach == nil {
+		_ = enc.Encode(ctlReply{OK: false, Error: errNotAvailable("terminal-attach").Error()})
+		return
+	}
+	if req.Terminal == nil {
+		_ = enc.Encode(ctlReply{OK: false, Error: errNeedsTerminalBlock("terminal-attach").Error()})
+		return
+	}
+	relay, out, err := s.h.TerminalAttach(ctx, *req.Terminal)
+	if err != nil {
+		_ = enc.Encode(ctlReply{OK: false, Error: err.Error()})
+		return
+	}
+	defer relay.Close()
+	if err := enc.Encode(ctlReply{OK: true, Terminal: &out}); err != nil {
+		return
+	}
+
+	_ = relay.Run(FrameStream(dec, conn), conn)
+}
+
+// terminalReplyError renders a guest answer that is not the one asked for.
+func terminalReplyError(env proto.Envelope) error {
+	if env.Kind == proto.KindTerminalError {
+		var te proto.TerminalError
+		if json.Unmarshal(env.Data, &te) == nil {
+			return fmt.Errorf("%s: %s", te.Cause, te.Message)
+		}
+	}
+	return fmt.Errorf("the guest answered %q", env.Kind)
 }
