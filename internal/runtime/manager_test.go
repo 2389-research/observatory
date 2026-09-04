@@ -324,6 +324,130 @@ func TestManagerDefaultsApplied(t *testing.T) {
 	}
 }
 
+// TestManagerActionsCarryDesiredState: desired_state is the operator's stated
+// intent, and observed_state drifting away from it is the signal the fleet page
+// raises. A desired_state written once at create and never again turns that
+// signal into a lie: every deliberately stopped VM reads "want running" for ever,
+// and an operator who sees the flag on healthy VMs stops reading it.
+//
+// Each action's terminal transition is the one place that knows what the caller
+// asked for, so each carries the new intent.
+func TestManagerActionsCarryDesiredState(t *testing.T) {
+	st := openStoreForManager(t)
+	fk := runtimetest.NewFake()
+	mgr := newManager(t, st, fk)
+
+	vm := launchedVM(t, st, mgr, "desired-state")
+	vmID := vm.VMID
+	if vm.DesiredState != "running" {
+		t.Fatalf("desired_state after create = %q, want running", vm.DesiredState)
+	}
+
+	for _, step := range []struct {
+		action  string
+		desired string
+	}{
+		{"pause", "paused"},
+		{"resume", "running"},
+		{"stop", "stopped"},
+		{"start", "running"},
+		{"force_stop", "stopped"},
+	} {
+		if _, _, err := mgr.Action(t.Context(), vmID, step.action, nil); err != nil {
+			t.Fatalf("%s: %v", step.action, err)
+		}
+		got, err := st.GetVM(t.Context(), vmID)
+		if err != nil {
+			t.Fatalf("GetVM after %s: %v", step.action, err)
+		}
+		if got.DesiredState != step.desired {
+			t.Errorf("desired_state after %s = %q, want %q", step.action, got.DesiredState, step.desired)
+		}
+		if got.ObservedState != step.desired {
+			t.Errorf("observed_state after %s = %q, want %q", step.action, got.ObservedState, step.desired)
+		}
+	}
+}
+
+// TestInterruptedStopStillRecordsIntent: an action states its intent on the
+// first transition it makes, so a stop that dies between "stopping" and
+// "stopped" leaves a row that still says what was asked for. Recording intent
+// only on the terminal write would strand this VM at "stopping" apparently
+// wanting to run — and the operator would be looking for a fault that isn't there.
+func TestInterruptedStopStillRecordsIntent(t *testing.T) {
+	st := openStoreForManager(t)
+	fk := runtimetest.NewFake()
+	mgr := newManager(t, st, fk)
+
+	vm := launchedVM(t, st, mgr, "interrupted-stop")
+	fk.FailNext("Stop", vm.VMID, errors.New("vmm unreachable"))
+
+	if _, _, err := mgr.Action(t.Context(), vm.VMID, "stop", nil); err == nil {
+		t.Fatal("stop should fail when the runtime call fails")
+	}
+
+	got, err := st.GetVM(t.Context(), vm.VMID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ObservedState != "stopping" {
+		t.Fatalf("observed_state = %q, want stopping", got.ObservedState)
+	}
+	if got.DesiredState != "stopped" {
+		t.Errorf("desired_state = %q, want stopped", got.DesiredState)
+	}
+}
+
+// TestVMMExitLeavesDesiredStateAlone: a guest that shuts itself down while the
+// operator wanted it running is exactly the drift the flag exists to report.
+// NotifyVMMExit records what happened; it must never rewrite what was wanted.
+func TestVMMExitLeavesDesiredStateAlone(t *testing.T) {
+	st := openStoreForManager(t)
+	fk := runtimetest.NewFake()
+	mgr := newManager(t, st, fk)
+
+	vm := launchedVM(t, st, mgr, "self-shutdown")
+	if err := mgr.NotifyVMMExit(t.Context(), vm.VMID, "guest_shutdown", true); err != nil {
+		t.Fatalf("NotifyVMMExit: %v", err)
+	}
+
+	got, err := st.GetVM(t.Context(), vm.VMID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ObservedState != "stopped" {
+		t.Fatalf("observed_state = %q, want stopped", got.ObservedState)
+	}
+	if got.DesiredState != "running" {
+		t.Errorf("desired_state = %q, want running — a self-stopped VM is drift, not intent", got.DesiredState)
+	}
+}
+
+// TestDeleteSetsDesiredStateDeleted: the same rule at the end of life — a
+// deleted VM whose row still says the operator wants it running would show as
+// drift for as long as the record survives.
+func TestDeleteSetsDesiredStateDeleted(t *testing.T) {
+	st := openStoreForManager(t)
+	fk := runtimetest.NewFake()
+	mgr := newManager(t, st, fk)
+
+	vm := launchedVM(t, st, mgr, "delete-desired")
+	if _, err := mgr.Delete(t.Context(), vm.VMID, true, nil); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	got, err := st.GetVM(t.Context(), vm.VMID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ObservedState != "deleted" {
+		t.Fatalf("observed_state = %q, want deleted", got.ObservedState)
+	}
+	if got.DesiredState != "deleted" {
+		t.Errorf("desired_state = %q, want deleted", got.DesiredState)
+	}
+}
+
 func TestManagerActionPauseKeepsReservation(t *testing.T) {
 	// AT-013: paused VMs retain memory/disk reservations.
 	st := openStoreForManager(t)

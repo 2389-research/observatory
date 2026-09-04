@@ -409,10 +409,17 @@ func (m *Manager) stopVMAfterRun(vmID string) {
 	case "running", "paused":
 		// Use the same stop path as Action, but as a system-initiated request.
 		// Transition through stopping first per §5.2.
+		//
+		// on_completion=stop is the operator's own standing instruction, given
+		// when the run was created, so this carries intent the same way a stop
+		// action does — without it every run configured this way would leave a
+		// VM reading "want running" once its work was done.
+		wantStopped := "stopped"
 		if _, err := m.st.TransitionVM(ctx, store.TransitionInput{
-			VMID:   vmID,
-			To:     "stopping",
-			Reason: "run_on_completion_stop",
+			VMID:         vmID,
+			To:           "stopping",
+			Reason:       "run_on_completion_stop",
+			DesiredState: &wantStopped,
 		}); err != nil {
 			return // race is fine — something else is stopping it
 		}
@@ -428,6 +435,7 @@ func (m *Manager) stopVMAfterRun(vmID string) {
 			VMID:           vmID,
 			To:             "stopped",
 			Reason:         "run_on_completion_stop",
+			DesiredState:   &wantStopped,
 			ReleaseCompute: true,
 		})
 	}

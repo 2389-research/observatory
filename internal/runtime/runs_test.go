@@ -602,7 +602,12 @@ func TestRunOnCompletionStop(t *testing.T) {
 	}
 
 	// VM should reach stopped because on_completion=stop.
-	waitForVMState(t, st, vm.VMID, "stopped")
+	stopped := waitForVMState(t, st, vm.VMID, "stopped")
+	// on_completion=stop is the operator's standing instruction, so the VM is
+	// stopped on purpose: it must not read as drift on the fleet page.
+	if stopped.DesiredState != "stopped" {
+		t.Errorf("desired_state = %q, want stopped", stopped.DesiredState)
+	}
 }
 
 func TestRunOnCompletionKeepRunning(t *testing.T) {

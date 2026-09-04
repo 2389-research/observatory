@@ -695,6 +695,14 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 		releaseC bool
 	)
 
+	// An action states its intent on the first transition it makes, not only on
+	// the last. Both matter: desired_state is written once at create and would
+	// otherwise say "running" for the life of a VM the operator deliberately
+	// stopped, and an action interrupted between its two transitions would
+	// settle at a state nobody appears to have asked for. Every action here
+	// wants the state it ends in, so the tail passes newState straight through.
+	wantStopped := "stopped"
+
 	// The caller's revision pin is an optimistic-concurrency precondition, and a
 	// precondition is checked once: on the first transition this action makes.
 	// Actions that pass through an intermediate state (stop, force_stop →
@@ -718,12 +726,14 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 		startCtx, startCancel := m.detachedContext(ctx, launchBudget)
 		defer startCancel()
 		bootID := uuid.NewString()
+		wantRunning := "running"
 		updVM, err := m.st.TransitionVM(startCtx, store.TransitionInput{
 			VMID:             vmID,
 			ExpectedRevision: expectedRevision,
 			To:               "starting",
 			Reason:           "start",
 			OperationID:      opID,
+			DesiredState:     &wantRunning,
 			BootID:           &bootID,
 		})
 		if err != nil {
@@ -803,6 +813,7 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 				To:               "stopping",
 				Reason:           "stop_requested",
 				OperationID:      opID,
+				DesiredState:     &wantStopped,
 			}); err != nil {
 				return m.failAction(ctx, vmID, opID, action, err)
 			}
@@ -833,6 +844,7 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 				To:               "stopping",
 				Reason:           "force_stop_requested",
 				OperationID:      opID,
+				DesiredState:     &wantStopped,
 			}); err != nil {
 				return m.failAction(ctx, vmID, opID, action, err)
 			}
@@ -861,6 +873,7 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 		To:               newState,
 		Reason:           reason,
 		OperationID:      opID,
+		DesiredState:     &newState,
 		ReleaseCompute:   releaseC,
 	})
 	if err != nil {
@@ -936,6 +949,13 @@ func (m *Manager) Delete(ctx context.Context, vmID string, force bool, expectedR
 		return vm, nil // in progress
 	}
 
+	// From this call on the operator wants the VM gone, and every state it passes
+	// through on the way — stopping, stopped, deleting — is honest drift toward
+	// that. Every transition below carries the intent rather than only the last,
+	// so a delete that stalls mid-way still reads as unfinished work instead of a
+	// VM someone apparently wanted stopped.
+	wantDeleted := "deleted"
+
 	// Live states require force.
 	liveStates := map[string]bool{
 		"provisioning": true, "starting": true,
@@ -965,6 +985,7 @@ func (m *Manager) Delete(ctx context.Context, vmID string, force bool, expectedR
 				To:               "stopping",
 				Reason:           "forced_stop_for_delete",
 				OperationID:      0,
+				DesiredState:     &wantDeleted,
 			})
 			switch {
 			case stopErr == nil:
@@ -986,6 +1007,7 @@ func (m *Manager) Delete(ctx context.Context, vmID string, force bool, expectedR
 			To:               "stopped",
 			Reason:           "forced_stop_for_delete",
 			OperationID:      0,
+			DesiredState:     &wantDeleted,
 			ReleaseCompute:   true,
 		})
 		switch {
@@ -1007,6 +1029,7 @@ func (m *Manager) Delete(ctx context.Context, vmID string, force bool, expectedR
 			To:               "deleting",
 			Reason:           "delete_requested",
 			OperationID:      0,
+			DesiredState:     &wantDeleted,
 		})
 		if err != nil {
 			return vm, err
@@ -1049,11 +1072,12 @@ func (m *Manager) Delete(ctx context.Context, vmID string, force bool, expectedR
 	}
 
 	vm, err = m.st.TransitionVM(ctx, store.TransitionInput{
-		VMID:        vmID,
-		To:          "deleted",
-		Reason:      "deleted",
-		OperationID: 0,
-		ReleaseAll:  true,
+		VMID:         vmID,
+		To:           "deleted",
+		Reason:       "deleted",
+		OperationID:  0,
+		DesiredState: &wantDeleted,
+		ReleaseAll:   true,
 	})
 	return vm, err
 }
@@ -1167,12 +1191,14 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 				releaseOK = errors.As(err, &ue)
 			}
 			if releaseOK {
+				wantDeleted := "deleted"
 				_, _ = m.st.TransitionVM(ctx, store.TransitionInput{
-					VMID:        vm.VMID,
-					To:          "deleted",
-					Reason:      "controller_restart",
-					OperationID: 0,
-					ReleaseAll:  true,
+					VMID:         vm.VMID,
+					To:           "deleted",
+					Reason:       "controller_restart",
+					OperationID:  0,
+					DesiredState: &wantDeleted,
+					ReleaseAll:   true,
 				})
 			}
 		}
