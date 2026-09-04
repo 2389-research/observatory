@@ -368,6 +368,12 @@ unfixed at this commit. It is not an M1 gate blocker — no AT below asserts cap
 across a stop/start — and it is recorded here because the gate's evidence must say what the gate
 did not cover.
 
+(Fixed 2026-09-04 in `816ae18`, after M1 merged: the `stopped -> starting` transition now takes the
+compute back inside the writer transaction, gated by the same admission check a create runs, and
+asks for zero disk because the reservation row never released it. Live on aibox03 with two VMs, the
+same round trip now reads `reserved_memory_mib` 2560 -> 1280 -> 2560 and `reserved_vcpu` 2 -> 1 -> 2
+with `reserved_disk_mib` 6144 throughout. This paragraph records what the gate saw, so it stands.)
+
 AT-019: TESTED_PASS.
   Test: m1b_gate_test.go:at019_real_guest_pty. Asserts the session's tty is a guest pts, that the
     guest's hostname and kernel differ from the host's, that guest-only paths exist (/dev/vd*,

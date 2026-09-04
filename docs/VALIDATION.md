@@ -1,5 +1,41 @@
 # Specification Package Validation
 
+## Revision 17 (2026-09-04) — the capacity leak closed, and the acceptance record kept honest
+
+Run after kata `r799` was fixed: the `stopped -> starting` transition now re-acquires the memory and
+vCPU that the stop released, inside the writer transaction, gated by the same admission check a
+create runs. `TransitionInput` gained `AcquireCompute` and an `Admit` callback; the check runs before
+any write, so a host with no room refuses the start and leaves the VM stopped rather than parking it
+in `starting` with a launch already under way. The start asks for zero disk, because the reservation
+row never released the disk — asking again would count it twice and refuse a restart that fits.
+`failAction` now carries a typed `AdmissionRefusal`'s own cause and message onto the failed
+operation, so the actions route answers 409 `insufficient_capacity` the way a refused create does.
+
+The docs change is small and additive. `docs/ACCEPTANCE.md`'s M1b status block records what the M1
+gate saw, and what it saw was a live host with the defect in it; that paragraph is not rewritten. A
+parenthesis after it names the fix commit, the live numbers, and says the paragraph stands as
+evidence of the gate. Revision 16's "unfixed at this commit" gains a dated correction clause
+pointing here, the same treatment revision 16 gave revision 15.
+
+### Results
+
+- 46 package checks passed (`uv run docs/validation/check.py`, exit 0).
+- All revision-16 results hold. The `docs/ACCEPTANCE.md` edit adds 6 lines inside the same "L1 M1b
+  status notes" HTML comment and removes none: no acceptance ID added, removed or renumbered, no
+  matrix row changed, no fenced code block opened or closed, check.py untouched.
+- No AT is claimed for the fix. It has unit, API and live evidence (below), but SPEC §18's acceptance
+  IDs do not cover capacity accounting across a stop/start — the gap that let the defect ship. An AT
+  for it belongs to whichever milestone next revises the ID set, not to a retroactive edit here.
+- Live evidence, aibox03, two real Firecracker VMs at 1 vCPU / 512 MiB (1280 MiB reserved each with
+  the 768 MiB per-VM host overhead): `reserved_memory_mib` 2560 -> 1280 -> 2560 across a stop and a
+  start, `reserved_vcpu` 2 -> 1 -> 2, `reserved_disk_mib` 6144 throughout, `free_memory_mib` back to
+  48589 exactly. Operations `op-000009` and `op-000010` both succeeded; the VM reached `running` at
+  revision 7. Host clean after teardown: 36 GB free, no firecracker processes.
+- The refusal half has no live evidence, deliberately. Refusing a start is a decision the writer
+  transaction makes before it writes anything and before `rt.Launch` runs, so a real host would show
+  nothing a fake runtime does not. It is covered by unit tests at the store and manager layers and by
+  an API test asserting the 409, each mutation-proven.
+
 ## Revision 16 (2026-09-04) — a real browser against a real daemon, and the capacity leak it found
 
 Run after the M1b live gate's last open clause was closed by hand. SPEC §18 asks for storage and stop
@@ -18,7 +54,8 @@ never takes the reservation back: `internal/store/vms.go` writes `compute_releas
 and both set it to 1, and the `start` case in `internal/runtime/manager.go` never touches the
 reservation row. Admission sums those rows, so a VM that has been stopped and started once is
 invisible to the check that keeps the host from overcommitting. It is filed as kata `r799` (P1) and
-unfixed at this commit; the acceptance block names it, states it is not an M1 gate blocker because no
+unfixed at this commit (Corrected 2026-09-04: fixed later the same day in `816ae18`, recorded in
+revision 17); the acceptance block names it, states it is not an M1 gate blocker because no
 AT asserts capacity across a stop/start, and says why it is recorded there anyway. Fixing it inside
 the gate task would have changed the binaries the two recorded PASS runs were measured against.
 
