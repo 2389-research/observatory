@@ -8,6 +8,7 @@ import { HostCapacity } from './components/HostCapacity'
 import { LaunchForm } from './components/LaunchForm'
 import { LaunchBatch } from './components/LaunchBatch'
 import { AttentionQueue } from './components/AttentionQueue'
+import { OperationFailure } from './components/OperationFailure'
 import { RecentOperations } from './components/RecentOperations'
 import { VMTable } from './components/VMTable'
 import { BulkActions, useFleetControls } from './components/BulkActions'
@@ -130,17 +131,9 @@ export function App() {
         </span>
       </header>
 
-      {failure && (
-        <p className="alert" role="alert">
-          <strong>{failure.error?.message ?? 'The host did not answer.'}</strong>{' '}
-          {failure.error?.cause && <code>{failure.error.cause}</code>}
-          {failure.error?.remediation?.map((r) => (
-            <span className="remediation" key={r.action}>
-              {r.action}: {r.rationale}
-            </span>
-          ))}
-        </p>
-      )}
+      {/* The same renderer every other surface uses, so a refusal reads the
+          same way wherever it lands — and is neutralized in one place. */}
+      <OperationFailure failure={failure ?? undefined} fallback="The host did not answer" />
 
       {!fleet ? (
         <p className="empty">Reading the host…</p>
