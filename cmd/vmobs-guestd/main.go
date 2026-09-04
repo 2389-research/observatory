@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"syscall"
@@ -23,6 +24,7 @@ func main() {
 	configDev := fs.String("config-dev", "/dev/vdb", "block device holding the boot config ext4 image")
 	configMount := fs.String("config-mount", "/run/vmobs/config", "mountpoint for the config device")
 	controlPort := fs.Uint("control-port", 10000, "vsock port to listen on (§7.3)")
+	streamPort := fs.Uint("stream-port", 10002, "vsock port carrying session byte streams (§7.3)")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		log.Fatalf("parse flags: %v", err)
 	}
@@ -41,13 +43,40 @@ func main() {
 	}
 	defer ln.Close()
 
+	// A stream port that will not bind costs terminals, not the VM. The control
+	// channel is how the host stops this guest at all, so exiting here would
+	// strand it; instead the failure is logged to the console and every terminal
+	// verb fails at the host with a real error rather than hanging.
+	streamLn, streamErr := vsock.Listen(uint32(*streamPort), nil)
+	if streamErr != nil {
+		fmt.Fprintf(os.Stderr, "vmobs-guestd: vsock listen port %d: %v; terminals unavailable\n",
+			*streamPort, streamErr)
+	} else {
+		defer streamLn.Close()
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	fmt.Printf("vmobs-guestd: serving vsock port %d vm=%s boot=%s\n",
-		*controlPort, cfg.VMID, cfg.BootID)
+	fmt.Printf("vmobs-guestd: serving vsock control %d stream %d vm=%s boot=%s\n",
+		*controlPort, *streamPort, cfg.VMID, cfg.BootID)
 
-	if err := agent.ServeControl(ctx, ln); err != nil {
-		log.Fatalf("ServeControl: %v", err)
+	// Both listeners close on ctx, so whichever returns first, the other is on
+	// its way down too; the first non-nil error is the one worth reporting.
+	done := make(chan error, 2)
+	serve := func(name string, fn func(context.Context, net.Listener) error, l net.Listener) {
+		if err := fn(ctx, l); err != nil {
+			done <- fmt.Errorf("%s: %w", name, err)
+			return
+		}
+		done <- nil
+	}
+	go serve("ServeControl", agent.ServeControl, ln)
+	if streamErr == nil {
+		go serve("ServeStreams", agent.ServeStreams, streamLn)
+	}
+
+	if err := <-done; err != nil {
+		log.Fatalf("%v", err)
 	}
 }
