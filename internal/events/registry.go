@@ -294,6 +294,41 @@ var registry = []KindInfo{
 			"not emitted in the portable core; queries return zero results until the network subsystem lands",
 		},
 	},
+	{
+		Kind:          "terminal.session_opened",
+		Family:        "terminal",
+		SchemaVersion: 1,
+		Provenance:    HostObserved,
+		Semantics:     "The host opened an interactive terminal session on a VM: session_id, vm_id, boot_id, owner, rows, cols and argv. The host mints the session id and asks the guest for the PTY, so this records the request the host made.",
+		Caveats: []string{
+			"the session is bound to boot_id; after a reboot the same session id is stale, not resumable",
+			"argv is what the host asked for, not proof of what the guest executed",
+		},
+	},
+	{
+		Kind:          "terminal.session_closed",
+		Family:        "terminal",
+		SchemaVersion: 1,
+		Provenance:    HostObserved,
+		Semantics:     "An interactive terminal session ended: session_id, vm_id, reason, optional exit_code and signal, and the output_bytes, input_bytes and dropped_bytes counts for the session.",
+		Caveats: []string{
+			"output_bytes, input_bytes and dropped_bytes are decimal strings: a busy shell passes 2^53 bytes in days",
+			"a session the host never saw close — a VMM that vanished — has no event here; absence is not proof it is still open",
+			"exit_code and signal are absent unless the guest reported them",
+		},
+	},
+	{
+		Kind:          "terminal.output_dropped",
+		Family:        "terminal",
+		SchemaVersion: 1,
+		Provenance:    HostObserved,
+		Semantics:     "The guest's replay ring overwrote output nobody had read yet, losing the byte range from_offset to to_offset on that session's stream.",
+		Caveats: []string{
+			"from_offset and to_offset are decimal strings",
+			"the range names bytes that are gone; it is a loss report, not a recoverable pointer",
+			"the PTY was never blocked to prevent this: §8.3 chooses a live shell over a complete transcript",
+		},
+	},
 }
 
 var registryByKind = func() map[string]KindInfo {

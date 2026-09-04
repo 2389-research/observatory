@@ -34,8 +34,9 @@ import (
 // Per-VM locks would be more granular, but the current design has one shared
 // launchMu; extending its scope to Stop/Release is the simplest correct thing.
 
-// ctlRequest / ctlReply mirror runner.ctl types (internal to runner, not exported).
-// We replicate the JSON shape here rather than coupling to runner internals.
+// adapterCtlRequest / adapterCtlReply mirror runner.CtlRequest and
+// runner.CtlReply. The shape is replicated here rather than imported so the
+// jailer does not depend on the runner package; the two must stay in step.
 type adapterCtlRequest struct {
 	Cmd    string `json:"cmd"`
 	GraceS int    `json:"grace_s,omitempty"`

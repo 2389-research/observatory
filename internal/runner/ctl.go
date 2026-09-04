@@ -6,24 +6,29 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
+	"time"
 
 	"github.com/2389-research/observatory-v2/internal/guest/proto"
 )
 
-// ctlRequest is decoded from the incoming command connection.
-type ctlRequest struct {
+// CtlRequest is one command on the runner control socket. It is exported
+// because both ends of this wire live outside this file: the server below
+// decodes it, and CtlClient — used by the host's terminal registry — encodes
+// it. Two definitions of one wire is a protocol that drifts.
+type CtlRequest struct {
 	Cmd    string `json:"cmd"`
-	GraceS int    `json:"grace_s"`
+	GraceS int    `json:"grace_s,omitempty"`
 	// Terminal carries the arguments of a terminal-* command. It is a nested
 	// block rather than more top-level fields so the two command families
 	// cannot collide as either grows.
 	Terminal *TerminalCtlRequest `json:"terminal,omitempty"`
 }
 
-// ctlReply is encoded back to the caller.
-type ctlReply struct {
+// CtlReply is the answer to one CtlRequest.
+type CtlReply struct {
 	OK       bool              `json:"ok"`
 	Error    string            `json:"error,omitempty"`
 	Terminal *TerminalCtlReply `json:"terminal,omitempty"`
@@ -95,11 +100,11 @@ func (s *CtlServer) serve(ctx context.Context) {
 // so it keeps the connection for as long as the session is attached.
 func (s *CtlServer) handle(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
-	var req ctlRequest
+	var req CtlRequest
 	dec := json.NewDecoder(conn)
 	if err := dec.Decode(&req); err != nil {
 		// Malformed command — write error and close.
-		reply := ctlReply{OK: false, Error: "malformed command"}
+		reply := CtlReply{OK: false, Error: "malformed command"}
 		_ = json.NewEncoder(conn).Encode(reply)
 		return
 	}
@@ -109,23 +114,23 @@ func (s *CtlServer) handle(ctx context.Context, conn net.Conn) {
 		return
 	}
 
-	var reply ctlReply
+	var reply CtlReply
 	switch req.Cmd {
 	case "shutdown_guest":
 		if s.h.Shutdown == nil {
-			reply = ctlReply{OK: false, Error: "shutdown not available"}
+			reply = CtlReply{OK: false, Error: "shutdown not available"}
 		} else if err := s.h.Shutdown(req.GraceS); err != nil {
-			reply = ctlReply{OK: false, Error: err.Error()}
+			reply = CtlReply{OK: false, Error: err.Error()}
 		} else {
-			reply = ctlReply{OK: true}
+			reply = CtlReply{OK: true}
 		}
 	case "finalize":
 		if s.h.Finalize == nil {
-			reply = ctlReply{OK: false, Error: "finalize not available"}
+			reply = CtlReply{OK: false, Error: "finalize not available"}
 		} else if err := s.h.Finalize(); err != nil {
-			reply = ctlReply{OK: false, Error: err.Error()}
+			reply = CtlReply{OK: false, Error: err.Error()}
 		} else {
-			reply = ctlReply{OK: true}
+			reply = CtlReply{OK: true}
 		}
 	case "terminal-create":
 		reply = terminalReply(func() (TerminalCtlReply, error) {
@@ -155,7 +160,7 @@ func (s *CtlServer) handle(ctx context.Context, conn net.Conn) {
 			return s.h.TerminalList(ctx)
 		})
 	default:
-		reply = ctlReply{OK: false, Error: fmt.Sprintf("unknown cmd %q", req.Cmd)}
+		reply = CtlReply{OK: false, Error: fmt.Sprintf("unknown cmd %q", req.Cmd)}
 	}
 
 	_ = json.NewEncoder(conn).Encode(reply)
@@ -167,34 +172,34 @@ func errNeedsTerminalBlock(c string) error {
 }
 
 // terminalReply runs one terminal command and renders its outcome.
-func terminalReply(run func() (TerminalCtlReply, error)) ctlReply {
+func terminalReply(run func() (TerminalCtlReply, error)) CtlReply {
 	out, err := run()
 	if err != nil {
-		return ctlReply{OK: false, Error: err.Error()}
+		return CtlReply{OK: false, Error: err.Error()}
 	}
-	return ctlReply{OK: true, Terminal: &out}
+	return CtlReply{OK: true, Terminal: &out}
 }
 
 // attach answers a terminal-attach and then hands the connection to the relay.
 // The reply goes first because it carries the offset the caller's first frame
 // will be stamped with; frames follow it on the same connection.
-func (s *CtlServer) attach(ctx context.Context, conn net.Conn, dec *json.Decoder, req ctlRequest) {
+func (s *CtlServer) attach(ctx context.Context, conn net.Conn, dec *json.Decoder, req CtlRequest) {
 	enc := json.NewEncoder(conn)
 	if s.h.TerminalAttach == nil {
-		_ = enc.Encode(ctlReply{OK: false, Error: errNotAvailable("terminal-attach").Error()})
+		_ = enc.Encode(CtlReply{OK: false, Error: errNotAvailable("terminal-attach").Error()})
 		return
 	}
 	if req.Terminal == nil {
-		_ = enc.Encode(ctlReply{OK: false, Error: errNeedsTerminalBlock("terminal-attach").Error()})
+		_ = enc.Encode(CtlReply{OK: false, Error: errNeedsTerminalBlock("terminal-attach").Error()})
 		return
 	}
 	relay, out, err := s.h.TerminalAttach(ctx, *req.Terminal)
 	if err != nil {
-		_ = enc.Encode(ctlReply{OK: false, Error: err.Error()})
+		_ = enc.Encode(CtlReply{OK: false, Error: err.Error()})
 		return
 	}
 	defer relay.Close()
-	if err := enc.Encode(ctlReply{OK: true, Terminal: &out}); err != nil {
+	if err := enc.Encode(CtlReply{OK: true, Terminal: &out}); err != nil {
 		return
 	}
 
@@ -211,3 +216,94 @@ func terminalReplyError(env proto.Envelope) error {
 	}
 	return fmt.Errorf("the guest answered %q", env.Kind)
 }
+
+// --- the client side ------------------------------------------------------
+
+// CtlClient sends one command on a runner control socket. The server handles
+// one command per connection, so a client owns its connection for exactly one
+// command: Do closes it, and Attach hands it on to the caller.
+type CtlClient struct {
+	conn net.Conn
+}
+
+// NewCtlClient wraps an already-dialled control socket connection.
+func NewCtlClient(conn net.Conn) *CtlClient { return &CtlClient{conn: conn} }
+
+// DialCtl connects to a runner's control socket.
+func DialCtl(ctx context.Context, sockPath string) (*CtlClient, error) {
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "unix", sockPath)
+	if err != nil {
+		return nil, fmt.Errorf("dial runner ctl %s: %w", sockPath, err)
+	}
+	return NewCtlClient(conn), nil
+}
+
+// Do sends one command, reads its reply, and closes the connection. A reply
+// carrying OK: false is returned as an error naming what the runner said.
+func (c *CtlClient) Do(ctx context.Context, req CtlRequest) (CtlReply, error) {
+	defer c.conn.Close()
+	reply, _, err := c.send(ctx, req)
+	if err != nil {
+		return CtlReply{}, err
+	}
+	if !reply.OK {
+		return reply, fmt.Errorf("runner refused %s: %s", req.Cmd, reply.Error)
+	}
+	return reply, nil
+}
+
+// Attach sends terminal-attach and, on success, hands back the connection as
+// the session's frame stream. The caller owns it and must Close it; on any
+// error Attach has already closed it.
+//
+// Deadlines are cleared before the stream is returned: an attached terminal may
+// idle for hours, and a quiet shell is not a stalled one.
+func (c *CtlClient) Attach(ctx context.Context, req TerminalCtlRequest) (CtlReply, io.ReadWriteCloser, error) {
+	reply, dec, err := c.send(ctx, CtlRequest{Cmd: "terminal-attach", Terminal: &req})
+	if err != nil {
+		c.conn.Close()
+		return CtlReply{}, nil, err
+	}
+	if !reply.OK {
+		c.conn.Close()
+		return reply, nil, fmt.Errorf("runner refused terminal-attach: %s", reply.Error)
+	}
+	if err := c.conn.SetDeadline(time.Time{}); err != nil {
+		c.conn.Close()
+		return CtlReply{}, nil, fmt.Errorf("clear ctl deadline: %w", err)
+	}
+	return reply, &attachStream{r: FrameStream(dec, c.conn), conn: c.conn}, nil
+}
+
+// send writes one command and decodes one reply, leaving the connection open
+// and returning the decoder so an attach can splice its frame phase on.
+func (c *CtlClient) send(ctx context.Context, req CtlRequest) (CtlReply, *json.Decoder, error) {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		deadline = time.Now().Add(terminalRequestTimeout)
+	}
+	if err := c.conn.SetDeadline(deadline); err != nil {
+		return CtlReply{}, nil, fmt.Errorf("set ctl deadline: %w", err)
+	}
+	if err := json.NewEncoder(c.conn).Encode(req); err != nil {
+		return CtlReply{}, nil, fmt.Errorf("encode %s: %w", req.Cmd, err)
+	}
+	dec := json.NewDecoder(c.conn)
+	var reply CtlReply
+	if err := dec.Decode(&reply); err != nil {
+		return CtlReply{}, nil, fmt.Errorf("decode %s reply: %w", req.Cmd, err)
+	}
+	return reply, dec, nil
+}
+
+// attachStream is an attached connection with the frame bytes the JSON decoder
+// read ahead put back in front of it.
+type attachStream struct {
+	r    io.Reader
+	conn net.Conn
+}
+
+func (s *attachStream) Read(p []byte) (int, error)  { return s.r.Read(p) }
+func (s *attachStream) Write(p []byte) (int, error) { return s.conn.Write(p) }
+func (s *attachStream) Close() error                { return s.conn.Close() }

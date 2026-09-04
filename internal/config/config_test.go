@@ -409,3 +409,122 @@ func TestRuntimeArtifactRoot(t *testing.T) {
 		})
 	}
 }
+
+// §8.3's terminal bounds are declared in every shipped config as 0, and 0 has
+// always meant "use the documented default". An existing config must keep
+// starting, and must start with real bounds rather than zero-sized buffers.
+func TestTerminalZeroesResolveToDefaults(t *testing.T) {
+	cfg, err := load(t, minimalConfig+`terminal:
+  max_replay_bytes_per_session: 0
+  max_wire_chunk_bytes: 0
+  max_inflight_browser_bytes: 0
+  writer_lease_seconds: 0
+`)
+	if err != nil {
+		t.Fatalf("a config of zeroes must load: %v", err)
+	}
+	if got := cfg.Terminal.MaxReplayBytesPerSession; got != config.DefaultTerminalReplayBytes {
+		t.Errorf("max_replay_bytes_per_session = %d, want %d", got, config.DefaultTerminalReplayBytes)
+	}
+	if got := cfg.Terminal.MaxWireChunkBytes; got != config.DefaultTerminalWireChunkBytes {
+		t.Errorf("max_wire_chunk_bytes = %d, want %d", got, config.DefaultTerminalWireChunkBytes)
+	}
+	if got := cfg.Terminal.MaxInflightBrowserBytes; got != config.DefaultTerminalInflightBrowserBytes {
+		t.Errorf("max_inflight_browser_bytes = %d, want %d", got, config.DefaultTerminalInflightBrowserBytes)
+	}
+	if got := cfg.Terminal.WriterLeaseSeconds; got != config.DefaultTerminalWriterLeaseSeconds {
+		t.Errorf("writer_lease_seconds = %d, want %d", got, config.DefaultTerminalWriterLeaseSeconds)
+	}
+}
+
+func TestTerminalExplicitValuesSurvive(t *testing.T) {
+	cfg, err := load(t, minimalConfig+`terminal:
+  max_replay_bytes_per_session: 65536
+  max_wire_chunk_bytes: 16384
+  max_inflight_browser_bytes: 524288
+  writer_lease_seconds: 5
+`)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Terminal.MaxReplayBytesPerSession != 65536 || cfg.Terminal.MaxWireChunkBytes != 16384 ||
+		cfg.Terminal.MaxInflightBrowserBytes != 524288 || cfg.Terminal.WriterLeaseSeconds != 5 {
+		t.Errorf("terminal = %+v; explicit values were overwritten by defaults", cfg.Terminal)
+	}
+}
+
+// A bound out of range is a config error, not a clamp: silently correcting it
+// would leave the operator believing a number the host is not using.
+func TestTerminalOutOfRangeValuesAreRefused(t *testing.T) {
+	cases := []struct {
+		name  string
+		yaml  string
+		wants []string
+	}{
+		{
+			name:  "negative replay",
+			yaml:  "terminal:\n  max_replay_bytes_per_session: -1\n",
+			wants: []string{"terminal.max_replay_bytes_per_session", "-1"},
+		},
+		{
+			name:  "replay over the ceiling",
+			yaml:  "terminal:\n  max_replay_bytes_per_session: 68000000\n",
+			wants: []string{"terminal.max_replay_bytes_per_session", "67108864"},
+		},
+		{
+			name:  "wire chunk under the floor",
+			yaml:  "terminal:\n  max_wire_chunk_bytes: 512\n",
+			wants: []string{"terminal.max_wire_chunk_bytes", "4096"},
+		},
+		{
+			name:  "wire chunk over the ceiling",
+			yaml:  "terminal:\n  max_wire_chunk_bytes: 8388608\n",
+			wants: []string{"terminal.max_wire_chunk_bytes", "4194304"},
+		},
+		{
+			name:  "negative in-flight",
+			yaml:  "terminal:\n  max_inflight_browser_bytes: -5\n",
+			wants: []string{"terminal.max_inflight_browser_bytes"},
+		},
+		{
+			name:  "negative writer lease",
+			yaml:  "terminal:\n  writer_lease_seconds: -1\n",
+			wants: []string{"terminal.writer_lease_seconds"},
+		},
+		{
+			name:  "writer lease over the ceiling",
+			yaml:  "terminal:\n  writer_lease_seconds: 4000\n",
+			wants: []string{"terminal.writer_lease_seconds", "3600"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := load(t, minimalConfig+tc.yaml)
+			if err == nil {
+				t.Fatal("an out-of-range terminal bound loaded without complaint")
+			}
+			for _, want := range tc.wants {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not name %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+// The in-flight browser bound has to hold at least one wire chunk, or the relay
+// can never send anything and the terminal hangs with no error anywhere.
+func TestTerminalInflightMustHoldAWireChunk(t *testing.T) {
+	_, err := load(t, minimalConfig+`terminal:
+  max_wire_chunk_bytes: 1048576
+  max_inflight_browser_bytes: 65536
+`)
+	if err == nil {
+		t.Fatal("an in-flight bound smaller than one wire chunk loaded; the stream would stall silently")
+	}
+	for _, want := range []string{"terminal.max_inflight_browser_bytes", "terminal.max_wire_chunk_bytes"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err, want)
+		}
+	}
+}

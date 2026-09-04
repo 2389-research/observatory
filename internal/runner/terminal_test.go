@@ -21,7 +21,7 @@ func startRelay(t *testing.T, maxChunk int) (guestEnd, callerEnd net.Conn, r *Re
 	t.Helper()
 	relayGuest, guestEnd := net.Pipe()
 	relayCaller, callerEnd := net.Pipe()
-	r = newRelay(relayGuest, maxChunk)
+	r = NewRelay(relayGuest, maxChunk)
 
 	done := make(chan struct{})
 	go func() {

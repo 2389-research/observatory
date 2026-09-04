@@ -193,6 +193,28 @@ type Observation struct {
 	SourceDeduplication       string `yaml:"source_deduplication"`
 }
 
+// §8.3's terminal bounds. Every one of them is declared 0 in the shipped
+// configs, and 0 means "use the documented default": an operator who never
+// tuned terminals must still get real buffers, not zero-sized ones.
+const (
+	DefaultTerminalReplayBytes          int64 = 256 << 10
+	DefaultTerminalWireChunkBytes       int64 = 32 << 10
+	DefaultTerminalInflightBrowserBytes int64 = 1 << 20
+	DefaultTerminalWriterLeaseSeconds   int   = 30
+
+	// The ranges a tuned value has to stay inside. A replay ring is per
+	// session and lives in guest RAM; a wire chunk has to fit a vsock frame
+	// with room for its header; a writer lease longer than an hour is a shell
+	// nobody can take back.
+	minTerminalReplayBytes          int64 = 4 << 10
+	maxTerminalReplayBytes          int64 = 64 << 20
+	minTerminalWireChunkBytes       int64 = 4 << 10
+	maxTerminalWireChunkBytes       int64 = 4 << 20
+	minTerminalInflightBrowserBytes int64 = 64 << 10
+	maxTerminalInflightBrowserBytes int64 = 256 << 20
+	maxTerminalWriterLeaseSeconds   int   = 3600
+)
+
 type Terminal struct {
 	MaxReplayBytesPerSession int64 `yaml:"max_replay_bytes_per_session"`
 	MaxWireChunkBytes        int64 `yaml:"max_wire_chunk_bytes"`
@@ -283,10 +305,60 @@ func Load(path string) (*Config, error) {
 	if cfg.Auth.SessionTTLMinutes == 0 {
 		cfg.Auth.SessionTTLMinutes = 720
 	}
+	cfg.Terminal.applyDefaults()
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return &cfg, nil
+}
+
+// applyDefaults resolves the zeroes §8.3 defines as "use the documented
+// default". It runs before Validate, so a value that is still out of range
+// after this was written that way on purpose.
+func (t *Terminal) applyDefaults() {
+	if t.MaxReplayBytesPerSession == 0 {
+		t.MaxReplayBytesPerSession = DefaultTerminalReplayBytes
+	}
+	if t.MaxWireChunkBytes == 0 {
+		t.MaxWireChunkBytes = DefaultTerminalWireChunkBytes
+	}
+	if t.MaxInflightBrowserBytes == 0 {
+		t.MaxInflightBrowserBytes = DefaultTerminalInflightBrowserBytes
+	}
+	if t.WriterLeaseSeconds == 0 {
+		t.WriterLeaseSeconds = DefaultTerminalWriterLeaseSeconds
+	}
+}
+
+// validateTerminal names the field and its range for every bound out of range.
+// It clamps nothing: a silently corrected bound leaves the operator believing a
+// number the host is not using.
+func (t Terminal) validate(add func(string, ...any)) {
+	inRange := func(name string, got, lo, hi int64) {
+		if got != 0 && (got < lo || got > hi) {
+			add("terminal.%s is %d; it must be between %d and %d, or 0 for the default", name, got, lo, hi)
+		}
+	}
+	inRange("max_replay_bytes_per_session", t.MaxReplayBytesPerSession,
+		minTerminalReplayBytes, maxTerminalReplayBytes)
+	inRange("max_wire_chunk_bytes", t.MaxWireChunkBytes,
+		minTerminalWireChunkBytes, maxTerminalWireChunkBytes)
+	inRange("max_inflight_browser_bytes", t.MaxInflightBrowserBytes,
+		minTerminalInflightBrowserBytes, maxTerminalInflightBrowserBytes)
+	if t.WriterLeaseSeconds != 0 && (t.WriterLeaseSeconds < 0 || t.WriterLeaseSeconds > maxTerminalWriterLeaseSeconds) {
+		add("terminal.writer_lease_seconds is %d; it must be between 1 and %d, or 0 for the default",
+			t.WriterLeaseSeconds, maxTerminalWriterLeaseSeconds)
+	}
+
+	// The host stops reading from the runner at the in-flight bound. If that
+	// bound cannot hold one wire chunk, the relay never sends its first chunk
+	// and the terminal hangs with no error anywhere to explain it.
+	resolved := t
+	resolved.applyDefaults()
+	if resolved.MaxInflightBrowserBytes < resolved.MaxWireChunkBytes {
+		add("terminal.max_inflight_browser_bytes (%d) is smaller than terminal.max_wire_chunk_bytes (%d); the stream would stall before its first chunk",
+			resolved.MaxInflightBrowserBytes, resolved.MaxWireChunkBytes)
+	}
 }
 
 // AuthEnabled reports whether caller authentication is required.
@@ -377,6 +449,8 @@ func (c *Config) Validate() error {
 	if c.Storage.LogicalWriters != 1 {
 		add("storage.logical_writers must be 1: the store has exactly one logical writer, got %d", c.Storage.LogicalWriters)
 	}
+
+	c.Terminal.validate(add)
 
 	if len(problems) > 0 {
 		return errors.New("config invalid: " + strings.Join(problems, "; "))

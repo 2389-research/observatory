@@ -203,7 +203,7 @@ func (r *runner) terminalAttach(ctx context.Context, req TerminalCtlRequest) (*R
 		conn.Close()
 		return nil, TerminalCtlReply{}, err
 	}
-	return newRelay(conn, DefaultMaxWireChunkBytes), TerminalCtlReply{
+	return NewRelay(conn, DefaultMaxWireChunkBytes), TerminalCtlReply{
 		SessionID:    req.SessionID,
 		ResumeOffset: ack.ResumeOffset,
 		Gap:          ack.Gap,
@@ -345,7 +345,10 @@ type Relay struct {
 	err   error
 }
 
-func newRelay(guest net.Conn, maxChunkBytes int) *Relay {
+// NewRelay builds a relay over one guest session stream. It is exported
+// because CtlHandlers.TerminalAttach returns a *Relay: without a constructor,
+// nothing outside this package could satisfy that handler at all.
+func NewRelay(guest net.Conn, maxChunkBytes int) *Relay {
 	if maxChunkBytes <= 0 {
 		maxChunkBytes = DefaultMaxWireChunkBytes
 	}

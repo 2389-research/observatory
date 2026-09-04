@@ -3,6 +3,9 @@
 package events_test
 
 import (
+	"bytes"
+	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -161,5 +164,65 @@ func TestAuthKindsRegistered(t *testing.T) {
 				t.Error("semantics must not be empty")
 			}
 		})
+	}
+}
+
+func TestTerminalKindsRegistered(t *testing.T) {
+	// §8.4 / D4: the terminal family records lifecycle and counts. PTY bytes
+	// are never an event payload, so no caveat here promises them.
+	for _, k := range []string{
+		"terminal.session_opened", "terminal.session_closed", "terminal.output_dropped",
+	} {
+		t.Run(k, func(t *testing.T) {
+			def, ok := events.LookupKind(k)
+			if !ok {
+				t.Fatalf("%s not registered; ingress will reject it", k)
+			}
+			if def.Family != "terminal" {
+				t.Errorf("family = %q, want \"terminal\"", def.Family)
+			}
+			if def.SchemaVersion != 1 {
+				t.Errorf("schema_version = %d, want 1", def.SchemaVersion)
+			}
+			if def.Provenance != events.HostObserved {
+				t.Errorf("provenance = %q, want %q", def.Provenance, events.HostObserved)
+			}
+			if def.Semantics == "" {
+				t.Error("semantics must not be empty")
+			}
+		})
+	}
+}
+
+// The counts a terminal session accumulates outrun a JS safe integer on a busy
+// shell, so every one of them crosses the wire as a decimal string (P-06).
+func TestTerminalCountersAreDecimalStrings(t *testing.T) {
+	closed := map[string]any{
+		"session_id":    "sess-1",
+		"vm_id":         "vm-1",
+		"reason":        "exited",
+		"output_bytes":  "9007199254740993",
+		"input_bytes":   "12",
+		"dropped_bytes": "0",
+	}
+	raw, err := json.Marshal(closed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"output_bytes", "input_bytes", "dropped_bytes"} {
+		if !bytes.HasPrefix(back[f], []byte(`"`)) {
+			t.Errorf("%s encoded as %s; counters that pass 2^53 must be decimal strings", f, back[f])
+		}
+	}
+	var n uint64
+	if err := json.Unmarshal([]byte(`9007199254740993`), &n); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := strconv.ParseUint(strings.Trim(string(back["output_bytes"]), `"`), 10, 64); err != nil || got != n {
+		t.Errorf("output_bytes round-tripped to %d (err %v), want %d", got, err, n)
 	}
 }
