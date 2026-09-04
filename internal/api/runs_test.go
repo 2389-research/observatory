@@ -56,7 +56,7 @@ func newRunServer(t *testing.T) (string, *store.Store, *runtimetest.Fake) {
 		t.Fatalf("create manager: %v", err)
 	}
 	t.Cleanup(func() { mgr.Close() })
-	srv := httptest.NewServer(api.New(st, eng, mgr, api.AuthConfig{Enabled: false}, nil))
+	srv := httptest.NewServer(api.New(st, eng, mgr, api.AuthConfig{Enabled: false}, nil, nil))
 	t.Cleanup(srv.Close)
 	return srv.URL, st, fake
 }
@@ -901,7 +901,7 @@ func newRunServerWithReportGen(t *testing.T) (string, *store.Store, *runtimetest
 		t.Fatalf("create manager: %v", err)
 	}
 	t.Cleanup(func() { mgr.Close() })
-	srv := httptest.NewServer(api.New(st, eng, mgr, api.AuthConfig{Enabled: false}, nil))
+	srv := httptest.NewServer(api.New(st, eng, mgr, api.AuthConfig{Enabled: false}, nil, nil))
 	t.Cleanup(srv.Close)
 	return srv.URL, st, fake, generated
 }

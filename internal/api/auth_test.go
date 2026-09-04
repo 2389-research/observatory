@@ -77,7 +77,7 @@ func newAuthServer(t *testing.T) (*httptest.Server, *store.Store, *auth.Store) {
 		LoginDelay:     time.Millisecond,
 	}
 
-	srv := httptest.NewServer(api.New(st, eng, mgr, ac, nil))
+	srv := httptest.NewServer(api.New(st, eng, mgr, ac, nil, nil))
 	t.Cleanup(srv.Close)
 	return srv, st, credStore
 }
@@ -478,7 +478,7 @@ func TestAuthDisabledInjectsLocalOperator(t *testing.T) {
 	}
 	t.Cleanup(func() { mgr.Close() })
 
-	srv := httptest.NewServer(api.New(st, eng, mgr, api.AuthConfig{Enabled: false}, nil))
+	srv := httptest.NewServer(api.New(st, eng, mgr, api.AuthConfig{Enabled: false}, nil, nil))
 	t.Cleanup(srv.Close)
 
 	// GET /vms without credentials → 200 (dev identity injected).
@@ -898,7 +898,7 @@ func TestTokenEndpointsDisabled(t *testing.T) {
 	}
 	t.Cleanup(func() { mgr.Close() })
 
-	srv := httptest.NewServer(api.New(st, eng, mgr, api.AuthConfig{Enabled: false}, nil))
+	srv := httptest.NewServer(api.New(st, eng, mgr, api.AuthConfig{Enabled: false}, nil, nil))
 	t.Cleanup(srv.Close)
 
 	probes := []struct {

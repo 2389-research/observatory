@@ -51,7 +51,7 @@ func newServer(t *testing.T) (*httptest.Server, *store.Store) {
 		t.Fatalf("create manager: %v", err)
 	}
 	t.Cleanup(func() { mgr.Close() })
-	srv := httptest.NewServer(api.New(st, eng, mgr, api.AuthConfig{Enabled: false}, nil))
+	srv := httptest.NewServer(api.New(st, eng, mgr, api.AuthConfig{Enabled: false}, nil, nil))
 	t.Cleanup(srv.Close)
 	return srv, st
 }

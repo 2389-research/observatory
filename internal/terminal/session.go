@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -58,14 +59,13 @@ var ErrReadOnly = errors.New("this attachment is read-only: another connection h
 
 // Spec is what the host asks the guest to start.
 type Spec struct {
-	Owner  string
-	BootID string
-	User   string
-	Cwd    string
-	Argv   []string
-	Term   string
-	Rows   uint16
-	Cols   uint16
+	Owner string
+	User  string
+	Cwd   string
+	Argv  []string
+	Term  string
+	Rows  uint16
+	Cols  uint16
 }
 
 // Session is the host's record of one terminal. It is a snapshot: the registry
@@ -81,6 +81,16 @@ type Session struct {
 	Cols      uint16
 	Argv      []string
 	PID       int
+
+	// OutputBytes and InputBytes are what this session has carried, counted at
+	// the attachment. They exceed 2^53 on a busy shell, so every wire rendering
+	// of them is a decimal string.
+	OutputBytes uint64
+	InputBytes  uint64
+
+	// WriterHolder is the connection that may type right now, empty when the
+	// lease is free. §8.2 requires read-only viewers to be told who holds it.
+	WriterHolder string
 
 	ClosedAt time.Time
 	Reason   string
@@ -131,6 +141,21 @@ type sessionState struct {
 	// live is every attachment currently holding a runner connection for this
 	// session, so closing the session closes them too.
 	live map[*Attachment]struct{}
+
+	// Byte counts are atomics rather than fields under the registry lock: every
+	// Read and Write on every attachment touches them, and a session's traffic
+	// must not serialize against the registry's map.
+	outputBytes atomic.Uint64
+	inputBytes  atomic.Uint64
+}
+
+// snapshot copies a session's record with its live byte counts folded in.
+func (st *sessionState) snapshot() Session {
+	s := st.session
+	s.OutputBytes = st.outputBytes.Load()
+	s.InputBytes = st.inputBytes.Load()
+	s.WriterHolder = st.lease.Holder()
+	return s
 }
 
 // NewRegistry builds a registry over the given runner dialer.
@@ -178,7 +203,6 @@ func (r *Registry) Create(ctx context.Context, vmID string, spec Spec) (Session,
 	s := Session{
 		ID:        id,
 		VMID:      vmID,
-		BootID:    spec.BootID,
 		Owner:     spec.Owner,
 		CreatedAt: r.opts.Now().UTC(),
 		State:     StateOpen,
@@ -186,8 +210,11 @@ func (r *Registry) Create(ctx context.Context, vmID string, spec Spec) (Session,
 		Cols:      spec.Cols,
 		Argv:      append([]string(nil), spec.Argv...),
 	}
+	// The boot identity comes from the runner, not from the caller: the runner
+	// is the process supervising this boot, and a host record can be stale.
 	if reply.Terminal != nil {
 		s.PID = reply.Terminal.PID
+		s.BootID = reply.Terminal.BootID
 	}
 
 	r.mu.Lock()
@@ -210,7 +237,7 @@ func (r *Registry) Get(id string) (Session, bool) {
 	if !ok {
 		return Session{}, false
 	}
-	return st.session, true
+	return st.snapshot(), true
 }
 
 // ListForVM returns that VM's sessions oldest first, so a cursor over the list
@@ -227,7 +254,7 @@ func (r *Registry) ListForVM(vmID string) []Session {
 	sort.Slice(states, func(i, j int) bool { return states[i].seq < states[j].seq })
 	out := make([]Session, 0, len(states))
 	for _, st := range states {
-		out = append(out, st.session)
+		out = append(out, st.snapshot())
 	}
 	return out
 }

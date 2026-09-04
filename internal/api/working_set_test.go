@@ -357,7 +357,7 @@ func TestSituationResponseByteBound(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { mgr.Close() })
-	srv := httptest.NewServer(api.New(st, eng, mgr, api.AuthConfig{Enabled: false}, nil))
+	srv := httptest.NewServer(api.New(st, eng, mgr, api.AuthConfig{Enabled: false}, nil, nil))
 	t.Cleanup(srv.Close)
 
 	// Distinct VMs so items do not collapse; the head alone would exceed the

@@ -74,6 +74,10 @@ type TerminalCtlReply struct {
 	SessionID string `json:"session_id,omitempty"`
 	PID       int    `json:"pid,omitempty"`
 	StartedAt string `json:"started_at,omitempty"`
+	// BootID is the boot this runner supervises. The host binds a session to
+	// it, so it comes from the process actually running the VM rather than from
+	// a host record that a reboot could have made stale.
+	BootID string `json:"boot_id,omitempty"`
 
 	Sessions []proto.TerminalSession `json:"sessions,omitempty"`
 
@@ -141,7 +145,12 @@ func (r *runner) terminalCreate(ctx context.Context, req TerminalCtlRequest) (Te
 	if err := json.Unmarshal(env.Data, &got); err != nil {
 		return TerminalCtlReply{}, fmt.Errorf("unmarshal terminal.created: %w", err)
 	}
-	return TerminalCtlReply{SessionID: got.SessionID, PID: got.PID, StartedAt: got.StartedAt}, nil
+	return TerminalCtlReply{
+		SessionID: got.SessionID,
+		PID:       got.PID,
+		StartedAt: got.StartedAt,
+		BootID:    r.cfg.BootID,
+	}, nil
 }
 
 func (r *runner) terminalClose(ctx context.Context, req TerminalCtlRequest) (TerminalCtlReply, error) {

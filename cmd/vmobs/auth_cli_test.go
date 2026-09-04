@@ -66,7 +66,7 @@ func newAuthServer(t *testing.T) (*httptest.Server, *auth.Store) {
 		LoginDelay:     time.Millisecond,
 	}
 
-	srv := httptest.NewServer(api.New(st, eng, mgr, ac, nil))
+	srv := httptest.NewServer(api.New(st, eng, mgr, ac, nil, nil))
 	t.Cleanup(srv.Close)
 
 	return srv, credStore

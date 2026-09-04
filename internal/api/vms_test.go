@@ -25,6 +25,7 @@ import (
 	"github.com/2389-research/observatory-v2/internal/runtime/runtimetest"
 	"github.com/2389-research/observatory-v2/internal/situation"
 	"github.com/2389-research/observatory-v2/internal/store"
+	"github.com/2389-research/observatory-v2/internal/terminal"
 )
 
 var testTemplateDef = runtime.Template{
@@ -77,7 +78,7 @@ func newTemplateServer(t *testing.T) (*httptest.Server, *store.Store, *runtimete
 // admission settings, for tests about what those settings change.
 func newTemplateServerAdmission(t *testing.T, adm config.Admission) (*httptest.Server, *store.Store, *runtimetest.Fake) {
 	t.Helper()
-	return newTemplateServerFull(t, nil, adm)
+	return newTemplateServerFull(t, nil, adm, nil)
 }
 
 // newTemplateServerWrapped is newTemplateServer with a middleware hook. wrap is
@@ -86,13 +87,14 @@ func newTemplateServerAdmission(t *testing.T, adm config.Admission) (*httptest.S
 // the hook instead of guessing at timing.
 func newTemplateServerWrapped(t *testing.T, wrap func(http.Handler) http.Handler) (*httptest.Server, *store.Store, *runtimetest.Fake) {
 	t.Helper()
-	return newTemplateServerFull(t, wrap, testAdmission())
+	return newTemplateServerFull(t, wrap, testAdmission(), nil)
 }
 
 func newTemplateServerFull(
 	t *testing.T,
 	wrap func(http.Handler) http.Handler,
 	adm config.Admission,
+	tr *terminal.Registry,
 ) (*httptest.Server, *store.Store, *runtimetest.Fake) {
 	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "events.sqlite"))
@@ -119,7 +121,7 @@ func newTemplateServerFull(
 		t.Fatalf("create manager: %v", err)
 	}
 	t.Cleanup(func() { mgr.Close() })
-	h := api.New(st, eng, mgr, api.AuthConfig{Enabled: false}, nil)
+	h := api.New(st, eng, mgr, api.AuthConfig{Enabled: false}, nil, tr)
 	if wrap != nil {
 		h = wrap(h)
 	}
@@ -274,7 +276,7 @@ func newPreflightServer(t *testing.T, pfRunner *preflight.Runner) (*httptest.Ser
 	pf := api.PreflightFunc(func(_ context.Context, _ bool) preflight.Report {
 		return pfRunner.Run(t.Context())
 	})
-	srv := httptest.NewServer(api.New(st, eng, mgr, api.AuthConfig{Enabled: false}, pf))
+	srv := httptest.NewServer(api.New(st, eng, mgr, api.AuthConfig{Enabled: false}, pf, nil))
 	t.Cleanup(srv.Close)
 	return srv, st, fake
 }
@@ -576,7 +578,7 @@ func TestCreateVMAdmissionRefusal(t *testing.T) {
 		t.Fatalf("create manager: %v", err)
 	}
 	t.Cleanup(func() { mgr.Close() })
-	srv := httptest.NewServer(api.New(st, eng, mgr, api.AuthConfig{Enabled: false}, nil))
+	srv := httptest.NewServer(api.New(st, eng, mgr, api.AuthConfig{Enabled: false}, nil, nil))
 	t.Cleanup(srv.Close)
 
 	body := map[string]any{"name": "fill-vm", "template_id": testTemplateDef.TemplateID}

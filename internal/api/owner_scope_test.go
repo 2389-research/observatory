@@ -84,7 +84,7 @@ func newScopeServer(t *testing.T) (srvURL string, st *store.Store, secret string
 		LoginDelay:     time.Millisecond,
 	}
 
-	srv := httptest.NewServer(api.New(st, eng, mgr, ac, nil))
+	srv := httptest.NewServer(api.New(st, eng, mgr, ac, nil, nil))
 	t.Cleanup(srv.Close)
 	srvURL = srv.URL
 

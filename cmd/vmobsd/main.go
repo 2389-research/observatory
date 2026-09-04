@@ -31,6 +31,7 @@ import (
 	"github.com/2389-research/observatory-v2/internal/situation"
 	"github.com/2389-research/observatory-v2/internal/spool"
 	"github.com/2389-research/observatory-v2/internal/store"
+	"github.com/2389-research/observatory-v2/internal/terminal"
 )
 
 func main() {
@@ -401,8 +402,19 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready f
 		}
 	}
 
+	// The registry dials each VM's runner control socket under the state dir.
+	// It is wired in every mode: on a host that cannot launch VMs there is no
+	// socket to dial, and a terminal request fails saying exactly that, which
+	// beats a 501 that blames the build.
+	termReg := terminal.NewRegistry(terminal.Options{
+		MaxReplayBytesPerSession: cfg.Terminal.MaxReplayBytesPerSession,
+		MaxInflightBrowserBytes:  cfg.Terminal.MaxInflightBrowserBytes,
+		WriterLease:              time.Duration(cfg.Terminal.WriterLeaseSeconds) * time.Second,
+		Dial:                     terminal.UnixDialer(cfg.Paths.State),
+	})
+
 	srv := &http.Server{
-		Handler:           api.New(st, eng, mgr, ac, pfFunc),
+		Handler:           api.New(st, eng, mgr, ac, pfFunc, termReg),
 		ReadHeaderTimeout: 5 * time.Second,
 		TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS12},
 	}

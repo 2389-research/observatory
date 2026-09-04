@@ -51,7 +51,7 @@ func newDoctorServer(t *testing.T, pfRunner *preflight.Runner) *httptest.Server 
 	pf := api.PreflightFunc(func(_ context.Context, _ bool) preflight.Report {
 		return pfRunner.Run(t.Context())
 	})
-	srv := httptest.NewServer(api.New(st, eng, mgr, api.AuthConfig{Enabled: false}, pf))
+	srv := httptest.NewServer(api.New(st, eng, mgr, api.AuthConfig{Enabled: false}, pf, nil))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -82,7 +82,7 @@ func newDoctorServerNoPF(t *testing.T) *httptest.Server {
 		t.Fatalf("create manager: %v", err)
 	}
 	t.Cleanup(func() { mgr.Close() })
-	srv := httptest.NewServer(api.New(st, eng, mgr, api.AuthConfig{Enabled: false}, nil))
+	srv := httptest.NewServer(api.New(st, eng, mgr, api.AuthConfig{Enabled: false}, nil, nil))
 	t.Cleanup(srv.Close)
 	return srv
 }

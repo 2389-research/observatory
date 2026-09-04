@@ -6,12 +6,16 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sync/atomic"
+
+	"github.com/google/uuid"
 
 	"github.com/2389-research/observatory-v2/internal/events"
 	"github.com/2389-research/observatory-v2/internal/preflight"
 	"github.com/2389-research/observatory-v2/internal/runtime"
 	"github.com/2389-research/observatory-v2/internal/situation"
 	"github.com/2389-research/observatory-v2/internal/store"
+	"github.com/2389-research/observatory-v2/internal/terminal"
 )
 
 // PreflightFunc is the preflight runner hook type. nil means no preflight
@@ -36,6 +40,14 @@ type Server struct {
 	features  map[string]bool
 	auth      authState
 	preflight PreflightFunc // nil = no preflight block in /host/status
+
+	// terminals is nil when this build serves no terminal registry; the four
+	// terminal routes then answer 501 missing_capability, as they did before
+	// one existed. termInstID and termSeq place terminal events on their own
+	// source stream, the way auth events have theirs.
+	terminals  *terminal.Registry
+	termInstID string
+	termSeq    atomic.Int64
 }
 
 type route struct {
@@ -45,13 +57,26 @@ type route struct {
 	handler http.HandlerFunc // nil marks a specced-but-unbuilt route
 }
 
-// New wires the API over st, eng, mgr, the authentication config ac, and an
-// optional preflight hook pf. When pf is nil, /host/status omits the preflight
-// block — honest for tests and configs that don't wire it. Every endpoint in
-// SPEC §14 is present in the table: built ones serve, unbuilt ones answer 501
-// missing_capability so an agent probing the spec surface is taught, not stonewalled.
-func New(st *store.Store, eng *situation.Engine, mgr *runtime.Manager, ac AuthConfig, pf PreflightFunc) http.Handler {
-	s := &Server{store: st, engine: eng, manager: mgr, mux: http.NewServeMux(), auth: initAuthState(ac), preflight: pf}
+// New wires the API over st, eng, mgr, the authentication config ac, an
+// optional preflight hook pf, and an optional terminal registry tr. When pf is
+// nil, /host/status omits the preflight block; when tr is nil, the terminal
+// routes answer 501 — honest for tests and configs that don't wire them. Every
+// endpoint in SPEC §14 is present in the table: built ones serve, unbuilt ones
+// answer 501 missing_capability so an agent probing the spec surface is taught,
+// not stonewalled.
+func New(
+	st *store.Store,
+	eng *situation.Engine,
+	mgr *runtime.Manager,
+	ac AuthConfig,
+	pf PreflightFunc,
+	tr *terminal.Registry,
+) http.Handler {
+	s := &Server{
+		store: st, engine: eng, manager: mgr, mux: http.NewServeMux(),
+		auth: initAuthState(ac), preflight: pf,
+		terminals: tr, termInstID: uuid.NewString(),
+	}
 	table := []route{
 		{"GET", "/meta", "meta", s.handleMeta},
 		{"GET", "/meta/event-kinds", "meta", s.handleEventKinds},
@@ -73,10 +98,7 @@ func New(st *store.Store, eng *situation.Engine, mgr *runtime.Manager, ac AuthCo
 		{"POST", "/vm-batches", "vm_batches", s.handleCreateBatch},
 		{"GET", "/vm-batches/{id}", "vm_batches", s.handleGetBatch},
 		{"", "/events/stream", "events_stream", nil},
-		{"", "/vms/{id}/terminals", "terminals", nil},
-		{"", "/terminals/{id}", "terminals", nil},
 		{"", "/terminals/{id}/stream", "terminals", nil},
-		{"", "/terminals/{id}/lease", "terminals", nil},
 		{"", "/vms/{id}/execs", "execs", nil},
 		{"", "/execs/{id}", "execs", nil},
 		{"", "/execs/{id}/cancel", "execs", nil},
@@ -99,6 +121,8 @@ func New(st *store.Store, eng *situation.Engine, mgr *runtime.Manager, ac AuthCo
 		{"DELETE", "/auth/tokens/{id}", "auth", s.handleTokenRevoke},
 	}
 
+	table = append(table, s.terminalRoutes()...)
+
 	s.features = map[string]bool{}
 	allowed := map[string][]string{}
 	for _, r := range table {
@@ -117,6 +141,25 @@ func New(st *store.Store, eng *situation.Engine, mgr *runtime.Manager, ac AuthCo
 	mountUI(s.mux)
 	s.mux.Handle("/", http.HandlerFunc(notFound))
 	return s.withAuth(s.mux)
+}
+
+// terminalRoutes is one row per terminal pattern, built or stubbed as a unit.
+// A pattern registered twice panics the mux, so the two shapes are alternatives
+// rather than a table that adds rows when the registry is present.
+func (s *Server) terminalRoutes() []route {
+	if s.terminals == nil {
+		return []route{
+			{"", "/vms/{id}/terminals", "terminals", nil},
+			{"", "/terminals/{id}", "terminals", nil},
+			{"", "/terminals/{id}/lease", "terminals", nil},
+		}
+	}
+	return []route{
+		{"POST", "/vms/{id}/terminals", "terminals", s.handleCreateTerminal},
+		{"GET", "/vms/{id}/terminals", "terminals", s.handleListTerminals},
+		{"DELETE", "/terminals/{id}", "terminals", s.handleCloseTerminal},
+		{"POST", "/terminals/{id}/lease", "terminals", s.handleTerminalLease},
+	}
 }
 
 func stub(feature string) http.HandlerFunc {

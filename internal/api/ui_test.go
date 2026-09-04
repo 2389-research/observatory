@@ -175,7 +175,7 @@ func TestUIIsReachableBeforeLogin(t *testing.T) {
 		Sessions:       auth.NewSessions(time.Hour),
 		CookieSameSite: http.SameSiteStrictMode,
 		LoginDelay:     time.Millisecond,
-	}, nil))
+	}, nil, nil))
 	t.Cleanup(srv.Close)
 
 	jar, err := cookiejar.New(nil)

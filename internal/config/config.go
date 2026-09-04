@@ -202,6 +202,12 @@ const (
 	DefaultTerminalInflightBrowserBytes int64 = 1 << 20
 	DefaultTerminalWriterLeaseSeconds   int   = 30
 
+	// DefaultMaxTerminalSessions is how many terminals one VM serves at once
+	// when vm_defaults.max_terminal_sessions is absent. Each session is a guest
+	// PTY with its own replay ring, so the cap is a guest memory bound as much
+	// as a policy.
+	DefaultMaxTerminalSessions int = 4
+
 	// The ranges a tuned value has to stay inside. A replay ring is per
 	// session and lives in guest RAM; a wire chunk has to fit a vsock frame
 	// with room for its header; a writer lease longer than an hour is a shell
@@ -306,6 +312,9 @@ func Load(path string) (*Config, error) {
 		cfg.Auth.SessionTTLMinutes = 720
 	}
 	cfg.Terminal.applyDefaults()
+	if cfg.VMDefaults.MaxTerminalSessions == 0 {
+		cfg.VMDefaults.MaxTerminalSessions = DefaultMaxTerminalSessions
+	}
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}

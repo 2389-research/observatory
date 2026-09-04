@@ -31,7 +31,7 @@ func newAPIServer(t *testing.T, st *store.Store, mgr *runtime.Manager) *httptest
 	eng := situation.New(st, situation.Config{
 		Triggers: map[string]bool{},
 	})
-	srv := httptest.NewServer(api.New(st, eng, mgr, api.AuthConfig{Enabled: false}, nil))
+	srv := httptest.NewServer(api.New(st, eng, mgr, api.AuthConfig{Enabled: false}, nil, nil))
 	t.Cleanup(srv.Close)
 	return srv
 }

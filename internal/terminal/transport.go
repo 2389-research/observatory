@@ -50,6 +50,7 @@ type Attachment struct {
 	window   *Window
 	stream   io.ReadWriteCloser
 	registry *Registry
+	state    *sessionState
 	once     sync.Once
 }
 
@@ -94,6 +95,7 @@ func (r *Registry) Attach(ctx context.Context, req AttachRequest) (*Attachment, 
 		lease:     st.lease,
 		stream:    stream,
 		registry:  r,
+		state:     st,
 	}
 	if reply.Terminal != nil {
 		att.Gap = reply.Terminal.Gap
@@ -129,8 +131,12 @@ func (r *Registry) Attach(ctx context.Context, req AttachRequest) (*Attachment, 
 	return att, nil
 }
 
-// Read returns frames from the guest.
-func (a *Attachment) Read(p []byte) (int, error) { return a.stream.Read(p) }
+// Read returns frames from the guest, counting what the session has produced.
+func (a *Attachment) Read(p []byte) (int, error) {
+	n, err := a.stream.Read(p)
+	a.state.outputBytes.Add(uint64(n))
+	return n, err
+}
 
 // Write sends frames to the guest, and refuses when this attachment does not
 // hold the writer lease. The refusal is an error rather than a silent drop:
@@ -139,7 +145,9 @@ func (a *Attachment) Write(p []byte) (int, error) {
 	if !a.lease.IsWriter(a.connID) {
 		return 0, ErrReadOnly
 	}
-	return a.stream.Write(p)
+	n, err := a.stream.Write(p)
+	a.state.inputBytes.Add(uint64(n))
+	return n, err
 }
 
 // Close releases the writer lease — after its grace window, so a reload does

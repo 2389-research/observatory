@@ -34,6 +34,9 @@ type fakeGuest struct {
 
 	resumeOffset string
 	gap          bool
+	// bootID is the boot this fake runner claims to supervise. mustCreate sets
+	// it, because in the real system one runner serves exactly one boot.
+	bootID string
 
 	// guestSide is the far end of the most recent attach's pipe.
 	attached chan net.Conn
@@ -55,6 +58,7 @@ func newFakeGuest(t *testing.T) *fakeGuest {
 		sockPath:     filepath.Join(dir, "runner.sock"),
 		sessions:     map[string]bool{},
 		resumeOffset: "0",
+		bootID:       "boot-a",
 		attached:     make(chan net.Conn, 8),
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -64,7 +68,8 @@ func newFakeGuest(t *testing.T) *fakeGuest {
 		TerminalCreate: func(_ context.Context, req runner.TerminalCtlRequest) (runner.TerminalCtlReply, error) {
 			g.created = append(g.created, req)
 			g.sessions[req.SessionID] = true
-			return runner.TerminalCtlReply{SessionID: req.SessionID, PID: 4242, StartedAt: "2026-09-04T12:00:00.000000Z"}, nil
+			return runner.TerminalCtlReply{SessionID: req.SessionID, PID: 4242,
+				StartedAt: "2026-09-04T12:00:00.000000Z", BootID: g.bootID}, nil
 		},
 		TerminalClose: func(_ context.Context, req runner.TerminalCtlRequest) (runner.TerminalCtlReply, error) {
 			g.closed = append(g.closed, req.SessionID)
@@ -123,10 +128,11 @@ func newRegistry(t *testing.T, g *fakeGuest) *terminal.Registry {
 	})
 }
 
-func mustCreate(t *testing.T, r *terminal.Registry, vmID, bootID string) terminal.Session {
+func mustCreate(t *testing.T, g *fakeGuest, r *terminal.Registry, vmID, bootID string) terminal.Session {
 	t.Helper()
+	g.bootID = bootID
 	s, err := r.Create(context.Background(), vmID, terminal.Spec{
-		Owner: "operator", BootID: bootID, User: "root", Argv: []string{"/bin/sh"},
+		Owner: "operator", User: "root", Argv: []string{"/bin/sh"},
 		Term: "xterm-256color", Rows: 24, Cols: 80,
 	})
 	if err != nil {
@@ -139,7 +145,7 @@ func TestCreateBindsTheSessionToItsVMAndBoot(t *testing.T) {
 	g := newFakeGuest(t)
 	r := newRegistry(t, g)
 
-	s := mustCreate(t, r, "vm-1", "boot-a")
+	s := mustCreate(t, g, r, "vm-1", "boot-a")
 	if s.ID == "" {
 		t.Fatal("a session with no id cannot be attached to")
 	}
@@ -171,9 +177,9 @@ func TestListForVMShowsOnlyThatVM(t *testing.T) {
 	g := newFakeGuest(t)
 	r := newRegistry(t, g)
 
-	a := mustCreate(t, r, "vm-1", "boot-a")
-	b := mustCreate(t, r, "vm-1", "boot-a")
-	other := mustCreate(t, r, "vm-2", "boot-b")
+	a := mustCreate(t, g, r, "vm-1", "boot-a")
+	b := mustCreate(t, g, r, "vm-1", "boot-a")
+	other := mustCreate(t, g, r, "vm-2", "boot-b")
 
 	got := r.ListForVM("vm-1")
 	if len(got) != 2 {
@@ -196,7 +202,7 @@ func TestListForVMShowsOnlyThatVM(t *testing.T) {
 func TestCloseIsIdempotent(t *testing.T) {
 	g := newFakeGuest(t)
 	r := newRegistry(t, g)
-	s := mustCreate(t, r, "vm-1", "boot-a")
+	s := mustCreate(t, g, r, "vm-1", "boot-a")
 
 	if err := r.Close(context.Background(), s.ID); err != nil {
 		t.Fatalf("close: %v", err)
@@ -225,7 +231,7 @@ func TestCloseIsIdempotent(t *testing.T) {
 func TestAttachWithAStaleBootIDIsRefused(t *testing.T) {
 	g := newFakeGuest(t)
 	r := newRegistry(t, g)
-	s := mustCreate(t, r, "vm-1", "boot-a")
+	s := mustCreate(t, g, r, "vm-1", "boot-a")
 
 	_, err := r.Attach(context.Background(), terminal.AttachRequest{
 		SessionID: s.ID, BootID: "boot-b", ConnID: "conn-a",
@@ -261,7 +267,7 @@ func TestAttachToAnUnknownSessionIsRefused(t *testing.T) {
 func TestAttachToAClosedSessionIsRefused(t *testing.T) {
 	g := newFakeGuest(t)
 	r := newRegistry(t, g)
-	s := mustCreate(t, r, "vm-1", "boot-a")
+	s := mustCreate(t, g, r, "vm-1", "boot-a")
 	if err := r.Close(context.Background(), s.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -278,7 +284,7 @@ func TestAttachToAClosedSessionIsRefused(t *testing.T) {
 func TestTheFirstAttachWritesAndTheSecondWatches(t *testing.T) {
 	g := newFakeGuest(t)
 	r := newRegistry(t, g)
-	s := mustCreate(t, r, "vm-1", "boot-a")
+	s := mustCreate(t, g, r, "vm-1", "boot-a")
 
 	first, err := r.Attach(context.Background(), terminal.AttachRequest{
 		SessionID: s.ID, BootID: "boot-a", ConnID: "conn-a",
@@ -325,7 +331,7 @@ func TestTheFirstAttachWritesAndTheSecondWatches(t *testing.T) {
 func TestStealTakesTheShellFromTheOldWriter(t *testing.T) {
 	g := newFakeGuest(t)
 	r := newRegistry(t, g)
-	s := mustCreate(t, r, "vm-1", "boot-a")
+	s := mustCreate(t, g, r, "vm-1", "boot-a")
 
 	first, err := r.Attach(context.Background(), terminal.AttachRequest{
 		SessionID: s.ID, BootID: "boot-a", ConnID: "conn-a",
@@ -368,7 +374,7 @@ func TestAttachCarriesTheResumeOffsetAndGap(t *testing.T) {
 	g.resumeOffset = "9007199254740993"
 	g.gap = true
 	r := newRegistry(t, g)
-	s := mustCreate(t, r, "vm-1", "boot-a")
+	s := mustCreate(t, g, r, "vm-1", "boot-a")
 
 	att, err := r.Attach(context.Background(), terminal.AttachRequest{
 		SessionID: s.ID, BootID: "boot-a", ConnID: "conn-a", AfterOffset: 12,
@@ -390,7 +396,7 @@ func TestAttachCarriesTheResumeOffsetAndGap(t *testing.T) {
 func TestGuestOutputReachesTheAttachment(t *testing.T) {
 	g := newFakeGuest(t)
 	r := newRegistry(t, g)
-	s := mustCreate(t, r, "vm-1", "boot-a")
+	s := mustCreate(t, g, r, "vm-1", "boot-a")
 
 	att, err := r.Attach(context.Background(), terminal.AttachRequest{
 		SessionID: s.ID, BootID: "boot-a", ConnID: "conn-a",
@@ -456,7 +462,7 @@ func readPTYFrame(t *testing.T, guest net.Conn) string {
 func TestRequestLeaseRoundTrip(t *testing.T) {
 	g := newFakeGuest(t)
 	r := newRegistry(t, g)
-	s := mustCreate(t, r, "vm-1", "boot-a")
+	s := mustCreate(t, g, r, "vm-1", "boot-a")
 
 	got, err := r.RequestLease(s.ID, "conn-a", terminal.LeaseAcquire)
 	if err != nil {
@@ -508,7 +514,7 @@ func TestRequestLeaseRoundTrip(t *testing.T) {
 func TestClosingASessionClosesItsAttachments(t *testing.T) {
 	g := newFakeGuest(t)
 	r := newRegistry(t, g)
-	s := mustCreate(t, r, "vm-1", "boot-a")
+	s := mustCreate(t, g, r, "vm-1", "boot-a")
 
 	att, err := r.Attach(context.Background(), terminal.AttachRequest{
 		SessionID: s.ID, BootID: "boot-a", ConnID: "conn-a",
