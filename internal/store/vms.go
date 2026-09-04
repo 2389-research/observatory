@@ -130,8 +130,12 @@ type VM struct {
 	Labels           map[string]string
 	FailureStage     *string
 	FailureReason    *string
-	CreatedAt        string
-	UpdatedAt        string
+	// CurrentBootID names the boot this VM is on, empty before its first.
+	// A VMM observation that names a different boot describes a boot that is
+	// already over and says nothing about this one.
+	CurrentBootID string
+	CreatedAt     string
+	UpdatedAt     string
 	// LastEventID is the event cursor of the last change to this VM row.
 	// It is the source of truth for changed_vms in the situation delta (P-08).
 	LastEventID int64
@@ -515,14 +519,14 @@ func (s *Store) TransitionVM(ctx context.Context, in TransitionInput) (*VM, erro
 	err = tx.QueryRowContext(ctx,
 		`SELECT row_id, vm_id, name, owner, template_id, template_digest, desired_state, observed_state, revision,
 		        vcpu, memory_mib, root_disk_mib, workspace_disk_mib, network_profile, network_policy_id, labels,
-		        failure_stage, failure_reason, created_at, updated_at, last_event_id
+		        failure_stage, failure_reason, current_boot_id, created_at, updated_at, last_event_id
 		 FROM vms WHERE vm_id = ?`, in.VMID,
 	).Scan(&current.RowID, &current.VMID, &current.Name, &current.Owner,
 		&current.TemplateID, &current.TemplateDigest,
 		&current.DesiredState, &current.ObservedState, &current.Revision,
 		&current.VCPUCount, &current.MemoryMiB, &current.RootDiskMiB, &current.WorkspaceDiskMiB,
 		&current.NetworkProfile, &current.NetworkPolicyID, &labelsJSON,
-		&current.FailureStage, &current.FailureReason,
+		&current.FailureStage, &current.FailureReason, &current.CurrentBootID,
 		&current.CreatedAt, &current.UpdatedAt, &current.LastEventID)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
@@ -553,12 +557,19 @@ func (s *Store) TransitionVM(ctx context.Context, in TransitionInput) (*VM, erro
 		desired = *in.DesiredState
 	}
 
+	// A transition that establishes a boot moves the row onto it; every other
+	// transition is the same boot continuing, and leaves it where it is.
+	boot := current.CurrentBootID
+	if in.BootID != nil {
+		boot = *in.BootID
+	}
+
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE vms SET observed_state = ?, desired_state = ?, revision = ?,
-		               failure_stage = ?, failure_reason = ?,
+		               failure_stage = ?, failure_reason = ?, current_boot_id = ?,
 		               updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
 		 WHERE vm_id = ?`,
-		in.To, desired, newRevision, in.FailureStage, in.FailureReason, in.VMID); err != nil {
+		in.To, desired, newRevision, in.FailureStage, in.FailureReason, boot, in.VMID); err != nil {
 		return nil, fmt.Errorf("update vm state: %w", err)
 	}
 
@@ -867,7 +878,7 @@ const vmColumns = `SELECT row_id, vm_id, name, owner, template_id, template_dige
 	desired_state, observed_state, revision,
 	vcpu, memory_mib, root_disk_mib, workspace_disk_mib,
 	network_profile, network_policy_id, labels,
-	failure_stage, failure_reason, created_at, updated_at, last_event_id`
+	failure_stage, failure_reason, current_boot_id, created_at, updated_at, last_event_id`
 
 func scanVM(sc vmScanner) (*VM, error) {
 	var vm VM
@@ -878,7 +889,7 @@ func scanVM(sc vmScanner) (*VM, error) {
 		&vm.DesiredState, &vm.ObservedState, &vm.Revision,
 		&vm.VCPUCount, &vm.MemoryMiB, &vm.RootDiskMiB, &vm.WorkspaceDiskMiB,
 		&vm.NetworkProfile, &vm.NetworkPolicyID, &labelsJSON,
-		&vm.FailureStage, &vm.FailureReason,
+		&vm.FailureStage, &vm.FailureReason, &vm.CurrentBootID,
 		&vm.CreatedAt, &vm.UpdatedAt, &vm.LastEventID,
 	); err != nil {
 		return nil, err

@@ -714,6 +714,70 @@ func TestTransitionVMBootIDInEvent(t *testing.T) {
 	}
 }
 
+// TestTransitionVMRecordsCurrentBoot pins the boot identity on the VM row, not
+// only in the event stream. A late observation about a VM — a vmm_exited notice
+// that spent a poll interval in the spool — is only actionable if the reader can
+// tell which boot it describes, and the event stream cannot answer that in one
+// read of the row it is about to change.
+func TestTransitionVMRecordsCurrentBoot(t *testing.T) {
+	st := openStore(t)
+	vm, op := mustCreateVM(t, st, testUUID(1), "alpha", nil)
+	if vm.CurrentBootID != "" {
+		t.Errorf("a VM that never booted: current_boot_id = %q, want empty", vm.CurrentBootID)
+	}
+
+	first := testUUID(90)
+	started, err := st.TransitionVM(t.Context(), store.TransitionInput{
+		VMID: vm.VMID, To: "starting", Reason: "launch", OperationID: op.OperationID, BootID: &first,
+	})
+	if err != nil {
+		t.Fatalf("TransitionVM starting: %v", err)
+	}
+	if started.CurrentBootID != first {
+		t.Errorf("current_boot_id after launch = %q, want %q", started.CurrentBootID, first)
+	}
+
+	// A transition that establishes no boot leaves the recorded one alone:
+	// running is the same boot that started.
+	running, err := st.TransitionVM(t.Context(), store.TransitionInput{
+		VMID: vm.VMID, To: "running", Reason: "launch_complete", OperationID: op.OperationID,
+	})
+	if err != nil {
+		t.Fatalf("TransitionVM running: %v", err)
+	}
+	if running.CurrentBootID != first {
+		t.Errorf("current_boot_id after launch_complete = %q, want %q unchanged", running.CurrentBootID, first)
+	}
+
+	// A restart is a new boot, and the row says so from the transition onward.
+	for _, step := range []string{"stopping", "stopped"} {
+		if _, err := st.TransitionVM(t.Context(), store.TransitionInput{
+			VMID: vm.VMID, To: step, Reason: "stop", OperationID: op.OperationID,
+		}); err != nil {
+			t.Fatalf("TransitionVM %s: %v", step, err)
+		}
+	}
+	second := testUUID(91)
+	restarted, err := st.TransitionVM(t.Context(), store.TransitionInput{
+		VMID: vm.VMID, To: "starting", Reason: "start", OperationID: op.OperationID, BootID: &second,
+	})
+	if err != nil {
+		t.Fatalf("TransitionVM restart: %v", err)
+	}
+	if restarted.CurrentBootID != second {
+		t.Errorf("current_boot_id after restart = %q, want %q", restarted.CurrentBootID, second)
+	}
+
+	// And a plain read agrees with what the transition returned.
+	got, err := st.GetVM(t.Context(), vm.VMID)
+	if err != nil {
+		t.Fatalf("GetVM: %v", err)
+	}
+	if got.CurrentBootID != second {
+		t.Errorf("GetVM current_boot_id = %q, want %q", got.CurrentBootID, second)
+	}
+}
+
 func TestTransitionVMDeletedEmitsVMDeleted(t *testing.T) {
 	// Transitioning to "deleted" should emit a vm.deleted event (SPEC §5.4).
 	st := openStore(t)

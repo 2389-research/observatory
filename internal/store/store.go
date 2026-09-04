@@ -192,6 +192,11 @@ var migrations = []string{
 		operation_id INTEGER NOT NULL,
 		generated_at TEXT NOT NULL
 	);`,
+	// v7: the boot a VM is currently on. Observations about a VMM arrive after
+	// the fact — the spool importer delivers a vmm_exited a poll interval late —
+	// and the reader has to tell an exit of the boot running now from an exit of
+	// the boot before it. Empty until the VM's first boot.
+	`ALTER TABLE vms ADD COLUMN current_boot_id TEXT NOT NULL DEFAULT '';`,
 }
 
 // Store owns one SQLite database. All writes go through the writer pool, which

@@ -1253,13 +1253,28 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 // envelope for a VM. It transitions the VM to stopped (graceful) or failed
 // (not graceful) using the manager's existing transition helpers — one write path.
 //
+// bootID names the boot whose VMM was observed to exit; "" means the observer
+// identified no boot (Reconcile stats the runner that is live now, so its
+// findings are about whatever boot is current). An exit notice reaches the
+// manager late — the spool importer polls, so a boot can end and the next one
+// begin before its notice is delivered — and an exit of a boot that is over
+// says nothing about the boot running now.
+//
 // Already-terminal VMs (failed, stopped, deleted, …) are a no-op: importer
 // replays are normal and must not cause errors. VMs in "stopping" are a no-op
 // as well — that stop belongs to whoever started it. Unknown VMs return nil.
-func (m *Manager) NotifyVMMExit(ctx context.Context, vmID, reason string, graceful bool) error {
+func (m *Manager) NotifyVMMExit(ctx context.Context, vmID, bootID, reason string, graceful bool) error {
 	vm, err := m.st.GetVM(ctx, vmID)
 	if err != nil {
 		// Unknown VM — no-op.
+		return nil
+	}
+
+	// A notice about another boot. Stop and start inside one importer poll and
+	// the first boot's exit lands on the second boot's VM: acting on it fails a
+	// VM that is booting correctly. Only a notice that names a boot can be
+	// judged this way, and only against a VM that has one.
+	if bootID != "" && vm.CurrentBootID != "" && bootID != vm.CurrentBootID {
 		return nil
 	}
 

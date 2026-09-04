@@ -328,7 +328,9 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready f
 	for _, f := range adapterFindings {
 		switch f.Outcome {
 		case "vmm_gone", "ambiguous":
-			if notifyErr := mgr.NotifyVMMExit(ctx, f.VMID, "reconcile: "+f.Detail, false); notifyErr != nil {
+			// Reconcile names no boot: it stats the runner that is live now, so
+			// its finding is about whatever boot the VM is on.
+			if notifyErr := mgr.NotifyVMMExit(ctx, f.VMID, "", "reconcile: "+f.Detail, false); notifyErr != nil {
 				logger.Warn("NotifyVMMExit for adapter finding failed", "vm_id", f.VMID, "outcome", f.Outcome, "err", notifyErr)
 			}
 		}
@@ -356,6 +358,13 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready f
 			if vmID == "" {
 				return
 			}
+			// The boot this exit was observed on. A vmm_exited crosses the spool
+			// and can arrive after the VM has started again, so the boot it names
+			// is what tells a live VM from one whose VMM is gone.
+			bootID := ""
+			if env.BootID != nil {
+				bootID = *env.BootID
+			}
 			graceful := false
 			if g, ok := env.Data["graceful"].(bool); ok {
 				graceful = g
@@ -364,7 +373,7 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready f
 			if by, ok := env.Data["exit_observed_by"].(string); ok {
 				reason = "vmm_exited observed by " + by
 			}
-			if notifyErr := mgr.NotifyVMMExit(ctx, vmID, reason, graceful); notifyErr != nil {
+			if notifyErr := mgr.NotifyVMMExit(ctx, vmID, bootID, reason, graceful); notifyErr != nil {
 				logger.Warn("NotifyVMMExit from importer failed", "vm_id", vmID, "err", notifyErr)
 			}
 		}

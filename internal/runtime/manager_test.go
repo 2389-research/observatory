@@ -407,7 +407,7 @@ func TestVMMExitLeavesDesiredStateAlone(t *testing.T) {
 	mgr := newManager(t, st, fk)
 
 	vm := launchedVM(t, st, mgr, "self-shutdown")
-	if err := mgr.NotifyVMMExit(t.Context(), vm.VMID, "guest_shutdown", true); err != nil {
+	if err := mgr.NotifyVMMExit(t.Context(), vm.VMID, "", "guest_shutdown", true); err != nil {
 		t.Fatalf("NotifyVMMExit: %v", err)
 	}
 
@@ -1638,7 +1638,7 @@ func TestNotifyVMMExitRunningToFailed(t *testing.T) {
 	// mgr is closed (goroutines drained) but the store is still open.
 	// NotifyVMMExit is synchronous and does not require the close gate.
 	reason := "reconcile: vmm pid 1234 gone"
-	if err := mgr.NotifyVMMExit(t.Context(), vm.VMID, reason, false); err != nil {
+	if err := mgr.NotifyVMMExit(t.Context(), vm.VMID, "", reason, false); err != nil {
 		t.Fatalf("NotifyVMMExit: %v", err)
 	}
 
@@ -1689,7 +1689,7 @@ func TestNotifyVMMExitRunningToStopped(t *testing.T) {
 		t.Fatalf("pre-condition: want running, got %q", vm2.ObservedState)
 	}
 
-	if err := mgr.NotifyVMMExit(t.Context(), vm.VMID, "clean shutdown", true); err != nil {
+	if err := mgr.NotifyVMMExit(t.Context(), vm.VMID, "", "clean shutdown", true); err != nil {
 		t.Fatalf("NotifyVMMExit graceful: %v", err)
 	}
 
@@ -1734,7 +1734,7 @@ func TestNotifyVMMExitPausedToStopped(t *testing.T) {
 		t.Fatalf("pre-condition: want paused, got %q", paused.ObservedState)
 	}
 
-	if err := mgr.NotifyVMMExit(t.Context(), vm.VMID, "clean shutdown while paused", true); err != nil {
+	if err := mgr.NotifyVMMExit(t.Context(), vm.VMID, "", "clean shutdown while paused", true); err != nil {
 		t.Fatalf("NotifyVMMExit graceful: %v", err)
 	}
 
@@ -1778,7 +1778,7 @@ func TestNotifyVMMExitPausedToFailed(t *testing.T) {
 	}
 
 	reason := "vmm_exited observed by runner: pid gone while paused"
-	if err := mgr.NotifyVMMExit(t.Context(), vm.VMID, reason, false); err != nil {
+	if err := mgr.NotifyVMMExit(t.Context(), vm.VMID, "", reason, false); err != nil {
 		t.Fatalf("NotifyVMMExit non-graceful: %v", err)
 	}
 
@@ -1821,14 +1821,14 @@ func TestNotifyVMMExitSecondCallNoOp(t *testing.T) {
 	mgr.Close()
 
 	// First call: non-graceful exit → failed.
-	if err := mgr.NotifyVMMExit(t.Context(), vm.VMID, "first exit", false); err != nil {
+	if err := mgr.NotifyVMMExit(t.Context(), vm.VMID, "", "first exit", false); err != nil {
 		t.Fatalf("first NotifyVMMExit: %v", err)
 	}
 	vm2, _ := st.GetVM(t.Context(), vm.VMID)
 	firstState := vm2.ObservedState
 
 	// Second call on already-terminal: must return nil, state unchanged.
-	if err := mgr.NotifyVMMExit(t.Context(), vm.VMID, "replay", false); err != nil {
+	if err := mgr.NotifyVMMExit(t.Context(), vm.VMID, "", "replay", false); err != nil {
 		t.Errorf("second NotifyVMMExit (terminal) should be no-op, got: %v", err)
 	}
 	vm3, _ := st.GetVM(t.Context(), vm.VMID)
@@ -1876,7 +1876,7 @@ func TestNotifyVMMExitEarlyLifecycleGracefulGoesToFailed(t *testing.T) {
 
 	// graceful=true on an early-lifecycle VM must still route to failed, not
 	// stopped — the VM never reached running, so the launch did not complete.
-	if err := mgr.NotifyVMMExit(t.Context(), vm.VMID, "early exit", true); err != nil {
+	if err := mgr.NotifyVMMExit(t.Context(), vm.VMID, "", "early exit", true); err != nil {
 		t.Fatalf("NotifyVMMExit: %v", err)
 	}
 
@@ -1891,6 +1891,125 @@ func TestNotifyVMMExitEarlyLifecycleGracefulGoesToFailed(t *testing.T) {
 	// Unblock and drain so the test doesn't leak the goroutine.
 	close(unblock)
 	mgr.Close()
+}
+
+// TestNotifyVMMExitIgnoresPreviousBoot reproduces what the M1 gate hit: a VM
+// stopped and started again inside one importer poll interval. The spool
+// importer delivers the first boot's vmm_exited seconds after the second boot
+// has already begun, and a boot-blind reader fails a VM that is starting
+// perfectly well. The notice names the boot it observed; a boot that is over
+// says nothing about the one running now.
+func TestNotifyVMMExitIgnoresPreviousBoot(t *testing.T) {
+	st := openStoreForManager(t)
+	fk := runtimetest.NewFake()
+	mgr, err := runtime.NewManager(st, fk, defaultCfg())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	t.Cleanup(mgr.Close)
+
+	vm, _, _, err := mgr.CreateVM(t.Context(), "local_operator", createReq("notify-stale-boot"))
+	if err != nil {
+		t.Fatalf("CreateVM: %v", err)
+	}
+	running := waitVMState(t, st, vm.VMID, "running")
+	firstBoot := running.CurrentBootID
+	if firstBoot == "" {
+		t.Fatal("pre-condition: the launched VM records no boot id")
+	}
+
+	if _, _, err := mgr.Action(t.Context(), vm.VMID, "stop", nil); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+
+	// Park the restart inside rt.Launch so the VM sits in "starting" on its
+	// second boot — exactly where the gate's VM was when the stale notice landed.
+	unblock := fk.Block("Launch", vm.VMID)
+	startDone := make(chan error, 1)
+	go func() {
+		_, _, actErr := mgr.Action(context.Background(), vm.VMID, "start", nil)
+		startDone <- actErr
+	}()
+	starting := waitVMState(t, st, vm.VMID, "starting")
+	if starting.CurrentBootID == firstBoot {
+		t.Fatalf("pre-condition: restart reused boot id %q", firstBoot)
+	}
+
+	// The first boot's exit, arriving late. It is true, and it is old.
+	if err := mgr.NotifyVMMExit(t.Context(), vm.VMID, firstBoot, "vmm_exited observed by pidfile_stat", true); err != nil {
+		t.Fatalf("NotifyVMMExit: %v", err)
+	}
+	after, err := st.GetVM(t.Context(), vm.VMID)
+	if err != nil {
+		t.Fatalf("GetVM: %v", err)
+	}
+	if after.ObservedState != "starting" {
+		t.Errorf("state after a previous boot's exit notice: want starting, got %q (reason %s)", after.ObservedState, quoteStr(after.FailureReason))
+	}
+
+	// The current boot's exit is still acted on: this is a filter on staleness,
+	// not a mute button.
+	if err := mgr.NotifyVMMExit(t.Context(), vm.VMID, after.CurrentBootID, "vmm_exited observed by pidfile_stat", true); err != nil {
+		t.Fatalf("NotifyVMMExit current boot: %v", err)
+	}
+	current, err := st.GetVM(t.Context(), vm.VMID)
+	if err != nil {
+		t.Fatalf("GetVM after current-boot notice: %v", err)
+	}
+	if current.ObservedState != "failed" {
+		t.Errorf("state after the current boot's exit notice: want failed, got %q", current.ObservedState)
+	}
+
+	close(unblock)
+	<-startDone
+}
+
+// TestNotifyVMMExitWithoutBootIDStillActs covers the observer that names no
+// boot: Reconcile stats the runner that is live right now, so its findings are
+// about whatever boot is current and must not be filtered away.
+func TestNotifyVMMExitWithoutBootIDStillActs(t *testing.T) {
+	st := openStoreForManager(t)
+	fk := runtimetest.NewFake()
+	mgr, err := runtime.NewManager(st, fk, defaultCfg())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	vm, _, _, err := mgr.CreateVM(t.Context(), "local_operator", createReq("notify-no-boot"))
+	if err != nil {
+		t.Fatalf("CreateVM: %v", err)
+	}
+	mgr.Close()
+
+	if err := mgr.NotifyVMMExit(t.Context(), vm.VMID, "", "reconcile: vmm pid 1234 gone", false); err != nil {
+		t.Fatalf("NotifyVMMExit: %v", err)
+	}
+	after, _ := st.GetVM(t.Context(), vm.VMID)
+	if after.ObservedState != "failed" {
+		t.Errorf("state after a boot-less exit notice: want failed, got %q", after.ObservedState)
+	}
+}
+
+// waitVMState polls the store until vmID reaches state, and fails the test if
+// it does not. The manager runs launches on workers, so the caller cannot read
+// the row immediately after the call that starts one.
+func waitVMState(t *testing.T, st *store.Store, vmID, state string) *store.VM {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	var last *store.VM
+	for time.Now().Before(deadline) {
+		vm, err := st.GetVM(context.Background(), vmID)
+		if err != nil {
+			t.Fatalf("GetVM: %v", err)
+		}
+		if vm.ObservedState == state {
+			return vm
+		}
+		last = vm
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("vm %s never reached %q (last %q)", vmID, state, last.ObservedState)
+	return nil
 }
 
 // quoteStr renders a *string for a failure message: the quoted value, or
@@ -1988,7 +2107,7 @@ func TestNotifyVMMExitStoppingIsNoOp(t *testing.T) {
 	vm := launchedVM(t, st, mgr, "notify-stopping")
 	parked, release := parkStopInRuntime(t, st, mgr, fk, vm.VMID)
 
-	if err := mgr.NotifyVMMExit(t.Context(), vm.VMID, "vmm_exited observed by runner", true); err != nil {
+	if err := mgr.NotifyVMMExit(t.Context(), vm.VMID, "", "vmm_exited observed by runner", true); err != nil {
 		t.Fatalf("NotifyVMMExit on a stopping VM: %v", err)
 	}
 
@@ -2028,7 +2147,7 @@ func TestStopActionOutlivesConcurrentVMMExitNotice(t *testing.T) {
 	_, release := parkStopInRuntime(t, st, mgr, fk, vm.VMID)
 
 	// The importer fires while the action is inside rt.Stop.
-	if err := mgr.NotifyVMMExit(t.Context(), vm.VMID, "vmm_exited observed by runner", true); err != nil {
+	if err := mgr.NotifyVMMExit(t.Context(), vm.VMID, "", "vmm_exited observed by runner", true); err != nil {
 		t.Fatalf("NotifyVMMExit during rt.Stop: %v", err)
 	}
 
