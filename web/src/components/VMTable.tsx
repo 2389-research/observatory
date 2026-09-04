@@ -2,6 +2,7 @@
 // ABOUTME: Reads only what the API actually reports; never derives a number it wasn't given.
 import type { VM } from '../types'
 import { neutralize, age } from '../text'
+import { RowActions, RowResult, type FleetControls } from './BulkActions'
 
 /**
  * A column SPEC §13.1 asks for that no emitter feeds in this build. Showing 0%
@@ -45,7 +46,7 @@ function Labels({ labels }: { labels: Record<string, string> | null }) {
   )
 }
 
-export function VMTable({ vms }: { vms: VM[] }) {
+export function VMTable({ vms, controls }: { vms: VM[]; controls: FleetControls }) {
   if (vms.length === 0) {
     return <p className="empty">No VMs on this host.</p>
   }
@@ -53,6 +54,9 @@ export function VMTable({ vms }: { vms: VM[] }) {
     <table className="vms">
       <thead>
         <tr>
+          <th scope="col">
+            <span className="sr-only">Selected</span>
+          </th>
           <th>Name / ID</th>
           <th>Template</th>
           <th>Lifecycle</th>
@@ -63,11 +67,20 @@ export function VMTable({ vms }: { vms: VM[] }) {
           <th>Network</th>
           <th>Age</th>
           <th>Owner</th>
+          <th>Actions</th>
         </tr>
       </thead>
       <tbody>
         {vms.map((vm) => (
-          <tr key={vm.vm_id}>
+          <tr key={vm.vm_id} data-testid={`vm-row-${vm.vm_id}`}>
+            <td>
+              <input
+                type="checkbox"
+                checked={controls.selected.has(vm.vm_id)}
+                onChange={() => controls.toggle(vm.vm_id)}
+                aria-label={`Select VM ${neutralize(vm.name)}`}
+              />
+            </td>
             <td>
               <div className="name" data-testid="vm-name">
                 {neutralize(vm.name)}
@@ -105,6 +118,12 @@ export function VMTable({ vms }: { vms: VM[] }) {
             <td>
               <div>{neutralize(vm.owner)}</div>
               <Labels labels={vm.labels} />
+            </td>
+            <td>
+              <div className="row-actions">
+                <RowActions vm={vm} controls={controls} />
+              </div>
+              <RowResult vm={vm} controls={controls} />
             </td>
           </tr>
         ))}

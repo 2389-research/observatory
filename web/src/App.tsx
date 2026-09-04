@@ -8,6 +8,7 @@ import { LaunchForm } from './components/LaunchForm'
 import { LaunchBatch } from './components/LaunchBatch'
 import { AttentionQueue } from './components/AttentionQueue'
 import { VMTable } from './components/VMTable'
+import { BulkActions, useFleetControls } from './components/BulkActions'
 
 const REFRESH_MS = 5000
 
@@ -39,6 +40,10 @@ export function App() {
       setFailure(e instanceof ApiFailure ? e : new ApiFailure(0))
     }
   }, [])
+
+  // Lifecycle actions re-read the fleet the moment they settle, so a row's
+  // outcome and the table under it never disagree for a whole poll interval.
+  const controls = useFleetControls(() => void load())
 
   useEffect(() => {
     void load()
@@ -100,7 +105,8 @@ export function App() {
           </section>
           <section>
             <h2>VMs</h2>
-            <VMTable vms={fleet.vms.vms} />
+            <BulkActions vms={fleet.vms.vms} controls={controls} />
+            <VMTable vms={fleet.vms.vms} controls={controls} />
           </section>
         </>
       )}
