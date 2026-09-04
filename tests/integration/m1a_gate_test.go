@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,6 +23,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/2389-research/observatory-v2/internal/auth"
 )
 
 // m1aPrivdSock is the socket path installed by scripts/aibox03/setup.sh.
@@ -142,6 +146,14 @@ type m1aDaemon struct {
 	// name the daemon through startDaemon's own label argument, not this field.
 	label string
 
+	// credDir is the initialized credential store, empty when this daemon runs
+	// with authentication off. The M1b gate mints a second owner's token from it
+	// to prove a foreign credential cannot reach another owner's terminal.
+	credDir string
+	// csrf is the logged-in session's CSRF token, also carried by the client's
+	// transport. Empty when authentication is off.
+	csrf string
+
 	// vmMu guards createdVMs, the vm_ids this daemon has created via POST /vms.
 	// Tracked centrally (trackVMID) so t.Cleanup can best-effort remove each VM's
 	// stage dir: /srv/vmobs is the shared production layout, so cleanup can no longer
@@ -158,11 +170,67 @@ func (d *m1aDaemon) trackVMID(vmID string) {
 	d.createdVMs = append(d.createdVMs, vmID)
 }
 
+// daemonOptions collects the knobs a caller may turn on the daemon startDaemon
+// launches. Every zero value reproduces the M1a gate's daemon exactly, so a call
+// site that passes no options gets the config it always had.
+type daemonOptions struct {
+	// operator and password, when set, turn require_authentication on: the
+	// credential store is initialized with them before launch, and the handle's
+	// client logs in once the daemon answers.
+	operator string
+	password string
+}
+
+// daemonOption tunes daemonOptions.
+type daemonOption func(*daemonOptions)
+
+// withRequiredAuth runs the daemon the way a browser meets it — authentication
+// required, one operator, one logged-in session. AT-030's unauthenticated and
+// wrong-owner denials have no meaning without it: with authentication off every
+// request arrives as local_operator, so there is no second identity to refuse
+// and no missing credential to notice.
+func withRequiredAuth(username, password string) daemonOption {
+	return func(o *daemonOptions) {
+		o.operator = username
+		o.password = password
+	}
+}
+
+// csrfHeaderName is internal/api's csrfHeader, unexported there. Named here so
+// the gate's client sends the header the daemon actually reads.
+const csrfHeaderName = "X-CSRF-Token"
+
+// csrfTransport puts the two headers a same-origin browser sends on every
+// request this gate's client makes: the Origin the WebSocket route matches
+// against, and the CSRF token a cookie session needs for a mutation. Carrying
+// them in the client rather than at each call site is what lets every helper on
+// m1aDaemon work unchanged against a daemon with authentication on.
+type csrfTransport struct {
+	base   http.RoundTripper
+	origin string
+	token  string
+}
+
+func (c *csrfTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	// A RoundTripper must not modify the request it is handed.
+	clone := r.Clone(r.Context())
+	clone.Header.Set("Origin", c.origin)
+	if c.token != "" {
+		clone.Header.Set(csrfHeaderName, c.token)
+	}
+	return c.base.RoundTrip(clone)
+}
+
 // startDaemon starts vmobsd with runtime.mode=firecracker and returns a handle.
 // It polls /api/v1/meta until the daemon answers, then returns.
 // The daemon and all its dirs are cleaned up in t.Cleanup.
-func startDaemon(t *testing.T, repoRoot, daemonBin, runnerBin, label string) *m1aDaemon {
+func startDaemon(t *testing.T, repoRoot, daemonBin, runnerBin, label string, opts ...daemonOption) *m1aDaemon {
 	t.Helper()
+
+	var o daemonOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
 
 	// Paths.Runtime is the fixed production layout, not a per-test subdir: it must
 	// equal /srv/vmobs exactly so the daemon's JailBase derivation (Paths.Runtime +
@@ -185,6 +253,15 @@ func startDaemon(t *testing.T, repoRoot, daemonBin, runnerBin, label string) *m1
 	} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatalf("startDaemon %s: mkdir %s: %v", label, d, err)
+		}
+	}
+
+	// The credential store has to exist before the daemon opens it, so it is
+	// built here rather than by a later login.
+	credDir := filepath.Join(stateDir, "auth")
+	if o.operator != "" {
+		if _, err := auth.InitStore(credDir, o.operator, o.password); err != nil {
+			t.Fatalf("startDaemon %s: init credential store: %v", label, err)
 		}
 	}
 
@@ -231,7 +308,7 @@ server:
   mode: loopback_only
 auth:
   mode: local_operator
-  require_authentication: false
+  require_authentication: %t
   credential_store: %q
   csrf_protection: true
   session_cookie_http_only: true
@@ -340,7 +417,8 @@ performance_targets:
 `,
 		listenAddr,
 		"http://"+listenAddr,
-		filepath.Join(stateDir, "auth"),
+		o.operator != "",
+		credDir,
 		stateDir,
 		runtimeDir,
 		filepath.Join(stateDir, "templates"),
@@ -455,6 +533,7 @@ performance_targets:
 		httpClient: &http.Client{Timeout: 330 * time.Second},
 		cmd:        cmd,
 		configPath: configPath,
+		credDir:    credDir,
 		stateDir:   stateDir,
 		runtimeDir: runtimeDir,
 		cancel:     cancel,
@@ -614,7 +693,68 @@ performance_targets:
 		time.Sleep(200 * time.Millisecond)
 	}
 
+	// Log in once the daemon answers, so every helper on this handle rides a real
+	// browser session. Order matters twice: the jar is installed before the login
+	// so its Set-Cookie sticks, and the transport after, because the CSRF token it
+	// carries exists only once the login has replied. Installing the transport
+	// last is also what keeps its token a plain field — written before any test
+	// body runs, read-only thereafter.
+	if o.operator != "" {
+		jar, err := cookiejar.New(nil)
+		if err != nil {
+			t.Fatalf("startDaemon %s: cookie jar: %v", label, err)
+		}
+		d.httpClient.Jar = jar
+		reqBody, err := json.Marshal(map[string]string{"username": o.operator, "password": o.password})
+		if err != nil {
+			t.Fatalf("startDaemon %s: marshal login: %v", label, err)
+		}
+		resp, err := d.httpClient.Post(d.baseURL+"/auth/login", "application/json", bytes.NewReader(reqBody))
+		if err != nil {
+			t.Fatalf("startDaemon %s: login: %v", label, err)
+		}
+		raw, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("startDaemon %s: login: got %d (want 200)", label, resp.StatusCode)
+		}
+		var out struct {
+			Owner     string `json:"owner"`
+			CSRFToken string `json:"csrf_token"`
+		}
+		if err := json.Unmarshal(raw, &out); err != nil {
+			t.Fatalf("startDaemon %s: login reply: %v", label, err)
+		}
+		if out.CSRFToken == "" {
+			t.Fatalf("startDaemon %s: login reply carried no csrf_token", label)
+		}
+		d.csrf = out.CSRFToken
+		d.httpClient.Transport = &csrfTransport{
+			base:   http.DefaultTransport,
+			origin: "http://" + listenAddr,
+			token:  out.CSRFToken,
+		}
+		// Neither the session cookie nor the CSRF token may reach an evidence
+		// file (§15.3). Registering them makes assertNoToken prove it rather than
+		// leaving it to each evidence block's author.
+		registerGateSecret(out.CSRFToken)
+		for _, c := range jar.Cookies(mustParseURL(t, "http://"+listenAddr)) {
+			registerGateSecret(c.Value)
+		}
+	}
+
 	return d
+}
+
+// mustParseURL parses a URL the test itself built. A failure here is a bug in
+// the test, not a finding about the daemon.
+func mustParseURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse %q: %v", raw, err)
+	}
+	return u
 }
 
 // logVMStateBeforeTeardown records a VM's observed state and revision before the
@@ -2115,11 +2255,52 @@ func readM1aManifest(stateDir, vmID string) (m1aManifest, error) {
 	return m, nil
 }
 
-// assertNoToken asserts that no 64-char lowercase hex string appears in body.
-// This guards §15.3: the vsock auth token must never appear in responses.
+// gateSecrets holds the credential strings this run minted — operator bearer
+// tokens, the CSRF token, the session cookie. assertNoToken checks every
+// evidence block against them, so §15.3 is proved rather than left to whoever
+// wrote the block. The mutex is for the race detector's benefit: registration
+// and checking both happen on test goroutines, but not always the same one.
+var (
+	gateSecretsMu sync.Mutex
+	gateSecrets   []string
+)
+
+// registerGateSecret records one credential string that must never appear in
+// evidence. A short or empty string is ignored: a two-character "secret" would
+// match half the corpus and turn the guard into noise.
+func registerGateSecret(secret string) {
+	if len(secret) < 16 {
+		return
+	}
+	gateSecretsMu.Lock()
+	defer gateSecretsMu.Unlock()
+	gateSecrets = append(gateSecrets, secret)
+}
+
+// assertNoToken asserts that body carries no credential: neither a 64-char
+// lowercase hex string (the vsock auth token's shape, §15.3) nor any of the
+// exact secrets this run minted.
+//
+// The two checks answer different questions. The hex scan catches a shape,
+// including one this test never held; the exact scan catches the credentials
+// that do exist in this process, whose own shape — "vmobs_" plus base64url for
+// a bearer token, bare base64url for a session — is too common to match on
+// appearance without reddening the gate for an unrelated blob.
 func assertNoToken(t *testing.T, body []byte) {
 	t.Helper()
 	s := string(body)
+
+	gateSecretsMu.Lock()
+	known := append([]string(nil), gateSecrets...)
+	gateSecretsMu.Unlock()
+	for _, secret := range known {
+		if idx := strings.Index(s, secret); idx >= 0 {
+			// The secret itself is never printed: naming it here would put it in
+			// the very test log this check exists to keep it out of.
+			t.Errorf("§15.3 violation: a credential minted by this run appears in the body at offset %d", idx)
+			return
+		}
+	}
 	// Walk through candidates: any 64 consecutive chars in [0-9a-f].
 	for i := 0; i+64 <= len(s); i++ {
 		candidate := s[i : i+64]
