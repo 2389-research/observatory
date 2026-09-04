@@ -609,6 +609,24 @@ func TestCreateVMAdmissionRefusal(t *testing.T) {
 	var e2 api.Error
 	doRequest(t, http.MethodPost, srv.URL+"/api/v1/vms", body2, http.StatusConflict, &e2)
 	requireTeaching(t, e2, "insufficient_capacity")
+
+	// A refused create still records an operation carrying the refusal, so the
+	// refusal names it. The replay must name the SAME one: an idempotent retry
+	// answers from one record, and pointing at a second would invent a history
+	// the store does not have.
+	if e.OperationID == "" {
+		t.Fatal("the refusal records an operation but names none")
+	}
+	if e2.OperationID != e.OperationID {
+		t.Errorf("replay named %q, original named %q; both answer from one record",
+			e2.OperationID, e.OperationID)
+	}
+	var op map[string]any
+	getJSON(t, srv.URL+"/api/v1/operations/"+e.OperationID, http.StatusOK, &op)
+	opErr, _ := op["error"].(map[string]any)
+	if cause, _ := opErr["cause"].(string); cause != "insufficient_capacity" {
+		t.Errorf("operation error.cause = %q, want insufficient_capacity", cause)
+	}
 }
 
 // --- list / get ---
@@ -831,7 +849,7 @@ func TestDeleteVMReleaseFailureTeaches(t *testing.T) {
 // which is the same lie a failed release told before it was named. The
 // operation row keeps the runtime's own words for whoever reads it later.
 func TestActionRuntimeFailureTeaches(t *testing.T) {
-	srv, st, fake := newTemplateServer(t)
+	srv, _, fake := newTemplateServer(t)
 	vmID := createRunningVM(t, srv.URL, fake)
 	fake.FailNext("Stop", vmID, errors.New("guest ignored the shutdown request"))
 
@@ -856,20 +874,23 @@ func TestActionRuntimeFailureTeaches(t *testing.T) {
 		t.Error("the VM is still there to stop; asking again is the recovery")
 	}
 
-	// The durable record has to survive the request that produced it.
-	ops, err := st.ListOperationsByState(t.Context(), "failed")
-	if err != nil {
-		t.Fatalf("ListOperationsByState: %v", err)
+	// The remediation says to read the operation. An operator can only do that
+	// if the error names which one, so the name is part of the answer — and it
+	// has to resolve to the durable record of this failure, not just be present.
+	if e.OperationID == "" {
+		t.Fatal("the error tells the operator to read the operation but names none")
 	}
-	found := false
-	for _, op := range ops {
-		if op.VMID != nil && *op.VMID == vmID &&
-			op.ErrorMessage != nil && strings.Contains(*op.ErrorMessage, "ignored the shutdown") {
-			found = true
-		}
+	var op map[string]any
+	getJSON(t, srv.URL+"/api/v1/operations/"+e.OperationID, http.StatusOK, &op)
+	if op["state"] != "failed" {
+		t.Errorf("operation %s state = %v, want failed", e.OperationID, op["state"])
 	}
-	if !found {
-		t.Error("no operation row carries the runtime's error; the HTTP answer is then the only copy")
+	if op["vm_id"] != vmID {
+		t.Errorf("operation %s vm_id = %v, want %s", e.OperationID, op["vm_id"], vmID)
+	}
+	opErr, _ := op["error"].(map[string]any)
+	if msg, _ := opErr["message"].(string); !strings.Contains(msg, "ignored the shutdown") {
+		t.Errorf("operation error.message = %q, want the runtime's own words", msg)
 	}
 }
 
@@ -1263,6 +1284,11 @@ func TestVMStartRefusedWhenMemoryWentElsewhere(t *testing.T) {
 	requireTeaching(t, e, "insufficient_capacity")
 	if !strings.Contains(e.Message, "memory") {
 		t.Errorf("refusal message = %q, want the memory dimension named", e.Message)
+	}
+	// failAction wrote a failed operation for this refusal; naming it is what
+	// lets the operator see the shortfall again after the response is gone.
+	if e.OperationID == "" {
+		t.Error("a refused start records a failed operation; the refusal must name it")
 	}
 
 	// A refused start leaves the VM where it was, not parked in "starting".

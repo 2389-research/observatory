@@ -228,11 +228,11 @@ func renderTemplate(id string, tpl runtime.Template) wireTemplate {
 
 // writeVMError maps store/runtime errors to the API error taxonomy. It uses
 // the same Error/Remediation types as the rest of the API surface.
-func writeVMError(w http.ResponseWriter, err error) {
+func vmErrorFor(err error) (int, Error) {
 	// 501: runtime unavailable — this host cannot launch VMs.
 	var unavail *runtime.UnavailableError
 	if errors.As(err, &unavail) {
-		writeError(w, http.StatusNotImplemented, Error{
+		return http.StatusNotImplemented, Error{
 			Code:      "missing_capability",
 			Message:   "runtime not available on this host: " + unavail.Reason,
 			Retryable: false,
@@ -243,14 +243,13 @@ func writeVMError(w http.ResponseWriter, err error) {
 				Params:    map[string]any{"path": basePath + "/host/status"},
 				Rationale: "the Linux/KVM track host (aibox03) provides the firecracker runtime; this dev host cannot launch VMs",
 			}},
-		})
-		return
+		}
 	}
 
 	// 409: admission refused — capacity shortfall.
 	var refusal *store.AdmissionRefusal
 	if errors.As(err, &refusal) {
-		writeError(w, http.StatusConflict, Error{
+		return http.StatusConflict, Error{
 			Code:      "insufficient_capacity",
 			Message:   "host cannot admit this VM: " + refusal.Message,
 			Retryable: false,
@@ -268,13 +267,12 @@ func writeVMError(w http.ResponseWriter, err error) {
 					Rationale: "stopping a running VM releases its memory and CPU reservation",
 				},
 			},
-		})
-		return
+		}
 	}
 
 	// 409: idempotency key reused with a different payload.
 	if errors.Is(err, store.ErrIdempotencyConflict) {
-		writeError(w, http.StatusConflict, Error{
+		return http.StatusConflict, Error{
 			Code:      "idempotency_conflict",
 			Message:   "the idempotency key was already used for a different request",
 			Retryable: false,
@@ -286,14 +284,13 @@ func writeVMError(w http.ResponseWriter, err error) {
 					Rationale: "retrieve the original operation by its ID",
 				},
 			},
-		})
-		return
+		}
 	}
 
 	// 409: stale revision on a conflicting lifecycle change.
 	var revErr *store.RevisionMismatchError
 	if errors.As(err, &revErr) {
-		writeError(w, http.StatusConflict, Error{
+		return http.StatusConflict, Error{
 			Code:      "revision_mismatch",
 			Message:   fmt.Sprintf("revision is now %s; re-read the VM and retry", strconv.FormatInt(revErr.Current, 10)),
 			Retryable: true,
@@ -304,26 +301,24 @@ func writeVMError(w http.ResponseWriter, err error) {
 				Params:    map[string]any{"path": basePath + "/vms/{id}"},
 				Rationale: "read the current revision before retrying the action",
 			}},
-		})
-		return
+		}
 	}
 
 	// 409: the requested transition is not in the §5.2 matrix.
 	var txnErr *store.InvalidTransitionError
 	if errors.As(err, &txnErr) {
-		writeError(w, http.StatusConflict, Error{
+		return http.StatusConflict, Error{
 			Code:      "invalid_transition",
 			Message:   fmt.Sprintf("cannot transition from %q to %q", txnErr.From, txnErr.To),
 			Retryable: false,
 			Cause:     "lifecycle_state_machine",
 			Details:   map[string]any{"from": txnErr.From, "to": txnErr.To},
-		})
-		return
+		}
 	}
 
 	// 409: delete attempted while VM is still live.
 	if errors.Is(err, store.ErrVMLive) {
-		writeError(w, http.StatusConflict, Error{
+		return http.StatusConflict, Error{
 			Code:      "vm_live",
 			Message:   "cannot delete a live VM without force-stop",
 			Retryable: false,
@@ -340,14 +335,13 @@ func writeVMError(w http.ResponseWriter, err error) {
 					Rationale: "force=true stops and deletes in one request",
 				},
 			},
-		})
-		return
+		}
 	}
 
 	// 400: requested template not in approved registry.
 	var tplErr *runtime.ErrTemplateUnknown
 	if errors.As(err, &tplErr) {
-		writeError(w, http.StatusBadRequest, Error{
+		return http.StatusBadRequest, Error{
 			Code:      "template_unknown",
 			Message:   tplErr.Error(),
 			Retryable: false,
@@ -358,33 +352,30 @@ func writeVMError(w http.ResponseWriter, err error) {
 				Params:    map[string]any{"path": basePath + "/templates"},
 				Rationale: "lists the approved templates available on this host",
 			}},
-		})
-		return
+		}
 	}
 
 	// 400: invalid request body (name missing, name too long, etc.).
 	var badReq *runtime.ErrInvalidRequest
 	if errors.As(err, &badReq) {
-		writeError(w, http.StatusBadRequest, Error{
+		return http.StatusBadRequest, Error{
 			Code:      "malformed_request",
 			Message:   badReq.Reason,
 			Retryable: false,
 			Cause:     "body_invalid",
-		})
-		return
+		}
 	}
 
 	// 400: unknown action name.
 	var actErr *runtime.ErrUnknownAction
 	if errors.As(err, &actErr) {
-		writeError(w, http.StatusBadRequest, Error{
+		return http.StatusBadRequest, Error{
 			Code:      "malformed_request",
 			Message:   actErr.Error(),
 			Retryable: false,
 			Cause:     "body_invalid",
 			Details:   map[string]any{"valid_actions": actErr.Known},
-		})
-		return
+		}
 	}
 
 	// 500: the runtime could not release a VM's resources. Retryable, and named
@@ -393,7 +384,7 @@ func writeVMError(w http.ResponseWriter, err error) {
 	// on the machine.
 	var relErr *runtime.ErrReleaseFailed
 	if errors.As(err, &relErr) {
-		writeError(w, http.StatusInternalServerError, Error{
+		return http.StatusInternalServerError, Error{
 			Code:      "internal",
 			Message:   "could not release the VM's host resources: " + relErr.Reason,
 			Retryable: true,
@@ -411,8 +402,7 @@ func writeVMError(w http.ResponseWriter, err error) {
 					Rationale: "retry the delete once the cause of the release failure is cleared",
 				},
 			},
-		})
-		return
+		}
 	}
 
 	// 500: a host verb failed — the VMM would not launch, the guest would not
@@ -441,22 +431,21 @@ func writeVMError(w http.ResponseWriter, err error) {
 				Rationale: "the VM is still where it was; asking again is the recovery once the host fault is cleared",
 			})
 		}
-		writeError(w, http.StatusInternalServerError, Error{
+		return http.StatusInternalServerError, Error{
 			Code:        "internal",
 			Message:     "the host could not " + opFail.Op + " this VM: " + opFail.Err.Error(),
 			Retryable:   opFail.Op != "launch",
 			Cause:       "runtime_operation_failed",
 			Details:     map[string]any{"vm_id": opFail.VMID, "runtime_operation": opFail.Op},
 			Remediation: remediation,
-		})
-		return
+		}
 	}
 
 	// 500: the operation ran out of its budget. Not retryable as a blind repeat:
 	// a deadline says when we stopped waiting, never whether the work landed, so
 	// the remediation is to read the record and then decide.
 	if errors.Is(err, context.DeadlineExceeded) {
-		writeError(w, http.StatusInternalServerError, Error{
+		return http.StatusInternalServerError, Error{
 			Code:      "internal",
 			Message:   "the operation exceeded its time budget; whether it completed is recorded, not assumed",
 			Retryable: false,
@@ -473,13 +462,12 @@ func writeVMError(w http.ResponseWriter, err error) {
 					Rationale: "the operation carries its own outcome and error detail",
 				},
 			},
-		})
-		return
+		}
 	}
 
 	// 404: VM not found.
 	if errors.Is(err, store.ErrVMUnknown) {
-		writeError(w, http.StatusNotFound, Error{
+		return http.StatusNotFound, Error{
 			Code:      "not_found",
 			Message:   "VM not found",
 			Retryable: false,
@@ -489,13 +477,12 @@ func writeVMError(w http.ResponseWriter, err error) {
 				Params:    map[string]any{"path": basePath + "/vms"},
 				Rationale: "list all VMs",
 			}},
-		})
-		return
+		}
 	}
 
 	// 404: operation not found.
 	if errors.Is(err, store.ErrOperationUnknown) {
-		writeError(w, http.StatusNotFound, Error{
+		return http.StatusNotFound, Error{
 			Code:      "not_found",
 			Message:   "operation not found",
 			Retryable: false,
@@ -505,8 +492,7 @@ func writeVMError(w http.ResponseWriter, err error) {
 				Params:    map[string]any{"path": basePath + "/operations/{id}"},
 				Rationale: "the operation ID is in the vm.create or vm.action response",
 			}},
-		})
-		return
+		}
 	}
 
 	// 500: nothing above matched, so this layer does not know what broke. Saying
@@ -516,7 +502,7 @@ func writeVMError(w http.ResponseWriter, err error) {
 	// a retry would differ, and its text is not ours to hand back — it may carry
 	// anything a dependency chose to put in it. What the system does know is
 	// where the durable record of the request lives, so it says that.
-	writeError(w, http.StatusInternalServerError, Error{
+	return http.StatusInternalServerError, Error{
 		Code:      "internal",
 		Message:   "the request failed for a reason the server could not classify",
 		Retryable: false,
@@ -533,7 +519,29 @@ func writeVMError(w http.ResponseWriter, err error) {
 				Rationale: "reports whether the runtime and the store are each healthy right now",
 			},
 		},
-	})
+	}
+}
+
+// writeVMError answers with the mapping alone. Most call sites have no
+// operation to name: a read, an ownership pre-fetch, a request the store
+// refused before any record of it existed.
+func writeVMError(w http.ResponseWriter, err error) {
+	status, e := vmErrorFor(err)
+	writeError(w, status, e)
+}
+
+// writeVMErrorForOperation is for the two paths that already hold the
+// operation their failure was recorded on — the create and the action. Both
+// mappings they can produce tell the operator to go read the operation, and an
+// instruction that does not say which one sends them to a list to guess. A nil
+// operation, or one whose id was never assigned, leaves the field off rather
+// than rendering a zero that parses cleanly and resolves to nothing.
+func writeVMErrorForOperation(w http.ResponseWriter, err error, op *store.Operation) {
+	status, e := vmErrorFor(err)
+	if op != nil && op.OperationID > 0 {
+		e.OperationID = renderOperationID(op.OperationID)
+	}
+	writeError(w, status, e)
 }
 
 // resourceOwner checks that the resource's stored owner matches the caller's
@@ -760,7 +768,7 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	vm, op, replayed, err := s.manager.CreateVM(opCtx, ident.Owner, req)
 	if err != nil {
-		writeVMError(w, err)
+		writeVMErrorForOperation(w, err, op)
 		return
 	}
 	// Replays return the same 201 as the original request (retry-transparent
@@ -921,7 +929,7 @@ func (s *Server) handleVMAction(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	updVM, op, err := s.manager.Action(opCtx, vmID, body.Action, &rev)
 	if err != nil {
-		writeVMError(w, err)
+		writeVMErrorForOperation(w, err, op)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{

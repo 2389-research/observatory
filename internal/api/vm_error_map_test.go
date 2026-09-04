@@ -179,3 +179,60 @@ func TestContextErrorsReachTheMap(t *testing.T) {
 		t.Fatalf("GetVM past its deadline = %v, want context.DeadlineExceeded", err)
 	}
 }
+
+// An error with no operation behind it must not carry an operation_id at all —
+// not an empty string, and above all not "op-000000", which parses cleanly and
+// resolves to nothing. The field is omitempty, so the guard is that nothing
+// ever renders a zero id into it.
+func TestWriteVMErrorOmitsAnOperationItDoesNotHave(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		op   *store.Operation
+	}{
+		{"no operation argument at all", nil},
+		{"an operation whose id was never assigned", &store.Operation{OperationID: 0}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			if tc.op == nil {
+				writeVMError(w, errors.New("some fault this layer cannot classify"))
+			} else {
+				writeVMErrorForOperation(w, errors.New("some fault this layer cannot classify"), tc.op)
+			}
+			var raw map[string]any
+			if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if v, present := raw["operation_id"]; present {
+				t.Errorf("operation_id present as %q; an error with no operation must omit the key", v)
+			}
+		})
+	}
+}
+
+// The operation rides along without disturbing the mapping: same status, same
+// cause, same remediation as the plain writer produces for the same error.
+func TestNamingTheOperationChangesNothingElse(t *testing.T) {
+	boom := &runtime.ErrRuntimeOpFailed{VMID: "vm-1", Op: "stop", Err: errors.New("kvm said no")}
+
+	wantStatus, want := mapVMError(t, boom)
+
+	w := httptest.NewRecorder()
+	writeVMErrorForOperation(w, boom, &store.Operation{OperationID: 42})
+	var got Error
+	if err := json.NewDecoder(w.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if w.Code != wantStatus {
+		t.Errorf("status = %d, want %d", w.Code, wantStatus)
+	}
+	if got.OperationID != "op-000042" {
+		t.Errorf("operation_id = %q, want op-000042", got.OperationID)
+	}
+	if got.Cause != want.Cause || got.Message != want.Message || got.Retryable != want.Retryable {
+		t.Errorf("mapping drifted: got %+v, want %+v", got, want)
+	}
+	if len(got.Remediation) != len(want.Remediation) {
+		t.Errorf("remediation count = %d, want %d", len(got.Remediation), len(want.Remediation))
+	}
+}
