@@ -106,7 +106,7 @@ func (s *Store) InsertReportOperation(ctx context.Context, owner, vmID, runID st
 	opID, _ := res.LastInsertId()
 
 	if _, err := s.appendSystemInTx(ctx, tx, s.systemEnvelope("operation.state_changed", "registry", notApplicableQuality(), map[string]any{
-		"operation_id": fmt.Sprintf("%d", opID),
+		"operation_id": FormatOperationID(opID),
 		"kind":         "run.report_generate",
 		"vm_id":        vmID,
 		"phase":        "generating",

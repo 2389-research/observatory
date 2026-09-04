@@ -140,7 +140,9 @@ func renderVM(vm *store.VM) wireVM {
 	return w
 }
 
-func renderOperationID(id int64) string { return fmt.Sprintf("op-%06d", id) }
+// The store mints operation ids and names them; this endpoint publishes that
+// same name, so the events stream and every operation reply agree.
+func renderOperationID(id int64) string { return store.FormatOperationID(id) }
 
 func parseOperationID(raw string) (int64, bool) {
 	s := strings.TrimPrefix(raw, "op-")

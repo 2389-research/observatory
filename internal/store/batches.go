@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
 )
 
 // ErrBatchUnknown is returned when no batch exists with the given ID.
@@ -188,7 +187,7 @@ func (s *Store) CreateVMBatch(ctx context.Context, in CreateVMBatchInput) (*Crea
 
 	// Durable operation.state_changed event for the batch op.
 	eventData := map[string]any{
-		"operation_id": strconv.FormatInt(batchOpID, 10),
+		"operation_id": FormatOperationID(batchOpID),
 		"kind":         batchOpKind,
 		"vm_id":        nil,
 		"phase":        batchOpPhase,
@@ -383,7 +382,7 @@ func (s *Store) insertOneMember(ctx context.Context, tx *sql.Tx, batchID int64, 
 		"name":            m.Name,
 		"template_id":     m.TemplateID,
 		"template_digest": m.TemplateDigest,
-		"operation_id":    strconv.FormatInt(opID, 10),
+		"operation_id":    FormatOperationID(opID),
 		"owner":           owner,
 		"resources": map[string]any{
 			"vcpu":               m.VCPUCount,
@@ -402,7 +401,7 @@ func (s *Store) insertOneMember(ctx context.Context, tx *sql.Tx, batchID int64, 
 
 	// operation.state_changed event.
 	if _, err := s.appendSystemInTx(ctx, tx, s.systemEnvelope("operation.state_changed", "registry", notApplicableQuality(), map[string]any{
-		"operation_id": strconv.FormatInt(opID, 10),
+		"operation_id": FormatOperationID(opID),
 		"kind":         "vm.create",
 		"vm_id":        m.VMID,
 		"phase":        "admitted",

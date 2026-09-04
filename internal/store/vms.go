@@ -137,6 +137,12 @@ type VM struct {
 	LastEventID int64
 }
 
+// FormatOperationID renders an operation's row id as the identifier the API
+// publishes. The store mints these ids, so it names them: an event that says
+// "1" while every operation reply says "op-000001" cannot be joined to the
+// operation it describes.
+func FormatOperationID(id int64) string { return fmt.Sprintf("op-%06d", id) }
+
 // Operation is one row of the operations log.
 type Operation struct {
 	OperationID    int64
@@ -345,7 +351,7 @@ func (s *Store) CreateVMWithOperation(ctx context.Context, in CreateVMInput) (*V
 		}
 		opID, _ := res.LastInsertId()
 		if _, err := s.appendSystemInTx(ctx, tx, s.systemEnvelope("operation.state_changed", "registry", notApplicableQuality(), map[string]any{
-			"operation_id": strconv.FormatInt(opID, 10),
+			"operation_id": FormatOperationID(opID),
 			"kind":         in.Kind,
 			"vm_id":        nil,
 			"phase":        "admission",
@@ -401,7 +407,7 @@ func (s *Store) CreateVMWithOperation(ctx context.Context, in CreateVMInput) (*V
 		"name":            in.Name,
 		"template_id":     in.TemplateID,
 		"template_digest": in.TemplateDigest,
-		"operation_id":    strconv.FormatInt(opID, 10),
+		"operation_id":    FormatOperationID(opID),
 		"owner":           in.Owner,
 		"resources": map[string]any{
 			"vcpu":               in.VCPUCount,
@@ -418,7 +424,7 @@ func (s *Store) CreateVMWithOperation(ctx context.Context, in CreateVMInput) (*V
 		return nil, nil, false, fmt.Errorf("set last_event_id: %w", err)
 	}
 	if _, err := s.appendSystemInTx(ctx, tx, s.systemEnvelope("operation.state_changed", "registry", notApplicableQuality(), map[string]any{
-		"operation_id": strconv.FormatInt(opID, 10),
+		"operation_id": FormatOperationID(opID),
 		"kind":         in.Kind,
 		"vm_id":        in.VMID,
 		"phase":        "admitted",
@@ -576,7 +582,7 @@ func (s *Store) TransitionVM(ctx context.Context, in TransitionInput) (*VM, erro
 		"from":         current.ObservedState,
 		"to":           in.To,
 		"reason":       in.Reason,
-		"operation_id": strconv.FormatInt(in.OperationID, 10),
+		"operation_id": FormatOperationID(in.OperationID),
 		"revision":     strconv.FormatInt(newRevision, 10),
 	}
 	if in.BootID != nil {
@@ -595,7 +601,7 @@ func (s *Store) TransitionVM(ctx context.Context, in TransitionInput) (*VM, erro
 	if in.To == "deleted" {
 		if _, err := s.appendSystemInTx(ctx, tx, s.systemEnvelope("vm.deleted", "registry", notApplicableQuality(), map[string]any{
 			"vm_id":        in.VMID,
-			"operation_id": strconv.FormatInt(in.OperationID, 10),
+			"operation_id": FormatOperationID(in.OperationID),
 		})); err != nil {
 			return nil, err
 		}
@@ -660,7 +666,7 @@ func (s *Store) UpdateOperation(ctx context.Context, upd OperationUpdate) (*Oper
 	}
 
 	data := map[string]any{
-		"operation_id": strconv.FormatInt(op.OperationID, 10),
+		"operation_id": FormatOperationID(op.OperationID),
 		"kind":         op.Kind,
 		"phase":        op.Phase,
 		"state":        op.State,
@@ -710,7 +716,7 @@ func (s *Store) InsertActionOperation(ctx context.Context, in ActionOperationInp
 	opID, _ := res.LastInsertId()
 
 	if _, err := s.appendSystemInTx(ctx, tx, s.systemEnvelope("operation.state_changed", "registry", notApplicableQuality(), map[string]any{
-		"operation_id": strconv.FormatInt(opID, 10),
+		"operation_id": FormatOperationID(opID),
 		"kind":         "vm.action",
 		"vm_id":        in.VMID,
 		"phase":        in.Phase,
