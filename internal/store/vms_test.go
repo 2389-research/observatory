@@ -1063,3 +1063,131 @@ func TestCreateVMReplayFlag(t *testing.T) {
 		t.Errorf("replay vm = %q, want original", vm2.VMID)
 	}
 }
+
+// startCycle walks a VM from provisioning to running, then stops it, returning
+// the reservation totals seen while it ran. The compute a start must re-acquire
+// is exactly what the stop gave back.
+func startCycle(t *testing.T, st *store.Store, vmID string, opID int64) (running, stopped store.ReservationTotals) {
+	t.Helper()
+	totals := func() store.ReservationTotals {
+		t.Helper()
+		tot, err := st.ReservationTotals(t.Context())
+		if err != nil {
+			t.Fatalf("ReservationTotals: %v", err)
+		}
+		return tot
+	}
+	for _, to := range []string{"starting", "running"} {
+		if _, err := st.TransitionVM(t.Context(), store.TransitionInput{
+			VMID: vmID, To: to, OperationID: opID,
+		}); err != nil {
+			t.Fatalf("→%s: %v", to, err)
+		}
+	}
+	running = totals()
+	for _, step := range []struct {
+		to      string
+		release bool
+	}{{"stopping", false}, {"stopped", true}} {
+		if _, err := st.TransitionVM(t.Context(), store.TransitionInput{
+			VMID: vmID, To: step.to, OperationID: opID, ReleaseCompute: step.release,
+		}); err != nil {
+			t.Fatalf("→%s: %v", step.to, err)
+		}
+	}
+	return running, totals()
+}
+
+func TestVMStartReacquiresCompute(t *testing.T) {
+	// A stop hands the VM's RAM and vCPU back to admission. Starting it again
+	// must take them back, or admission under-counts by one VM's compute for
+	// every stop/start round trip and eventually over-admits the host.
+	st := openStore(t)
+	vmID := testUUID(1)
+	_, op := mustCreateVM(t, st, vmID, "cycle-vm", nil)
+
+	running, stopped := startCycle(t, st, vmID, op.OperationID)
+	if stopped.MemoryMiB != 0 || stopped.VCPU != 0 {
+		t.Fatalf("stopped: expected compute released, got mem=%d vcpu=%d", stopped.MemoryMiB, stopped.VCPU)
+	}
+
+	if _, err := st.TransitionVM(t.Context(), store.TransitionInput{
+		VMID: vmID, To: "starting", OperationID: op.OperationID,
+		AcquireCompute: true,
+		Admit:          func(store.ReservationTotals) error { return nil },
+	}); err != nil {
+		t.Fatalf("→starting: %v", err)
+	}
+
+	after, err := st.ReservationTotals(t.Context())
+	if err != nil {
+		t.Fatalf("ReservationTotals: %v", err)
+	}
+	if after.MemoryMiB != running.MemoryMiB {
+		t.Errorf("restarted memory = %d MiB, want %d MiB (the stop released it and the start must take it back)",
+			after.MemoryMiB, running.MemoryMiB)
+	}
+	if after.VCPU != running.VCPU {
+		t.Errorf("restarted vcpu = %d, want %d", after.VCPU, running.VCPU)
+	}
+	if after.DiskMiB != running.DiskMiB {
+		t.Errorf("restarted disk = %d MiB, want %d MiB (disk is never released before delete)",
+			after.DiskMiB, running.DiskMiB)
+	}
+}
+
+func TestVMStartRefusedWhenComputeNoLongerFits(t *testing.T) {
+	// The memory a stop released can be handed to another VM before the first
+	// one is started again. Admission must be consulted on the way back in, and
+	// a refusal must roll the whole transition back: no starting row, no
+	// reservation taken.
+	st := openStore(t)
+	vmID := testUUID(1)
+	_, op := mustCreateVM(t, st, vmID, "cycle-vm", nil)
+	_, stopped := startCycle(t, st, vmID, op.OperationID)
+
+	refusal := &store.AdmissionRefusal{
+		Cause:   "insufficient_capacity",
+		Message: "memory: need 2816 MiB, only 512 MiB free (usable 4096, reserved 3584)",
+	}
+	var seen store.ReservationTotals
+	_, err := st.TransitionVM(t.Context(), store.TransitionInput{
+		VMID: vmID, To: "starting", OperationID: op.OperationID,
+		AcquireCompute: true,
+		Admit: func(totals store.ReservationTotals) error {
+			seen = totals
+			return refusal
+		},
+	})
+	var got *store.AdmissionRefusal
+	if !errors.As(err, &got) {
+		t.Fatalf("TransitionVM err = %v, want *store.AdmissionRefusal", err)
+	}
+	if got.Message != refusal.Message {
+		t.Errorf("refusal message = %q, want %q", got.Message, refusal.Message)
+	}
+
+	// The callback must see the host without this VM's compute — that is what
+	// it has to fit back in. Counting the VM's own released memory as reserved
+	// would refuse every restart on a full-enough host.
+	if seen.MemoryMiB != stopped.MemoryMiB {
+		t.Errorf("Admit saw reserved memory = %d MiB, want %d MiB (this VM's compute is released)",
+			seen.MemoryMiB, stopped.MemoryMiB)
+	}
+
+	vm, err := st.GetVM(t.Context(), vmID)
+	if err != nil {
+		t.Fatalf("GetVM: %v", err)
+	}
+	if vm.ObservedState != "stopped" {
+		t.Errorf("observed_state = %q after a refused start, want %q", vm.ObservedState, "stopped")
+	}
+	after, err := st.ReservationTotals(t.Context())
+	if err != nil {
+		t.Fatalf("ReservationTotals: %v", err)
+	}
+	if after.MemoryMiB != stopped.MemoryMiB || after.VCPU != stopped.VCPU {
+		t.Errorf("a refused start took compute anyway: mem=%d vcpu=%d, want mem=%d vcpu=%d",
+			after.MemoryMiB, after.VCPU, stopped.MemoryMiB, stopped.VCPU)
+	}
+}

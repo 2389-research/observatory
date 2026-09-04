@@ -1147,3 +1147,133 @@ func TestHostStatusAdmissionMatchesReservationMath(t *testing.T) {
 			grew, want, memoryMiB, before.Admission.ReservePerVMHostOverheadMiB)
 	}
 }
+
+// TestVMStartRefusedWhenMemoryWentElsewhere: the memory a stop releases is real
+// free memory that another VM may take, so the start that wants it back can be
+// refused. The refusal must reach the caller as the same 409 a create gets —
+// insufficient_capacity, naming the shortfall — not a 500 and not a silent
+// success that leaves the host overcommitted.
+func TestVMStartRefusedWhenMemoryWentElsewhere(t *testing.T) {
+	// Tiny host: exactly two 512 MiB VMs fit.
+	st, err := store.Open(filepath.Join(t.TempDir(), "events.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	eng := situation.New(st, situation.Config{
+		QueueMaxItems: 10, SituationMaxResponseBytes: 65536,
+	})
+	fake := runtimetest.NewFake()
+	mgr, err := runtime.NewManager(st, fake, runtime.ManagerConfig{
+		Admission: config.Admission{
+			CPUOvercommitRatio:    4.0,
+			MaxParallelProvisions: 1,
+		},
+		VMDefaults: config.VMDefaults{MemoryMiB: 512, VCPUCount: 1, RootDiskMiB: 1024, WorkspaceDiskMiB: 1024},
+		Templates:  map[string]runtime.Template{testTemplateDef.TemplateID: testTemplateDef},
+		Host:       runtime.HostResources{TotalMemoryMiB: 1024, CPUCores: 4, StateDiskFreeMiB: 100 * 1024},
+	})
+	if err != nil {
+		t.Fatalf("create manager: %v", err)
+	}
+	t.Cleanup(func() { mgr.Close() })
+	srv := httptest.NewServer(api.New(st, eng, mgr, api.AuthConfig{Enabled: false}, nil, nil))
+	t.Cleanup(srv.Close)
+
+	create := func(name string) string {
+		t.Helper()
+		var resp map[string]any
+		doRequest(t, http.MethodPost, srv.URL+"/api/v1/vms",
+			map[string]any{"name": name, "template_id": testTemplateDef.TemplateID},
+			http.StatusCreated, &resp)
+		vmID, _ := resp["vm"].(map[string]any)["vm_id"].(string)
+		opID, _ := resp["operation"].(map[string]any)["operation_id"].(string)
+		pollOpState(t, srv.URL, opID, "succeeded")
+		return vmID
+	}
+	revisionOf := func(vmID string) any {
+		t.Helper()
+		var vm map[string]any
+		getJSON(t, srv.URL+"/api/v1/vms/"+vmID, http.StatusOK, &vm)
+		return vm["revision"]
+	}
+
+	first := create("first")
+	create("second") // host memory now full
+
+	doRequest(t, http.MethodPost, srv.URL+"/api/v1/vms/"+first+"/actions",
+		map[string]any{"action": "stop", "expected_revision": revisionOf(first)},
+		http.StatusOK, nil)
+
+	// The freed 512 MiB is genuinely free: a new VM takes it.
+	create("third")
+
+	var e api.Error
+	doRequest(t, http.MethodPost, srv.URL+"/api/v1/vms/"+first+"/actions",
+		map[string]any{"action": "start", "expected_revision": revisionOf(first)},
+		http.StatusConflict, &e)
+	requireTeaching(t, e, "insufficient_capacity")
+	if !strings.Contains(e.Message, "memory") {
+		t.Errorf("refusal message = %q, want the memory dimension named", e.Message)
+	}
+
+	// A refused start leaves the VM where it was, not parked in "starting".
+	var after map[string]any
+	getJSON(t, srv.URL+"/api/v1/vms/"+first, http.StatusOK, &after)
+	if state, _ := after["observed_state"].(string); state != "stopped" {
+		t.Errorf("observed_state after a refused start = %q, want stopped", state)
+	}
+}
+
+// TestHostStatusSurvivesStopStart: the shape of the defect a real browser found
+// on 2026-09-04 — three running VMs, two VMs' worth of reserved memory. Every
+// number GET /host/status publishes must come back to where it started after a
+// VM makes a full stop/start round trip, because that is the page operators read
+// and the sum admission charges against.
+func TestHostStatusSurvivesStopStart(t *testing.T) {
+	srv, _, fake := newTemplateServer(t)
+	vmID := createRunningVM(t, srv.URL, fake)
+
+	capacity := func(when string) map[string]any {
+		t.Helper()
+		var got map[string]any
+		getJSON(t, srv.URL+"/api/v1/host/status", http.StatusOK, &got)
+		cap, ok := got["capacity"].(map[string]any)
+		if !ok {
+			t.Fatalf("host/status %s: missing capacity block", when)
+		}
+		return cap
+	}
+	revisionOf := func() any {
+		t.Helper()
+		var vm map[string]any
+		getJSON(t, srv.URL+"/api/v1/vms/"+vmID, http.StatusOK, &vm)
+		return vm["revision"]
+	}
+
+	before := capacity("while running")
+
+	doRequest(t, http.MethodPost, srv.URL+"/api/v1/vms/"+vmID+"/actions",
+		map[string]any{"action": "stop", "expected_revision": revisionOf()},
+		http.StatusOK, nil)
+	stopped := capacity("while stopped")
+	if fmt.Sprint(stopped["reserved_memory_mib"]) == fmt.Sprint(before["reserved_memory_mib"]) {
+		t.Fatalf("stop released no memory: reserved_memory_mib stayed %v", stopped["reserved_memory_mib"])
+	}
+
+	doRequest(t, http.MethodPost, srv.URL+"/api/v1/vms/"+vmID+"/actions",
+		map[string]any{"action": "start", "expected_revision": revisionOf()},
+		http.StatusOK, nil)
+	after := capacity("after the restart")
+
+	for _, field := range []string{
+		"usable_memory_mib", "reserved_memory_mib", "free_memory_mib",
+		"usable_vcpu", "reserved_vcpu", "free_vcpu",
+		"usable_disk_mib", "reserved_disk_mib", "free_disk_mib",
+		"active_vms",
+	} {
+		if fmt.Sprint(after[field]) != fmt.Sprint(before[field]) {
+			t.Errorf("%s after a stop/start = %v, want %v", field, after[field], before[field])
+		}
+	}
+}

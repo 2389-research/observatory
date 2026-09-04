@@ -2042,6 +2042,30 @@ func waitForFakeCall(t *testing.T, fk *runtimetest.Fake, vmID, method string) {
 	}
 }
 
+// waitForObservedState blocks until vmID's observed_state reaches want. Unlike
+// mgr.Close(), it leaves the manager alive: the start action runs on a context
+// detached from its parent but still tied to the manager's, so a closed manager
+// cancels every later start before its first query.
+func waitForObservedState(t *testing.T, st *store.Store, vmID, want string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	last := ""
+	for {
+		vm, err := st.GetVM(t.Context(), vmID)
+		if err != nil {
+			t.Fatalf("GetVM while waiting for %s: %v", want, err)
+		}
+		if vm.ObservedState == want {
+			return
+		}
+		last = vm.ObservedState
+		if time.Now().After(deadline) {
+			t.Fatalf("vm %s never reached %s (last observed %s)", vmID, want, last)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
 // lastStateChangeReason returns the reason of the newest vm.state_changed event
 // among the first 100 for vmID — the query orders ascending, so the newest event
 // is the last of that page rather than of the whole history. Test VMs never reach
@@ -2169,5 +2193,177 @@ func TestStopActionOutlivesConcurrentVMMExitNotice(t *testing.T) {
 	// The determination only rt.Stop knows must survive on the terminal transition.
 	if got := lastStateChangeReason(t, st, vm.VMID); got != "graceful_stop" {
 		t.Errorf("terminal state-change reason: want graceful_stop, got %q", got)
+	}
+}
+
+func TestManagerStopStartRestoresCapacity(t *testing.T) {
+	// A stop hands the VM's compute back to admission and a start must take it
+	// again. Left unfixed, every stop/start round trip permanently hides one
+	// VM's RAM and vCPU from the check that keeps the host from overcommitting.
+	st := openStoreForManager(t)
+	fk := runtimetest.NewFake()
+	mgr := newManager(t, st, fk)
+
+	vm, _, _, err := mgr.CreateVM(t.Context(), "local_operator", createReq("cycle"))
+	if err != nil {
+		t.Fatalf("CreateVM: %v", err)
+	}
+	waitForObservedState(t, st, vm.VMID, "running")
+	vmID := vm.VMID
+
+	capacity := func(when string) runtime.CapacitySnapshot {
+		t.Helper()
+		snap, err := mgr.Capacity(t.Context())
+		if err != nil {
+			t.Fatalf("Capacity %s: %v", when, err)
+		}
+		return snap
+	}
+
+	running := capacity("while running")
+	if _, _, err := mgr.Action(t.Context(), vmID, "stop", nil); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	stopped := capacity("while stopped")
+	if stopped.ReservedMemoryMiB >= running.ReservedMemoryMiB {
+		t.Fatalf("stop released nothing: reserved memory %d MiB before, %d MiB after",
+			running.ReservedMemoryMiB, stopped.ReservedMemoryMiB)
+	}
+
+	if _, _, err := mgr.Action(t.Context(), vmID, "start", nil); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	restarted := capacity("after the restart")
+
+	if restarted.ReservedMemoryMiB != running.ReservedMemoryMiB {
+		t.Errorf("reserved memory after restart = %d MiB, want %d MiB",
+			restarted.ReservedMemoryMiB, running.ReservedMemoryMiB)
+	}
+	if restarted.ReservedVCPU != running.ReservedVCPU {
+		t.Errorf("reserved vcpu after restart = %d, want %d",
+			restarted.ReservedVCPU, running.ReservedVCPU)
+	}
+	if restarted.FreeMemoryMiB != running.FreeMemoryMiB {
+		t.Errorf("free memory after restart = %d MiB, want %d MiB — the page and the "+
+			"admission check read this number", restarted.FreeMemoryMiB, running.FreeMemoryMiB)
+	}
+	if restarted.ActiveVMs != running.ActiveVMs {
+		t.Errorf("active_vms after restart = %d, want %d", restarted.ActiveVMs, running.ActiveVMs)
+	}
+
+	res, err := st.GetReservation(t.Context(), vmID)
+	if err != nil {
+		t.Fatalf("GetReservation: %v", err)
+	}
+	if res.ComputeReleased {
+		t.Error("compute_released is still set on a running VM")
+	}
+}
+
+func TestManagerStartRefusedWhenCapacityWentElsewhere(t *testing.T) {
+	// The memory a stop released is real, free memory: another VM may take it.
+	// The start that wants it back has to ask, and a refusal must leave the VM
+	// stopped with a durable operation naming the shortfall — not parked in
+	// "starting" with a launch already under way.
+	st := openStoreForManager(t)
+	fk := runtimetest.NewFake()
+
+	// Room for exactly two VMs of the default size (2048 + 768 overhead each).
+	cfg := defaultCfg()
+	cfg.Host.TotalMemoryMiB = 2 * (2048 + 768)
+	mgr, err := runtime.NewManager(st, fk, cfg)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	t.Cleanup(func() { mgr.Close() })
+
+	first, _, _, err := mgr.CreateVM(t.Context(), "local_operator", createReq("first"))
+	if err != nil {
+		t.Fatalf("CreateVM first: %v", err)
+	}
+	second, _, _, err := mgr.CreateVM(t.Context(), "local_operator", createReq("second"))
+	if err != nil {
+		t.Fatalf("CreateVM second: %v", err)
+	}
+	waitForObservedState(t, st, first.VMID, "running")
+	waitForObservedState(t, st, second.VMID, "running")
+
+	// Stop the first, then spend its memory on a third VM.
+	if _, _, err := mgr.Action(t.Context(), first.VMID, "stop", nil); err != nil {
+		t.Fatalf("stop first: %v", err)
+	}
+	if _, _, _, err := mgr.CreateVM(t.Context(), "local_operator", createReq("third")); err != nil {
+		t.Fatalf("CreateVM third should fit in the memory the stop released: %v", err)
+	}
+
+	_, op, err := mgr.Action(t.Context(), first.VMID, "start", nil)
+	var refusal *store.AdmissionRefusal
+	if !errors.As(err, &refusal) {
+		t.Fatalf("start err = %v, want *store.AdmissionRefusal — the host has no room left", err)
+	}
+	if !strings.Contains(refusal.Message, "memory") {
+		t.Errorf("refusal names %q, want the memory dimension", refusal.Message)
+	}
+
+	back, err := st.GetVM(t.Context(), first.VMID)
+	if err != nil {
+		t.Fatalf("GetVM: %v", err)
+	}
+	if back.ObservedState != "stopped" {
+		t.Errorf("observed_state after a refused start = %q, want stopped", back.ObservedState)
+	}
+	if op == nil {
+		t.Fatal("a refused start recorded no operation")
+	}
+	if op.State != "failed" {
+		t.Errorf("operation state = %q, want failed", op.State)
+	}
+	if op.ErrorCause == nil || *op.ErrorCause != "insufficient_capacity" {
+		got := "<nil>"
+		if op.ErrorCause != nil {
+			got = *op.ErrorCause
+		}
+		t.Errorf("operation error_cause = %s, want insufficient_capacity", got)
+	}
+}
+
+func TestManagerStartDoesNotDoubleCountDisk(t *testing.T) {
+	// A stop releases compute and keeps disk, so the reservation row still holds
+	// this VM's disk while it is stopped. The start must ask admission for
+	// memory and vCPU only: asking for the disk again would count it twice and
+	// refuse a restart that fits on a host with no spare disk at all.
+	st := openStoreForManager(t)
+	fk := runtimetest.NewFake()
+
+	cfg := defaultCfg()
+	// Room for exactly one VM's disk (8192 root + 10240 workspace) and nothing more.
+	cfg.Host.StateDiskFreeMiB = cfg.VMDefaults.RootDiskMiB + cfg.VMDefaults.WorkspaceDiskMiB
+	mgr, err := runtime.NewManager(st, fk, cfg)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	t.Cleanup(func() { mgr.Close() })
+
+	vm, _, _, err := mgr.CreateVM(t.Context(), "local_operator", createReq("tight-disk"))
+	if err != nil {
+		t.Fatalf("CreateVM: %v", err)
+	}
+	waitForObservedState(t, st, vm.VMID, "running")
+
+	if _, _, err := mgr.Action(t.Context(), vm.VMID, "stop", nil); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if _, _, err := mgr.Action(t.Context(), vm.VMID, "start", nil); err != nil {
+		t.Fatalf("start on a disk-full host: %v — the VM's own disk was never released, "+
+			"so the start must not ask for it again", err)
+	}
+
+	snap, err := mgr.Capacity(t.Context())
+	if err != nil {
+		t.Fatalf("Capacity: %v", err)
+	}
+	wantDisk := cfg.VMDefaults.RootDiskMiB + cfg.VMDefaults.WorkspaceDiskMiB
+	if snap.ReservedDiskMiB != wantDisk {
+		t.Errorf("reserved disk after a stop/start = %d MiB, want %d MiB", snap.ReservedDiskMiB, wantDisk)
 	}
 }

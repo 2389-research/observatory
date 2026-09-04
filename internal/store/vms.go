@@ -231,8 +231,14 @@ type TransitionInput struct {
 	FailureStage     *string // set when transitioning to "failed"
 	FailureReason    *string
 	ReleaseCompute   bool    // true on stopped: frees RAM+CPU but keeps disk
+	AcquireCompute   bool    // true on a restart: takes RAM+CPU back, Admit permitting
 	ReleaseAll       bool    // true on deleted: frees everything
 	BootID           *string // non-nil when a new boot identity is established
+
+	// Admit gates AcquireCompute, evaluated inside the tx against totals that
+	// exclude this VM's own released compute — the room it has to fit back
+	// into. Required whenever AcquireCompute is set; ignored otherwise.
+	Admit func(ReservationTotals) error
 }
 
 // OperationUpdate advances an operation's phase/state.
@@ -551,6 +557,24 @@ func (s *Store) TransitionVM(ctx context.Context, in TransitionInput) (*VM, erro
 		return nil, &InvalidTransitionError{From: current.ObservedState, To: in.To}
 	}
 
+	// A legal transition still has to be affordable. Taking compute back is the
+	// only transition that asks the host for anything, and it asks inside this
+	// tx for the same reason a create does (AT-012): two restarts must not both
+	// be admitted against the same free memory. A refusal returns before any
+	// write, so the VM stays where it was rather than parking in "starting".
+	if in.AcquireCompute {
+		if in.Admit == nil {
+			return nil, errors.New("AcquireCompute requires an Admit callback")
+		}
+		totals, err := reservationTotalsInTx(ctx, tx)
+		if err != nil {
+			return nil, err
+		}
+		if err := in.Admit(totals); err != nil {
+			return nil, err
+		}
+	}
+
 	newRevision := current.Revision + 1
 	desired := current.DesiredState
 	if in.DesiredState != nil {
@@ -585,6 +609,12 @@ func (s *Store) TransitionVM(ctx context.Context, in TransitionInput) (*VM, erro
 			`UPDATE reservations SET compute_released = 1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE vm_id = ?`,
 			in.VMID); err != nil {
 			return nil, fmt.Errorf("release compute: %w", err)
+		}
+	} else if in.AcquireCompute {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE reservations SET compute_released = 0, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE vm_id = ?`,
+			in.VMID); err != nil {
+			return nil, fmt.Errorf("acquire compute: %w", err)
 		}
 	}
 

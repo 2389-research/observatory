@@ -761,6 +761,16 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 		// its stage dir already written.
 		startCtx, startCancel := m.detachedContext(ctx, launchBudget)
 		defer startCancel()
+		// The stop handed this VM's RAM and vCPU back to the host, and the start
+		// has to ask for them again — the memory may have gone to another VM in
+		// the meantime. Ask for exactly what the reservation row holds rather
+		// than recomputing from the VM row and current config: that row is what
+		// admission sums, so re-acquiring anything else would admit against one
+		// number and hold another. Disk is 0 because the row never released it.
+		res, err := m.st.GetReservation(startCtx, vmID)
+		if err != nil {
+			return m.failAction(startCtx, vmID, opID, action, fmt.Errorf("read reservation: %w", err))
+		}
 		bootID := uuid.NewString()
 		wantRunning := "running"
 		updVM, err := m.st.TransitionVM(startCtx, store.TransitionInput{
@@ -771,6 +781,10 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 			OperationID:      opID,
 			DesiredState:     &wantRunning,
 			BootID:           &bootID,
+			AcquireCompute:   true,
+			Admit: func(totals store.ReservationTotals) error {
+				return m.policy.Admit(totals, res.MemoryTotalMiB, res.VCPU, 0)
+			},
 		})
 		if err != nil {
 			return m.failAction(startCtx, vmID, opID, action, err)
@@ -936,8 +950,18 @@ func (m *Manager) failAction(ctx context.Context, vmID string, opID int64, actio
 	ctx, cancel := m.recoveryContext(ctx)
 	defer cancel()
 
+	// A typed refusal already names its own cause and the shortfall that
+	// produced it; flattening those to "action_failed" would throw away the
+	// only evidence of why the host said no, and the API maps causes to status
+	// codes. The create path persists the same two fields (CreateVMWithOperation),
+	// so a refused start and a refused create leave the same durable record.
 	causeStr := "action_failed"
 	msg := cause.Error()
+	var refusal *store.AdmissionRefusal
+	if errors.As(cause, &refusal) {
+		causeStr = refusal.Cause
+		msg = refusal.Message
+	}
 	op, _ := m.st.UpdateOperation(ctx, store.OperationUpdate{
 		OperationID:  opID,
 		Phase:        action,
