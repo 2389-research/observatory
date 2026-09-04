@@ -10,3 +10,5 @@ images/dist/
 
 # node deps for web/; dist/ is committed on purpose (embedded in the binary).
 web/node_modules/
+# tsc's incremental build cache: machine-local, rewritten by every typecheck.
+web/tsconfig.tsbuildinfo
