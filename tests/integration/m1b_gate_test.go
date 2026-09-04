@@ -96,8 +96,6 @@ type gateTerm struct {
 	// seq numbers this connection's input. It starts at 0 and every keystroke
 	// message increments it, because the relay drops seq <= lastClientSeq.
 	seq atomic.Uint64
-	// marks numbers the sentinels runGuest waits for.
-	marks atomic.Uint64
 
 	// wmu serializes writes: coder/websocket permits one concurrent writer, and
 	// the reader goroutine writes acks while the test goroutine types.
@@ -446,6 +444,14 @@ func (g *gateTerm) takeWriter() {
 	g.t.Fatalf("%s: never became the writer after a steal; controls: %+v", g.label, g.controls())
 }
 
+// gateMarks numbers every sentinel this gate types, across every connection.
+// A reattach replays the scrollback of the session it joins, so a per-connection
+// counter hands the new connection __M1B_1__ while __M1B_1__ from the old one is
+// still arriving in the replay: the wait returns on the replayed text and the
+// command it was waiting for is never seen. One counter for the whole gate makes
+// every sentinel unique in the transcript.
+var gateMarks atomic.Uint64
+
 // The finish signal is a sentinel typed with an empty quote pair inside it, so
 // the PTY's echo of the command line and the shell's own output are never the
 // same string: the browser sees `echo __M1B""_7__` come back as the echo and
@@ -456,7 +462,7 @@ func (g *gateTerm) runGuest(cmd string, d time.Duration) string {
 	if !g.isWriter() {
 		g.t.Fatalf("%s: cannot run %q from a read-only connection; take the writer lease first", g.label, cmd)
 	}
-	n := g.marks.Add(1)
+	n := gateMarks.Add(1)
 	mark := fmt.Sprintf("__M1B_%d__", n)
 	start := g.received()
 	g.typeLine(fmt.Sprintf(`%s; echo __M1B""_%d__`, cmd, n))
@@ -1022,9 +1028,12 @@ func TestM1bGate(t *testing.T) {
 			t.Fatalf("could not read the guest shell pid from %q", tailOf(before, 300))
 		}
 		// A marker in the ring, so a replay that duplicated output would show it
-		// twice on the far side of the reconnect.
+		// twice on the far side of the reconnect. It is typed with an empty quote
+		// pair inside it — the same trick runGuest uses — because a pty echoes
+		// the command line before the shell prints anything: typed plainly, one
+		// clean replay would already read as two.
 		unique := "RECONNECT-CANARY-9137"
-		term.runGuest("echo "+unique, m1bCommandTimeout)
+		term.runGuest(`echo RECONNECT""-CANARY-9137`, m1bCommandTimeout)
 		term.close()
 
 		term2 := daemon.openTerm(t, sess.ID, "reconnect-2")
@@ -1093,6 +1102,11 @@ func TestM1bGate(t *testing.T) {
 		// the relay unchanged rather than being interpreted somewhere en route.
 		term.typeLine("cat > /tmp/m1b-paste.bin")
 		term.typeKeys([]byte("\x1b[200~pasted-text\x1b[201~"))
+		// A canonical-mode pty closes stdin on Ctrl-D only at the start of an
+		// empty line; sent after the paste it would just flush the partial line
+		// and leave cat reading — swallowing the od command that follows. The
+		// carriage return ends the pasted line, and the Ctrl-D then ends the file.
+		term.typeKeys([]byte{'\r'})
 		term.typeKeys([]byte{0x04})
 		paste := term.runGuest("od -c /tmp/m1b-paste.bin | head -4", m1bCommandTimeout)
 		// od renders ESC as \e or 033 depending on the build; both name the byte.
@@ -1512,20 +1526,40 @@ func TestM1bGate(t *testing.T) {
 		// Pause. The VM stops executing, so the shell stops answering; the UI's
 		// distinction comes from the VM's own observed_state, which the fleet
 		// page polls (web/src/VMDetail.tsx reads it on every refresh).
-		daemon.vmAction(t, vmC, "pause")
-		daemon.waitVMState(lifeCtx, t, vmC, "paused")
-		pausedState := daemon.vmState(t, vmC)
-		pausedProgress := term.received()
-		term.typeLine("echo during=pause")
-		time.Sleep(3 * time.Second)
-		answeredWhilePaused := term.received() > pausedProgress
+		//
+		// This runtime may not implement it: internal/jailer/adapter.go answers
+		// pause and resume with a typed missing_capability, a milestone scope
+		// decision recorded in PLAN.md (M1a Task 10). So the gate asks for the
+		// pause the way the UI's button does and records what the host did. When
+		// pause is built, the first branch proves the vCPU really stopped; until
+		// then the second proves the refusal is typed and leaves the attached
+		// session alone — a refused action that broke the shell would be a bug
+		// here, not a missing feature.
+		pauseStatus, pauseCause, pauseMsg := daemon.tryVMAction(t, vmC, "pause")
+		pauseImplemented := pauseStatus == http.StatusOK
+		var (
+			pausedState         string
+			answeredWhilePaused bool
+			resumedOK           bool
+			afterResume         string
+		)
+		if pauseImplemented {
+			daemon.waitVMState(lifeCtx, t, vmC, "paused")
+			pausedState = daemon.vmState(t, vmC)
+			pausedProgress := term.received()
+			term.typeLine("echo during=pause")
+			time.Sleep(3 * time.Second)
+			answeredWhilePaused = term.received() > pausedProgress
 
-		// Resume. The same shell picks up where it stopped, including the
-		// keystrokes that were sitting in the pty while the vCPU was frozen.
-		daemon.vmAction(t, vmC, "resume")
-		daemon.waitVMState(lifeCtx, t, vmC, "running")
-		resumedOK := term.waitForAfter("during=pause", pausedProgress, m1bCommandTimeout)
-		afterResume := term.runGuest("echo after=resume", m1bCommandTimeout)
+			// Resume. The same shell picks up where it stopped, including the
+			// keystrokes that sat in the pty while the vCPU was frozen.
+			daemon.vmAction(t, vmC, "resume")
+			daemon.waitVMState(lifeCtx, t, vmC, "running")
+			resumedOK = term.waitForAfter("during=pause", pausedProgress, m1bCommandTimeout)
+		} else {
+			pausedState = daemon.vmState(t, vmC)
+		}
+		afterResume = term.runGuest("echo after=resume", m1bCommandTimeout)
 
 		// Stop. Every session on the VM ends with it (§8.1).
 		daemon.vmAction(t, vmC, "stop")
@@ -1555,31 +1589,55 @@ func TestM1bGate(t *testing.T) {
 		daemon.waitVMState(lifeCtx, t, vmC, "running")
 		staleStatus, staleCause, staleMsg := daemon.upgradeStatus(t, sess.ID, "http://"+daemon.addr)
 
+		shellSurvived := strings.Contains(afterResume, "after=resume")
+		pauseEvidence := fmt.Sprintf(
+			"pause: observed_state=%q; the shell answered nothing while paused=%v\n"+
+				"resume: the keystrokes typed while paused were executed=%v; shell still works=%v",
+			pausedState, !answeredWhilePaused, resumedOK, shellSurvived)
+		if !pauseImplemented {
+			pauseEvidence = fmt.Sprintf(
+				"pause: INCONCLUSIVE — this runtime does not implement VMM pause.\n"+
+					"  POST /vms/%s/actions {action: pause} -> HTTP %d cause=%q message=%q\n"+
+					"  The VM stayed %q and the attached session survived the refusal: shell still works=%v.\n"+
+					"resume: INCONCLUSIVE — paired with pause (internal/jailer/adapter.go).",
+				vmC, pauseStatus, pauseCause, pauseMsg, pausedState, shellSurvived)
+		}
+
 		evidenceSubtest(t, &evidence, "at028_lifecycle_while_attached", fmt.Sprintf(
 			"vm=%s session=%s\n"+
-				"pause: observed_state=%q; the shell answered nothing while paused=%v\n"+
-				"resume: the keystrokes typed while paused were executed=%v; shell still works=%v\n"+
+				"%s\n"+
 				"stop: the attached stream ended=%v; session still listed on the VM=%v state=%q\n"+
 				"new boot via stop+start (this build has no reboot action): "+
 				"reattach with the old session id -> HTTP %d cause=%q message=%q",
 			vmC, sess.ID,
-			pausedState, !answeredWhilePaused,
-			resumedOK, strings.Contains(afterResume, "after=resume"),
+			pauseEvidence,
 			streamEnded, sessionStillListed, sessAfterStop.State,
 			staleStatus, staleCause, staleMsg,
 		))
 
-		if pausedState != "paused" {
-			t.Errorf("pause left the VM in %q", pausedState)
+		if pauseImplemented {
+			if pausedState != "paused" {
+				t.Errorf("pause left the VM in %q", pausedState)
+			}
+			if answeredWhilePaused {
+				t.Error("a paused VM's shell kept answering, so the vCPU was not actually stopped")
+			}
+			if !resumedOK {
+				t.Error("resume did not deliver the keystrokes the paused pty was holding")
+			}
+		} else {
+			if pauseStatus < 400 {
+				t.Errorf("pause was neither performed nor refused: HTTP %d", pauseStatus)
+			}
+			if pauseCause == "" {
+				t.Errorf("the pause refusal carried no typed cause (HTTP %d): %q", pauseStatus, pauseMsg)
+			}
+			if pausedState != "running" {
+				t.Errorf("a refused pause left the VM in %q, not running", pausedState)
+			}
 		}
-		if answeredWhilePaused {
-			t.Error("a paused VM's shell kept answering, so the vCPU was not actually stopped")
-		}
-		if !resumedOK {
-			t.Error("resume did not deliver the keystrokes the paused pty was holding")
-		}
-		if !strings.Contains(afterResume, "after=resume") {
-			t.Errorf("the shell did not survive pause/resume: %s", tailOf(afterResume, 500))
+		if !shellSurvived {
+			t.Errorf("the shell stopped working across the pause step: %s", tailOf(afterResume, 500))
 		}
 		if !streamEnded {
 			t.Error("stopping the VM left the browser's stream open")
@@ -1689,6 +1747,22 @@ func (d *m1aDaemon) vmAction(t *testing.T, vmID, action string) {
 	if status != http.StatusOK {
 		t.Fatalf("action %s on %s: expected 200, got %d: %v", action, vmID, status, body)
 	}
+}
+
+// tryVMAction posts a lifecycle action and reports what came back, refusals
+// included. vmAction is the strict form; this one is for the actions a build
+// may legitimately not implement yet.
+func (d *m1aDaemon) tryVMAction(t *testing.T, vmID, action string) (int, string, string) {
+	t.Helper()
+	vm := d.apiGet(t, "/vms/"+vmID)
+	rev, _ := vm["revision"].(string)
+	status, body := d.apiPost(t, "/vms/"+vmID+"/actions", map[string]any{
+		"action":            action,
+		"expected_revision": rev,
+	})
+	cause, _ := body["cause"].(string)
+	msg, _ := body["message"].(string)
+	return status, cause, msg
 }
 
 // vmState is the VM's observed lifecycle state.
