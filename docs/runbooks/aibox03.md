@@ -113,3 +113,32 @@ When a new release is needed:
 4. Update `runtime.lock.json`: `firecracker.version`, `firecracker.release_url`, `firecracker.sha256`, `jailer.sha256`.
 5. Check `docs/kernel-policy.md` in the new tagged source for the `min_kernel` host support table; update `host_support.min_kernel` if it changed.
 6. Commit, then run `scripts/linux 'true'` to sync, then ask Doctor Biz to re-run `setup.sh`.
+
+## Rebuilding the guest rootfs
+
+`images/dist/` is build output that lives only on aibox03 — `scripts/linux`
+protects it from the rsync (`--filter='P images/dist/'`), so nothing in the repo
+carries the image and nothing you do locally can overwrite it. The rebuild is
+the one sanctioned write there.
+
+The image embeds `vmobs-guestd` built from the tree at rebuild time, so a guestd
+change reaches a VM only through a rebuild. Package set and base image are
+pinned in `images/rootfs/pins.env`.
+
+1. Check free disk on aibox03: the build wants headroom and the live gate needs
+   about 21 GB. `df -h /`.
+2. `scripts/linux 'bash images/rootfs/build.sh'`. Docker only, no sudo. Runs in
+   a few minutes and logs to `images/dist/logs/rootfs.log`.
+3. Verify from `images/dist/rootfs.inventory.txt`, not from the build's own
+   chatter: the packages the terminal needs are `bash`, `procps` (`top`),
+   `ncurses-base` (terminfo) and `vim-tiny`. `grep -E '^ii +(vim-tiny|bash|procps|ncurses-base) '`.
+4. Confirm the image's guestd is the one you just built:
+   `images/dist/rootfs-unpacked/usr/local/bin/vmobs-guestd -h` prints its flags,
+   and the binary is a host-arch executable you can run safely — it parses flags
+   before it touches a config device.
+5. Re-pin `runtime.lock.json`: `root_image.sha256` from
+   `images/dist/rootfs.pins` (`ROOTFS_SHA256`). Change `base_image_ref` and
+   `apt_snapshot` too if `pins.env` moved.
+6. Boot one VM through the fixture path and confirm it reaches `running`. A
+   rootfs that does not boot is a blocker, not a footnote.
+7. Commit the lock change. The image itself is never committed.
