@@ -508,9 +508,19 @@ func (g *gateTerm) runFullScreen(cmd, quit string, wantAny []string, d time.Dura
 	g.typeKeys([]byte(quit))
 	// The shell answering again is what proves the program exited rather than
 	// leaving the terminal wedged in its alternate screen.
+	//
+	// The probe is retyped until it is answered: a full-screen program restores
+	// the terminal on its way out with a flush that discards whatever is already
+	// sitting in the pty's input queue, so a probe typed into the tail of an exit
+	// goes with it. Both vi and top did exactly that — they painted, quit, and
+	// left the prompt back on screen with the probe gone. Retyping costs one
+	// extra line when the first probe lands and removes the race when it does not.
 	back := g.received()
-	g.typeLine("echo BACK\"\"-FROM-FS")
-	returned := g.waitForAfter("BACK-FROM-FS", back, d)
+	returned := false
+	for deadline := time.Now().Add(d); !returned && time.Now().Before(deadline); {
+		g.typeLine("echo BACK\"\"-FROM-FS")
+		returned = g.waitForAfter("BACK-FROM-FS", back, 2*time.Second)
+	}
 	if !returned {
 		g.t.Logf("%s: the shell did not answer after quitting %q:\n%s",
 			g.label, cmd, tailOf(g.output()[back:], 800))

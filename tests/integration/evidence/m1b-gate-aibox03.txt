@@ -1,0 +1,102 @@
+# M1b gate evidence
+# hostname: aibox03
+# date: 2026-09-04T19:52:56Z
+# pid: 2610334
+# daemon pid: 2610509
+# require_authentication: true (operator "gate-operator")
+# vm_a: 7e4efb5a-4e35-4840-bb24-2f0e6d8e110f
+# vm_b: 7e5ef6db-0ec3-4a6e-ae10-b72ab1aa8891
+
+## Subtest: at025_session_isolation
+vm_a=7e4efb5a-4e35-4840-bb24-2f0e6d8e110f session_a=d1709442-479f-4c0c-a7c6-2fbabaf219c7 vm_b=7e5ef6db-0ec3-4a6e-ae10-b72ab1aa8891 session_b=0551a106-2455-4c28-b3bc-b98b3fdb8714
+cross_vm_leak=false marker_a_seen_in_a=true marker_b_seen_in_b=true
+same_vm sessions=f6630117-e244-483e-803e-086877f159cf,c7b07344-5d03-4cfd-96fa-79ae2c184068 pid1=701 pid2=702 cwd1="/tmp/one" cwd2="/tmp/two"
+resize session1 -> 40x120; stty size: session1="40 120" session2="24 80"
+
+## Subtest: at019_real_guest_pty
+session=ac3809f3-4ca6-49b3-801f-c763555f97b8 guest_pid=707
+guest tty="/dev/pts/0" hostname="localhost" kernel="6.1.186"
+host hostname="aibox03" kernel="6.8.0-138-generic"
+guest /dev/vd*="/dev/vda  /dev/vdb  /dev/vdc"
+guest /proc/self/cgroup="0::/system.slice/guestd.service"
+job control: "sleep 120 & jobs; echo __M1B\"\"_17__\r\n[1] + Running                    sleep 120"
+foreground cat: 2 occurrences of the typed line (echo + program output)
+vmobsd descendants before="vmobs-runner=2" after="vmobs-runner=2" (no shell in either)
+
+## Subtest: at022_reconnect_same_shell
+session=ce2d8527-05d1-407c-9ad6-77e028aa3b75 pid_before=715 pid_after=715 canary_occurrences_after_reattach=1
+writer_on_reattach=false (lease grace window held by the departed connection), steal succeeded
+
+## Subtest: at020_fullscreen_and_encoding
+session=a48a9fb9-698f-4314-8cd4-0b769974438b
+resize: 40 120->"40 120" 30 100->"30 100" 50 132->"50 132" 24 80->"24 80"
+utf8 café/日本=true color CSI=true alt-screen 1049h/l=true
+bracketed paste reached the guest verbatim=true
+vi drew a screen and exited=true; top drew a screen and exited=true
+od -c of the pasted file: cat > /tmp/m1b-paste.bin
+^[[200~pasted-text^[[201~
+# od -c /tmp/m1b-paste.bin | head -4; echo __M1B""_29__
+0000000 033   [   2   0   0   ~   p   a   s   t   e   d   -   t   e   x
+0000020   t 033   [   2   0   1   ~  \n
+0000030
+
+## Subtest: at021_signals_and_jobs
+session=86b45b7f-38ba-4bf4-9916-1fd4b7aee0e9
+ctrl-c interrupted the foreground process and left the shell alive=true
+ctrl-z jobs: "jobs; echo __M1B\"\"_31__\r\n[1] + Stopped                    sleep 300"
+after bg, jobs: "jobs; echo __M1B\"\"_33__\r\n[1] + Running                    sleep 300"
+ctrl-d on session 4e2a7ab4-e14c-46fe-9f61-a062f134c6db closed it=true reason="exited" exit_code=0
+
+## Subtest: at023_replay_gap
+session=2e1fe016-86ea-488c-adb2-a3fb225edf32 gap=true resume_offset=837965 replay_bytes=262144
+pre-disconnect canary "GAP-CANARY-4471" still in the replay=false (false is the point: it aged out)
+
+## Subtest: at024_writer_lease
+session=defbde15-19ec-4566-b372-8f049687cd56 first_conn=9851e6e5-da6a-4320-a144-4276ec4ba943 second_conn=7d7ca11c-7723-44d9-bcf4-9cbe27cba0f3
+second attached read-only, holder="9851e6e5-da6a-4320-a144-4276ec4ba943"
+read-only input refused with a lease message=true reason="this connection is read-only, so those keystrokes were not delivered; steal the writer lease to type"
+read-only resize refused with a lease message=true
+guest stty size after the refused resize="24 80" (unchanged)
+steal demoted the old writer=true writer_now=false holder_now="7d7ca11c-7723-44d9-bcf4-9cbe27cba0f3"
+old writer's next keystroke refused=true
+
+## Subtest: at026_duplicate_input
+session=9e3c33dd-30db-4188-ad1b-026fd2cef41b
+frame seq=2 sent twice; the command ran 1 time(s)
+after a reconnect the guest re-ran nothing: 0 occurrence(s) of the marker
+deviation: the host's input high-water mark is per connection (internal/api/terminal_stream.go streamRelay.lastClientSeq); §8.2 describes it as per session. The browser never resends input across a reconnect, so no duplicate typing is reachable.
+
+## Subtest: at027_slow_browser
+session=ed7da2ee-406d-4757-971c-a64b41427793 max_inflight_bytes=1048576
+bytes delivered to a browser that stopped acking: 1048576 (ceiling 1048576)
+control channel answered while the window was full=true
+guest declared a dropped range=true from=65590 to=595377
+stream resumed once the browser acked again=true
+
+## Subtest: at029_hostile_output
+session=d50abd88-ce77-4d30-82ea-7eee77260d53 (host half — the relay is byte-transparent and interprets nothing)
+  <img src=x onerror=alert(1)> delivered verbatim=true
+  OSC 0 window title delivered verbatim=true
+  OSC 52 clipboard delivered verbatim=true
+  OSC 8 javascript: hyperlink delivered verbatim=true
+config automatic_clipboard_write=false: true; automatic_download=false: true
+browser half: web/src/Terminal.test.tsx asserts against real xterm.js that OSC 52 never
+reaches navigator.clipboard and that hostile output renders as text, never as markup.
+This Go gate does not run a DOM and does not claim to.
+
+## Subtest: at028_lifecycle_while_attached
+vm=c214903d-772b-41e9-a83b-8fe1b5caaffc session=dd1bfff4-7243-491b-a0ea-22ac0bf05801
+pause: INCONCLUSIVE — this runtime does not implement VMM pause.
+  POST /vms/c214903d-772b-41e9-a83b-8fe1b5caaffc/actions {action: pause} -> HTTP 501 cause="runtime_unavailable" message="runtime not available on this host: pause not supported in M1a"
+  The VM stayed "running" and the attached session survived the refusal: shell still works=true.
+resume: INCONCLUSIVE — paired with pause (internal/jailer/adapter.go).
+stop: the attached stream ended=true; session still listed on the VM=true state="open"
+new boot via stop+start (this build has no reboot action): reattach with the old session id -> HTTP 503 cause="attach_refused" message="the runner refused an attach to session dd1bfff4-7243-491b-a0ea-22ac0bf05801"
+
+## Subtest: at030_denied_upgrades
+vm=7e5ef6db-0ec3-4a6e-ae10-b72ab1aa8891 existing session=7146d6ce-4e48-42f9-bd03-9e00a465d403 intruder token id=tok-d4643a389abc48ba
+  unauthenticated  HTTP 401 cause="no_credentials" message="this endpoint requires authentication; provide a session cookie or a bearer token"
+  wrong_origin     HTTP 403 cause="origin_rejected" message="the Origin header does not match the configured public origin"
+  wrong_owner      HTTP 404 cause="terminal_session_unknown" message="no terminal session 7146d6ce-4e48-42f9-bd03-9e00a465d403 on this host"
+  expired_session  HTTP 401 cause="session_invalid_or_expired" message="the session cookie is invalid or has expired; please log in again"
+open sessions on the VM before=1 after=1 (no PTY was reached)
