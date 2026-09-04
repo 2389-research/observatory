@@ -196,6 +196,12 @@ func isExempt(r *http.Request) bool {
 	if r.Method == http.MethodPost && path == basePath+"/auth/login" {
 		return true
 	}
+	// The static shell carries no host data; it must load so an operator can
+	// reach the login form. Everything it then asks for goes through auth.
+	if (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
+		(path == "/" || strings.HasPrefix(path, uiPrefix)) {
+		return true
+	}
 	return false
 }
 

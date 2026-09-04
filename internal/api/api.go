@@ -114,6 +114,7 @@ func New(st *store.Store, eng *situation.Engine, mgr *runtime.Manager, ac AuthCo
 	for pattern, methods := range allowed {
 		s.mux.Handle(basePath+pattern, methodNotAllowed(methods))
 	}
+	mountUI(s.mux)
 	s.mux.Handle("/", http.HandlerFunc(notFound))
 	return s.withAuth(s.mux)
 }

@@ -50,6 +50,33 @@ else
   note "PASS fake runtime not reachable from cmd/"
 fi
 
+# Web gate. dist/ is committed and embedded, so a stale dist means the daemon
+# serves a page that no longer matches web/src. Rebuilding and asking git
+# whether anything moved is the only honest way to know.
+if command -v npm >/dev/null 2>&1; then
+  if (cd web && npm ci >/dev/null 2>&1 && npm run typecheck >/dev/null 2>&1); then
+    note "PASS web typecheck"
+  else
+    note "FAIL web typecheck — run: cd web && npm ci && npm run typecheck"
+    fail=1
+  fi
+  if (cd web && npm test >/dev/null 2>&1); then note "PASS web tests"; else note "FAIL web tests — run: cd web && npm test"; fail=1; fi
+  if (cd web && npm run build >/dev/null 2>&1); then
+    if git diff --quiet -- web/dist; then
+      note "PASS web dist current"
+    else
+      note "FAIL web dist stale — rebuilt output differs; run scripts/build-web and commit web/dist"
+      fail=1
+    fi
+  else
+    note "FAIL web build — run: scripts/build-web"
+    fail=1
+  fi
+else
+  note "FAIL npm missing — install node (brew install node); the gate rebuilds web/dist to prove it is current"
+  fail=1
+fi
+
 if command -v uv >/dev/null 2>&1; then
   if uv run docs/validation/check.py >/dev/null 2>&1; then
     note "PASS docs package check"

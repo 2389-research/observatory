@@ -1,0 +1,25 @@
+#!/bin/sh
+# ABOUTME: Builds the web/ fleet page into web/dist, which the daemon embeds.
+# ABOUTME: Run after any change under web/src; dist/ is committed so go build needs no node.
+set -eu
+cd "$(dirname "$0")/../web"
+
+if ! command -v npm >/dev/null 2>&1; then
+  echo "build-web: npm not found. Install node (brew install node), then re-run." >&2
+  exit 1
+fi
+
+# ci over install: the lockfile is the contract, and a silent dependency drift
+# would land in a committed artifact nobody re-reads.
+if [ -f package-lock.json ]; then
+  npm ci
+else
+  echo "build-web: no package-lock.json; running npm install to create one." >&2
+  npm install
+fi
+
+npm run typecheck
+npm test
+npm run build
+
+echo "build-web: web/dist rebuilt — commit it so the daemon embeds the current page."

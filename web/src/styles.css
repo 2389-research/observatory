@@ -1,0 +1,351 @@
+/* ABOUTME: Fleet page styling — a dense operator console, dark by default.
+   ABOUTME: Unmeasured values are dimmed on purpose so a gap never reads as a measurement. */
+
+:root {
+  --bg: #0d1117;
+  --panel: #161b22;
+  --line: #30363d;
+  --ink: #e6edf3;
+  --dim: #8b949e;
+  --accent: #58a6ff;
+  --ok: #3fb950;
+  --warn: #d29922;
+  --bad: #f85149;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 14px/1.5 ui-sans-serif, -apple-system, "Segoe UI", system-ui, sans-serif;
+}
+
+code,
+.rev {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.page {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 24px 20px 64px;
+}
+
+.page-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 12px;
+  margin-bottom: 20px;
+}
+
+h1 {
+  font-size: 18px;
+  font-weight: 600;
+  margin: 0;
+  letter-spacing: 0.01em;
+}
+
+h2 {
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--dim);
+  margin: 28px 0 10px;
+}
+
+.as-of {
+  color: var(--dim);
+  font-size: 12px;
+}
+
+/* Panels */
+
+.host {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 16px;
+}
+
+.meters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 20px;
+}
+
+.meter-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.meter-label {
+  font-weight: 600;
+}
+
+.meter-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--dim);
+}
+
+.bar {
+  height: 6px;
+  background: #21262d;
+  border-radius: 3px;
+  overflow: hidden;
+  margin: 6px 0 4px;
+}
+
+.bar-fill {
+  height: 100%;
+  background: var(--accent);
+}
+
+.meter-foot {
+  font-size: 12px;
+  color: var(--dim);
+}
+
+.states {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 12px;
+}
+
+.chip-count {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--dim);
+}
+
+/* States and severities */
+
+.state {
+  font-weight: 600;
+}
+
+.state-running {
+  color: var(--ok);
+}
+
+.state-failed,
+.state-degraded {
+  color: var(--bad);
+}
+
+.state-provisioning,
+.state-starting,
+.state-stopping,
+.state-deleting {
+  color: var(--warn);
+}
+
+.state-stopped,
+.state-paused {
+  color: var(--dim);
+}
+
+.drift {
+  margin-left: 8px;
+  font-size: 11px;
+  color: var(--warn);
+  border: 1px solid var(--warn);
+  border-radius: 3px;
+  padding: 0 5px;
+}
+
+.failure {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--bad);
+}
+
+/* Honest gaps */
+
+.unknown {
+  color: #6e7681;
+  font-style: italic;
+  font-size: 12px;
+}
+
+.empty {
+  color: var(--dim);
+  padding: 12px 0;
+}
+
+/* Alerts */
+
+.alert {
+  background: rgba(248, 81, 73, 0.1);
+  border: 1px solid var(--bad);
+  border-radius: 6px;
+  padding: 10px 14px;
+  margin: 0 0 16px;
+}
+
+.remediation {
+  display: block;
+  color: var(--dim);
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+/* Attention queue */
+
+.attention {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.attn {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--warn);
+  border-radius: 6px;
+  padding: 10px 14px;
+}
+
+.attn.acked {
+  opacity: 0.55;
+  border-left-color: var(--line);
+}
+
+.attn-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+}
+
+.sev {
+  text-transform: uppercase;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+
+.sev-warn {
+  color: var(--warn);
+}
+
+.sev-error,
+.sev-critical {
+  color: var(--bad);
+}
+
+.sev-info {
+  color: var(--accent);
+}
+
+.attn-kind {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--dim);
+}
+
+.attn-count {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.attn-acked {
+  color: var(--dim);
+}
+
+.attn-summary {
+  margin-top: 4px;
+}
+
+.attn-action,
+.attn-links {
+  font-size: 12px;
+  color: var(--dim);
+  margin-top: 2px;
+}
+
+.attn-links a {
+  color: var(--accent);
+  margin-right: 10px;
+}
+
+/* VM table */
+
+.vms {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.vms th {
+  text-align: left;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--dim);
+  font-weight: 600;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+.vms td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+
+.vms tr:last-child td {
+  border-bottom: none;
+}
+
+.name {
+  font-weight: 600;
+}
+
+.sub {
+  font-size: 12px;
+  color: var(--dim);
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.label {
+  font-size: 11px;
+  color: var(--dim);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 0 5px;
+}
