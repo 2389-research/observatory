@@ -94,10 +94,10 @@ func newTemplateServerWrapped(t *testing.T, wrap func(http.Handler) http.Handler
 	})
 	fake := runtimetest.NewFake()
 	mgr, err := runtime.NewManager(st, fake, runtime.ManagerConfig{
-		Admission: testAdmission(),
+		Admission:  testAdmission(),
 		VMDefaults: testVMDefaults(),
-		Templates: map[string]runtime.Template{testTemplateDef.TemplateID: testTemplateDef},
-		Host:      runtime.HostResources{TotalMemoryMiB: 8192, CPUCores: 8, StateDiskFreeMiB: 100 * 1024},
+		Templates:  map[string]runtime.Template{testTemplateDef.TemplateID: testTemplateDef},
+		Host:       runtime.HostResources{TotalMemoryMiB: 8192, CPUCores: 8, StateDiskFreeMiB: 100 * 1024},
 	})
 	if err != nil {
 		t.Fatalf("create manager: %v", err)
