@@ -131,3 +131,44 @@ export interface ApiError {
   retryable: boolean
   remediation?: { action: string; rationale: string }[]
 }
+
+/** One member's outcome inside a batch reply (SPEC §6.3). */
+export interface BatchMember {
+  position: number
+  name: string
+  vm?: VM
+  operation?: Operation
+  /** The daemon's refusal for this member alone. The wire carries no per-member remediation. */
+  refusal?: { cause: string; message: string }
+}
+
+export interface Operation {
+  operation_id: string
+  kind: string
+  vm_id?: string
+  phase: string
+  /** `running` while in flight; `succeeded` and `failed` are terminal. */
+  state: string
+  error?: { cause: string; message: string }
+  attempt: number
+  created_at: string
+  updated_at: string
+}
+
+export interface Batch {
+  batch_id: string
+  owner: string
+  idempotency_key?: string
+  reservation_mode: string
+  on_failure: string
+  created_at: string
+  updated_at: string
+  links: Record<string, string>
+}
+
+export interface BatchReply {
+  batch: Batch
+  operation?: Operation
+  members: BatchMember[]
+  is_replay?: boolean
+}

@@ -31,8 +31,20 @@ export interface Reservation {
  * refusal is the answer the operator sees.
  */
 export function reservationFor(res: VMResources, host: HostStatus, count = 1): Reservation {
+  return reservationForAll(new Array<VMResources>(count).fill(res), host)
+}
+
+/**
+ * The same arithmetic for a batch whose members differ from each other.
+ *
+ * A batch preview sums its members rather than multiplying one of them: the
+ * form lets each member carry its own size, and a multiplied preview would
+ * quietly describe a batch nobody asked for.
+ */
+export function reservationForAll(all: VMResources[], host: HostStatus): Reservation {
   const cap = host.capacity
   const overhead = host.admission.reserve_per_vm_host_overhead_mib
+  const sum = (of: (r: VMResources) => number) => all.reduce((total, r) => total + of(r), 0)
 
   const line = (
     resource: ReservationLine['resource'],
@@ -41,9 +53,9 @@ export function reservationFor(res: VMResources, host: HostStatus, count = 1): R
     free: number,
   ): ReservationLine => ({ resource, unit, requested, free, over: requested > free })
 
-  const memory = line('memory', 'MiB', count * (res.memory_mib + overhead), cap.free_memory_mib)
-  const vcpu = line('vcpu', 'vCPU', count * res.vcpu_count, cap.free_vcpu)
-  const disk = line('disk', 'MiB', count * (res.root_disk_mib + res.workspace_disk_mib), cap.free_disk_mib)
+  const memory = line('memory', 'MiB', sum((r) => r.memory_mib + overhead), cap.free_memory_mib)
+  const vcpu = line('vcpu', 'vCPU', sum((r) => r.vcpu_count), cap.free_vcpu)
+  const disk = line('disk', 'MiB', sum((r) => r.root_disk_mib + r.workspace_disk_mib), cap.free_disk_mib)
 
   return { memory, vcpu, disk, over: memory.over || vcpu.over || disk.over }
 }

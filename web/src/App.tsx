@@ -5,6 +5,7 @@ import { getJSON, ApiFailure } from './api'
 import type { AttentionList, HostStatus, TemplateList, VMList } from './types'
 import { HostCapacity } from './components/HostCapacity'
 import { LaunchForm } from './components/LaunchForm'
+import { LaunchBatch } from './components/LaunchBatch'
 import { AttentionQueue } from './components/AttentionQueue'
 import { VMTable } from './components/VMTable'
 
@@ -88,6 +89,14 @@ export function App() {
           </section>
           <section>
             <LaunchForm host={fleet.host} templates={fleet.templates.templates} onLaunched={() => void load()} />
+          </section>
+          <section>
+            {/* Collapsed by default: the batch form is long, and one VM is the
+                common case. <details> keeps it keyboard-reachable with no state. */}
+            <details className="batch-details">
+              <summary>Launch a batch</summary>
+              <LaunchBatch host={fleet.host} templates={fleet.templates.templates} onLaunched={() => void load()} />
+            </details>
           </section>
           <section>
             <h2>VMs</h2>

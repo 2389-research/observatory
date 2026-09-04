@@ -498,3 +498,113 @@ h2 {
 .remediation-list li {
   color: var(--dim);
 }
+
+/* --- batch launch (§13.1) --- */
+.batch-details > summary {
+  cursor: pointer;
+  font-size: 1.15rem;
+  font-weight: 600;
+  padding: 0.4rem 0;
+}
+/* The batch form carries its own heading once open; the summary is the handle. */
+.batch-details[open] > summary {
+  color: var(--dim);
+  font-size: 0.9rem;
+  font-weight: 400;
+}
+.batch-modes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+.batch-member {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem 0.75rem;
+  margin-bottom: 0.75rem;
+}
+.batch-member > legend {
+  padding: 0 0.35rem;
+  font-size: 0.85rem;
+  color: var(--dim);
+}
+.link-button {
+  background: none;
+  border: none;
+  color: var(--dim);
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 0;
+  font-size: 0.85rem;
+}
+.link-button:disabled {
+  color: var(--line);
+  cursor: default;
+  text-decoration: none;
+}
+.batch-progress {
+  margin-top: 1rem;
+  border-top: 1px solid var(--line);
+  padding-top: 0.75rem;
+}
+.batch-state {
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 0.85rem;
+}
+/* A batch is only green when every member is: §13.1 forbids reading better
+   than the weakest member. */
+.batch-succeeded {
+  color: var(--ok);
+}
+.batch-partial,
+.batch-in_progress {
+  color: var(--warn);
+}
+.batch-failed {
+  color: var(--bad);
+}
+.batch-tally {
+  color: var(--dim);
+  font-size: 0.85rem;
+}
+.member-rows {
+  list-style: none;
+  padding: 0;
+  margin: 0.5rem 0 0;
+}
+.member-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  align-items: baseline;
+  padding: 0.35rem 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.9rem;
+}
+.member-name {
+  font-weight: 600;
+  min-width: 8rem;
+}
+.member-outcome {
+  text-transform: uppercase;
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+}
+.member-succeeded .member-outcome {
+  color: var(--ok);
+}
+.member-failed .member-outcome,
+.member-refused .member-outcome {
+  color: var(--bad);
+}
+.member-in_progress .member-outcome,
+.member-unknown .member-outcome {
+  color: var(--warn);
+}
+.member-cause {
+  color: var(--bad);
+  flex-basis: 100%;
+}
