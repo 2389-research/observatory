@@ -593,6 +593,31 @@ func TestTerminalLifecycleEventsAreRecorded(t *testing.T) {
 	}
 }
 
+// A source stream is bound to exactly one VM (internal/store/append.go), so a
+// single API-wide terminal stream can only ever record the first VM's sessions:
+// every later VM's lifecycle event is refused and survives as a log line. One
+// VM cannot show that, which is why this test opens two.
+func TestTerminalLifecycleEventsAreRecordedForEveryVM(t *testing.T) {
+	srv, st, _, _, _ := newTerminalServer(t)
+	first := launchVM(t, srv.URL, "term-events-1")
+	second := launchVM(t, srv.URL, "term-events-2")
+
+	for _, vmID := range []string{first, second} {
+		got := createTerminal(t, srv.URL, vmID, map[string]any{"rows": 24, "cols": 80})
+		id, _ := got["session_id"].(string)
+		doRequest(t, http.MethodDelete, srv.URL+"/api/v1/terminals/"+id, nil, http.StatusNoContent, nil)
+
+		opened := findTerminalEvent(t, st, vmID, "terminal.session_opened")
+		if opened.Data["session_id"] != id {
+			t.Errorf("vm %s: session_opened session_id = %v, want %s", vmID, opened.Data["session_id"], id)
+		}
+		closed := findTerminalEvent(t, st, vmID, "terminal.session_closed")
+		if closed.Data["session_id"] != id {
+			t.Errorf("vm %s: session_closed session_id = %v, want %s", vmID, closed.Data["session_id"], id)
+		}
+	}
+}
+
 // findTerminalEvent reads the event log for one kind scoped to vmID.
 func findTerminalEvent(t *testing.T, st *store.Store, vmID, kind string) *events.Envelope {
 	t.Helper()

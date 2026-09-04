@@ -581,11 +581,12 @@ func writeTerminalError(w http.ResponseWriter, sessionID string, err error) {
 // stream. vm_id and boot_id ride the envelope, where every reader already looks
 // for them; the data block carries what is specific to the session.
 func (s *Server) appendTerminalEvent(ctx context.Context, kind string, sess terminal.Session, data map[string]any) error {
-	seq := s.termSeq.Add(1)
+	stream := s.terminalStream(sess.VMID)
+	seq := stream.seq.Add(1)
 	env := &events.Envelope{
 		SchemaVersion:    1,
 		VMID:             &sess.VMID,
-		SourceInstanceID: s.termInstID,
+		SourceInstanceID: stream.instanceID,
 		SourceSeq:        strconv.FormatInt(seq, 10),
 		Kind:             kind,
 		Provenance:       events.HostObserved,

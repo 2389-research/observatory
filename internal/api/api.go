@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sync"
 	"sync/atomic"
 
 	"github.com/google/uuid"
@@ -43,11 +44,31 @@ type Server struct {
 
 	// terminals is nil when this build serves no terminal registry; the four
 	// terminal routes then answer 501 missing_capability, as they did before
-	// one existed. termInstID and termSeq place terminal events on their own
-	// source stream, the way auth events have theirs.
-	terminals  *terminal.Registry
-	termInstID string
-	termSeq    atomic.Int64
+	// one existed. termStreams places terminal events on their own source
+	// streams, the way auth events have theirs — one per VM, because ingest
+	// binds a source stream to exactly one VM scope.
+	terminals   *terminal.Registry
+	termMu      sync.Mutex
+	termStreams map[string]*termStream
+}
+
+// termStream is one VM's terminal-event source stream: the instance id it
+// emits under and the sequence that orders it.
+type termStream struct {
+	instanceID string
+	seq        atomic.Int64
+}
+
+// terminalStream returns vmID's source stream, minting one on first use.
+func (s *Server) terminalStream(vmID string) *termStream {
+	s.termMu.Lock()
+	defer s.termMu.Unlock()
+	ts, ok := s.termStreams[vmID]
+	if !ok {
+		ts = &termStream{instanceID: uuid.NewString()}
+		s.termStreams[vmID] = ts
+	}
+	return ts
 }
 
 type route struct {
@@ -75,7 +96,7 @@ func New(
 	s := &Server{
 		store: st, engine: eng, manager: mgr, mux: http.NewServeMux(),
 		auth: initAuthState(ac), preflight: pf,
-		terminals: tr, termInstID: uuid.NewString(),
+		terminals: tr, termStreams: map[string]*termStream{},
 	}
 	table := []route{
 		{"GET", "/meta", "meta", s.handleMeta},
