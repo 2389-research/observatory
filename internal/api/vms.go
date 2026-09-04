@@ -552,6 +552,18 @@ func (s *Server) handleHostStatus(w http.ResponseWriter, r *http.Request) {
 		"vms":     counts,
 	}
 
+	// Admission parameters: what the host charges and caps, published so the
+	// launch form's reservation preview restates API-served numbers instead of
+	// computing a private truth (SPEC §13).
+	adm := s.manager.AdmissionParams()
+	resp["admission"] = map[string]any{
+		"allow_memory_overcommit":          adm.AllowMemoryOvercommit,
+		"cpu_overcommit_ratio":             adm.CPUOvercommitRatio,
+		"reserve_per_vm_host_overhead_mib": adm.ReservePerVMHostOverheadMiB,
+		"max_parallel_provisions":          adm.MaxParallelProvisions,
+		"max_batch_size":                   adm.MaxBatchSize,
+	}
+
 	// Preflight block: present only when the hook is wired. Never an empty fake block.
 	if s.preflight != nil {
 		refresh := r.URL.Query().Get("refresh") == "1"

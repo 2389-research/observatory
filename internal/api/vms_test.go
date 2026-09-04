@@ -37,6 +37,20 @@ var testTemplateDef = runtime.Template{
 
 // newTemplateServer builds a server with one template, 8 GiB host, and a fake
 // runtime. The fake is returned so callers can inject errors or block calls.
+
+// testAdmission is the admission config the shared harness admits on. The
+// per-VM overhead is deliberately non-zero: with zero, an assertion that
+// reservations charge the published overhead would pass while proving nothing.
+func testAdmission() config.Admission {
+	return config.Admission{
+		AllowMemoryOvercommit:       false,
+		CPUOvercommitRatio:          4.0,
+		ReservePerVMHostOverheadMiB: 256,
+		MaxParallelProvisions:       2,
+		MaxBatchSize:                8,
+	}
+}
+
 func newTemplateServer(t *testing.T) (*httptest.Server, *store.Store, *runtimetest.Fake) {
 	t.Helper()
 	return newTemplateServerWrapped(t, nil)
@@ -63,10 +77,7 @@ func newTemplateServerWrapped(t *testing.T, wrap func(http.Handler) http.Handler
 	})
 	fake := runtimetest.NewFake()
 	mgr, err := runtime.NewManager(st, fake, runtime.ManagerConfig{
-		Admission: config.Admission{
-			CPUOvercommitRatio:    4.0,
-			MaxParallelProvisions: 2,
-		},
+		Admission: testAdmission(),
 		VMDefaults: config.VMDefaults{
 			MemoryMiB:        512,
 			VCPUCount:        1,
@@ -939,4 +950,83 @@ func isDecimalString(s string) bool {
 		}
 	}
 	return true
+}
+
+// TestHostStatusPublishesAdmissionParams pins D8's server half: the launch
+// form's reservation preview may restate only numbers the API published, so
+// the API has to publish them. Every value here is read from the manager's
+// live config, not from a copy the handler keeps.
+func TestHostStatusPublishesAdmissionParams(t *testing.T) {
+	srv, _, _ := newTemplateServer(t)
+	defer srv.Close()
+
+	var body struct {
+		Admission struct {
+			ReservePerVMHostOverheadMiB int64   `json:"reserve_per_vm_host_overhead_mib"`
+			CPUOvercommitRatio          float64 `json:"cpu_overcommit_ratio"`
+			AllowMemoryOvercommit       bool    `json:"allow_memory_overcommit"`
+			MaxBatchSize                int     `json:"max_batch_size"`
+			MaxParallelProvisions       int     `json:"max_parallel_provisions"`
+		} `json:"admission"`
+	}
+	getJSON(t, srv.URL+"/api/v1/host/status", http.StatusOK, &body)
+
+	want := testAdmission()
+	if body.Admission.ReservePerVMHostOverheadMiB != want.ReservePerVMHostOverheadMiB {
+		t.Errorf("reserve_per_vm_host_overhead_mib = %d; want %d",
+			body.Admission.ReservePerVMHostOverheadMiB, want.ReservePerVMHostOverheadMiB)
+	}
+	if body.Admission.CPUOvercommitRatio != want.CPUOvercommitRatio {
+		t.Errorf("cpu_overcommit_ratio = %v; want %v", body.Admission.CPUOvercommitRatio, want.CPUOvercommitRatio)
+	}
+	if body.Admission.AllowMemoryOvercommit != want.AllowMemoryOvercommit {
+		t.Errorf("allow_memory_overcommit = %v; want %v",
+			body.Admission.AllowMemoryOvercommit, want.AllowMemoryOvercommit)
+	}
+	if body.Admission.MaxBatchSize != want.MaxBatchSize {
+		t.Errorf("max_batch_size = %d; want %d", body.Admission.MaxBatchSize, want.MaxBatchSize)
+	}
+	if body.Admission.MaxParallelProvisions != want.MaxParallelProvisions {
+		t.Errorf("max_parallel_provisions = %d; want %d",
+			body.Admission.MaxParallelProvisions, want.MaxParallelProvisions)
+	}
+}
+
+// TestHostStatusAdmissionMatchesReservationMath is the honesty assertion: the
+// overhead the API publishes is the overhead the manager actually charges. If
+// these ever diverge, the launch preview lies and this test says so.
+func TestHostStatusAdmissionMatchesReservationMath(t *testing.T) {
+	srv, _, _ := newTemplateServer(t)
+	defer srv.Close()
+
+	type statusBody struct {
+		Capacity struct {
+			ReservedMemoryMiB int64 `json:"reserved_memory_mib"`
+		} `json:"capacity"`
+		Admission struct {
+			ReservePerVMHostOverheadMiB int64 `json:"reserve_per_vm_host_overhead_mib"`
+		} `json:"admission"`
+	}
+	var before statusBody
+	getJSON(t, srv.URL+"/api/v1/host/status", http.StatusOK, &before)
+
+	const memoryMiB = 512
+	postJSON(t, srv.URL+"/api/v1/vms", map[string]any{
+		"name":               "reservation-math",
+		"template_id":        "test-small-v1",
+		"vcpu_count":         1,
+		"memory_mib":         memoryMiB,
+		"root_disk_mib":      1024,
+		"workspace_disk_mib": 512,
+	}, http.StatusCreated, nil)
+
+	var after statusBody
+	getJSON(t, srv.URL+"/api/v1/host/status", http.StatusOK, &after)
+
+	grew := after.Capacity.ReservedMemoryMiB - before.Capacity.ReservedMemoryMiB
+	want := int64(memoryMiB) + before.Admission.ReservePerVMHostOverheadMiB
+	if grew != want {
+		t.Errorf("reserved memory grew by %d MiB; want %d (%d requested + %d published overhead)",
+			grew, want, memoryMiB, before.Admission.ReservePerVMHostOverheadMiB)
+	}
 }

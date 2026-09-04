@@ -80,6 +80,16 @@ func (e *ErrUnknownAction) Error() string {
 
 var validActions = []string{"start", "pause", "resume", "stop", "force_stop"}
 
+// AdmissionParams returns the admission settings this manager admits on.
+//
+// The launch UI shows a reservation preview, and SPEC §13's opening rule says
+// the browser may display only what the API published with the same values.
+// Returning the live config — rather than a copy kept elsewhere — is what
+// makes the published number and the enforced number the same number.
+func (m *Manager) AdmissionParams() config.Admission {
+	return m.cfg.Admission
+}
+
 // ManagerConfig carries the host-level configuration the manager acts on.
 type ManagerConfig struct {
 	Admission  config.Admission
