@@ -71,6 +71,25 @@ func (e *ErrReleaseFailed) Error() string {
 	return fmt.Sprintf("release vm resources for %s: %s", e.VMID, e.Reason)
 }
 
+// ErrRuntimeOpFailed is returned when a host verb fails: the VMM would not
+// launch, the guest would not stop, the hypervisor refused a pause. It exists
+// for the same reason ErrReleaseFailed does — an untyped error falls through
+// the API's mapping to a 500 that blames storage, which sends the operator to
+// the database while the fault sits on the machine. Op is the runtime verb, and
+// the runtime's own error stays unwrappable so a runtime that cannot run at all
+// still reads as unavailable rather than as a host that tried and failed.
+type ErrRuntimeOpFailed struct {
+	VMID string
+	Op   string // launch, pause, resume, stop, force_stop
+	Err  error
+}
+
+func (e *ErrRuntimeOpFailed) Error() string {
+	return fmt.Sprintf("runtime %s for %s: %s", e.Op, e.VMID, e.Err)
+}
+
+func (e *ErrRuntimeOpFailed) Unwrap() error { return e.Err }
+
 // ErrUnknownAction is returned when Action receives an unrecognised action name.
 type ErrUnknownAction struct{ Known []string }
 
@@ -809,7 +828,7 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 			m.failLaunch(recCtx, vmID, opID, "launch", err.Error())
 			_ = m.rt.ForceStop(recCtx, vmID)
 			op, _ := m.st.GetOperation(recCtx, opID)
-			return updVM, op, fmt.Errorf("launch: %w", err)
+			return updVM, op, &ErrRuntimeOpFailed{VMID: vmID, Op: "launch", Err: err}
 		}
 		// The launch worked, and everything below is the record of that. It must
 		// not ride startCtx either: a launch that returns nil with its budget
@@ -836,7 +855,7 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 			return m.failAction(ctx, vmID, opID, action, &store.InvalidTransitionError{From: vm.ObservedState, To: "paused"})
 		}
 		if err := m.rt.Pause(ctx, vmID); err != nil {
-			return m.failAction(ctx, vmID, opID, action, err)
+			return m.failAction(ctx, vmID, opID, action, &ErrRuntimeOpFailed{VMID: vmID, Op: "pause", Err: err})
 		}
 		newState, reason = "paused", "pause"
 
@@ -845,7 +864,7 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 			return m.failAction(ctx, vmID, opID, action, &store.InvalidTransitionError{From: vm.ObservedState, To: "running"})
 		}
 		if err := m.rt.Resume(ctx, vmID); err != nil {
-			return m.failAction(ctx, vmID, opID, action, err)
+			return m.failAction(ctx, vmID, opID, action, &ErrRuntimeOpFailed{VMID: vmID, Op: "resume", Err: err})
 		}
 		newState, reason = "running", "resume"
 
@@ -871,7 +890,7 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 		}
 		forced, err := m.rt.Stop(ctx, vmID, grace)
 		if err != nil {
-			return m.failAction(ctx, vmID, opID, action, err)
+			return m.failAction(ctx, vmID, opID, action, &ErrRuntimeOpFailed{VMID: vmID, Op: "stop", Err: err})
 		}
 		if forced {
 			reason = "forced_stop"
@@ -901,7 +920,7 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 			tailRevision = nil // pin spent on running/paused→stopping
 		}
 		if err := m.rt.ForceStop(ctx, vmID); err != nil {
-			return m.failAction(ctx, vmID, opID, action, err)
+			return m.failAction(ctx, vmID, opID, action, &ErrRuntimeOpFailed{VMID: vmID, Op: "force_stop", Err: err})
 		}
 		newState, reason, releaseC = "stopped", "forced_stop", true
 	}
@@ -1058,7 +1077,7 @@ func (m *Manager) Delete(ctx context.Context, vmID string, force bool, expectedR
 		if err := m.rt.ForceStop(ctx, vmID); err != nil {
 			var ue *UnavailableError
 			if !errors.As(err, &ue) { // unavailable runtime is fine — VM not running
-				return vm, fmt.Errorf("force-stop before delete: %w", err)
+				return vm, &ErrRuntimeOpFailed{VMID: vmID, Op: "force_stop", Err: err}
 			}
 		}
 		_, stopErr := m.st.TransitionVM(ctx, store.TransitionInput{

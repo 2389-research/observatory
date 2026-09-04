@@ -825,6 +825,54 @@ func TestDeleteVMReleaseFailureTeaches(t *testing.T) {
 	}
 }
 
+// TestActionRuntimeFailureTeaches: a guest that will not stop is a fault on the
+// machine, and the answer has to say so. The catch-all used to call it a
+// storage failure — with the store perfectly healthy and the VMM still alive —
+// which is the same lie a failed release told before it was named. The
+// operation row keeps the runtime's own words for whoever reads it later.
+func TestActionRuntimeFailureTeaches(t *testing.T) {
+	srv, st, fake := newTemplateServer(t)
+	vmID := createRunningVM(t, srv.URL, fake)
+	fake.FailNext("Stop", vmID, errors.New("guest ignored the shutdown request"))
+
+	var vm map[string]any
+	getJSON(t, srv.URL+"/api/v1/vms/"+vmID, http.StatusOK, &vm)
+
+	var e api.Error
+	doRequest(t, http.MethodPost, srv.URL+"/api/v1/vms/"+vmID+"/actions",
+		map[string]any{"action": "stop", "expected_revision": vm["revision"]},
+		http.StatusInternalServerError, &e)
+	requireTeaching(t, e, "internal")
+	if e.Cause != "runtime_operation_failed" {
+		t.Errorf("cause = %q, want runtime_operation_failed", e.Cause)
+	}
+	if got, _ := e.Details["runtime_operation"].(string); got != "stop" {
+		t.Errorf("details.runtime_operation = %q, want stop", got)
+	}
+	if !strings.Contains(e.Message, "ignored the shutdown") {
+		t.Errorf("message %q should carry the runtime's own words", e.Message)
+	}
+	if !e.Retryable {
+		t.Error("the VM is still there to stop; asking again is the recovery")
+	}
+
+	// The durable record has to survive the request that produced it.
+	ops, err := st.ListOperationsByState(t.Context(), "failed")
+	if err != nil {
+		t.Fatalf("ListOperationsByState: %v", err)
+	}
+	found := false
+	for _, op := range ops {
+		if op.VMID != nil && *op.VMID == vmID &&
+			op.ErrorMessage != nil && strings.Contains(*op.ErrorMessage, "ignored the shutdown") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("no operation row carries the runtime's error; the HTTP answer is then the only copy")
+	}
+}
+
 func TestDeleteVMNotFound(t *testing.T) {
 	srv, _, _ := newTemplateServer(t)
 	var e api.Error

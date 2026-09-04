@@ -3,6 +3,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -414,6 +415,68 @@ func writeVMError(w http.ResponseWriter, err error) {
 		return
 	}
 
+	// 500: a host verb failed — the VMM would not launch, the guest would not
+	// stop. Named for the same reason a failed release is: the row and the
+	// operation record are both readable, and the thing that went wrong is on
+	// the machine. A launch that failed leaves the VM at "failed", whose only
+	// exit is delete, so retrying that one action cannot work; the others leave
+	// the VM where the operator can ask again.
+	var opFail *runtime.ErrRuntimeOpFailed
+	if errors.As(err, &opFail) {
+		remediation := []Remediation{{
+			Action:    "get",
+			Params:    map[string]any{"path": basePath + "/vms/{id}"},
+			Rationale: "the VM row records what state the failed " + opFail.Op + " left it in",
+		}}
+		if opFail.Op == "launch" {
+			remediation = append(remediation, Remediation{
+				Action:    "delete",
+				Params:    map[string]any{"path": basePath + "/vms/{id}"},
+				Rationale: "a VM whose launch failed can only be deleted; create a new one to try again",
+			})
+		} else {
+			remediation = append(remediation, Remediation{
+				Action:    "post",
+				Params:    map[string]any{"path": basePath + "/vms/{id}/actions", "body": map[string]string{"action": opFail.Op}},
+				Rationale: "the VM is still where it was; asking again is the recovery once the host fault is cleared",
+			})
+		}
+		writeError(w, http.StatusInternalServerError, Error{
+			Code:        "internal",
+			Message:     "the host could not " + opFail.Op + " this VM: " + opFail.Err.Error(),
+			Retryable:   opFail.Op != "launch",
+			Cause:       "runtime_operation_failed",
+			Details:     map[string]any{"vm_id": opFail.VMID, "runtime_operation": opFail.Op},
+			Remediation: remediation,
+		})
+		return
+	}
+
+	// 500: the operation ran out of its budget. Not retryable as a blind repeat:
+	// a deadline says when we stopped waiting, never whether the work landed, so
+	// the remediation is to read the record and then decide.
+	if errors.Is(err, context.DeadlineExceeded) {
+		writeError(w, http.StatusInternalServerError, Error{
+			Code:      "internal",
+			Message:   "the operation exceeded its time budget; whether it completed is recorded, not assumed",
+			Retryable: false,
+			Cause:     "operation_timeout",
+			Remediation: []Remediation{
+				{
+					Action:    "get",
+					Params:    map[string]any{"path": basePath + "/vms/{id}"},
+					Rationale: "the VM row is the durable record of how far the operation got",
+				},
+				{
+					Action:    "get",
+					Params:    map[string]any{"path": basePath + "/operations/{id}"},
+					Rationale: "the operation carries its own outcome and error detail",
+				},
+			},
+		})
+		return
+	}
+
 	// 404: VM not found.
 	if errors.Is(err, store.ErrVMUnknown) {
 		writeError(w, http.StatusNotFound, Error{
@@ -446,12 +509,30 @@ func writeVMError(w http.ResponseWriter, err error) {
 		return
 	}
 
-	// 500: unexpected.
+	// 500: nothing above matched, so this layer does not know what broke. Saying
+	// "storage_failure" here would be a guess that names one subsystem out of
+	// several, and twice already it sent an operator to the database for a fault
+	// that was on the host. An unclassified error also gives no ground to claim
+	// a retry would differ, and its text is not ours to hand back — it may carry
+	// anything a dependency chose to put in it. What the system does know is
+	// where the durable record of the request lives, so it says that.
 	writeError(w, http.StatusInternalServerError, Error{
 		Code:      "internal",
-		Message:   "unexpected error",
-		Retryable: true,
-		Cause:     "storage_failure",
+		Message:   "the request failed for a reason the server could not classify",
+		Retryable: false,
+		Cause:     "unclassified",
+		Remediation: []Remediation{
+			{
+				Action:    "get",
+				Params:    map[string]any{"path": basePath + "/vms/{id}"},
+				Rationale: "the VM row records what state the request left it in, if it touched one",
+			},
+			{
+				Action:    "get",
+				Params:    map[string]any{"path": basePath + "/host/status"},
+				Rationale: "reports whether the runtime and the store are each healthy right now",
+			},
+		},
 	})
 }
 

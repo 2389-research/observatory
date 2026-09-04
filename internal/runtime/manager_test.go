@@ -804,6 +804,84 @@ func TestDeleteReleaseFailureIsTyped(t *testing.T) {
 	}
 }
 
+// TestManagerActionRuntimeVerbFailureIsTyped: when a host verb fails — the VMM
+// will not launch, the guest will not stop, the hypervisor refuses a pause —
+// the fault is on the machine. An untyped error reaches the API's catch-all as
+// a 500 blaming storage, the same lie ErrReleaseFailed was added to stop, so
+// every verb Action can call names itself and the VM it failed on.
+func TestManagerActionRuntimeVerbFailureIsTyped(t *testing.T) {
+	boom := errors.New("firecracker: vsock probe timed out")
+
+	cases := []struct {
+		action string
+		verb   string // the runtime method the fake fails
+		prep   string // action that puts the VM in the state this one needs
+		wantOp string
+	}{
+		{action: "pause", verb: "Pause", wantOp: "pause"},
+		{action: "stop", verb: "Stop", wantOp: "stop"},
+		{action: "force_stop", verb: "ForceStop", wantOp: "force_stop"},
+		{action: "resume", verb: "Resume", prep: "pause", wantOp: "resume"},
+		{action: "start", verb: "Launch", prep: "stop", wantOp: "launch"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.action, func(t *testing.T) {
+			st := openStoreForManager(t)
+			fk := runtimetest.NewFake()
+			mgr := newManager(t, st, fk)
+
+			vm := launchedVM(t, st, mgr, "verb-"+tc.action)
+			if tc.prep != "" {
+				if _, _, err := mgr.Action(t.Context(), vm.VMID, tc.prep, nil); err != nil {
+					t.Fatalf("%s (to reach the state %s needs): %v", tc.prep, tc.action, err)
+				}
+			}
+			fk.FailNext(tc.verb, vm.VMID, boom)
+
+			_, _, err := mgr.Action(t.Context(), vm.VMID, tc.action, nil)
+			if err == nil {
+				t.Fatalf("%s returned no error when the runtime's %s failed", tc.action, tc.verb)
+			}
+			var opErr *runtime.ErrRuntimeOpFailed
+			if !errors.As(err, &opErr) {
+				t.Fatalf("error is %T (%v), want *runtime.ErrRuntimeOpFailed", err, err)
+			}
+			if opErr.Op != tc.wantOp {
+				t.Errorf("Op = %q, want %q", opErr.Op, tc.wantOp)
+			}
+			if opErr.VMID != vm.VMID {
+				t.Errorf("VMID = %q, want %q", opErr.VMID, vm.VMID)
+			}
+			if !errors.Is(err, boom) {
+				t.Errorf("error %q drops the runtime's own words", err)
+			}
+		})
+	}
+}
+
+// TestRuntimeVerbFailureKeepsUnavailableVisible: a runtime that cannot run at
+// all is a different answer from a host that tried and failed — 501 against
+// 500 — and naming the verb must not bury that. The unavailable error stays
+// reachable through the wrap.
+func TestRuntimeVerbFailureKeepsUnavailableVisible(t *testing.T) {
+	st := openStoreForManager(t)
+	fk := runtimetest.NewFake()
+	mgr := newManager(t, st, fk)
+
+	vm := launchedVM(t, st, mgr, "pause-unsupported")
+	fk.FailNext("Pause", vm.VMID, &runtime.UnavailableError{Reason: "pause not supported in M1a"})
+
+	_, _, err := mgr.Action(t.Context(), vm.VMID, "pause", nil)
+	var unavail *runtime.UnavailableError
+	if !errors.As(err, &unavail) {
+		t.Fatalf("error is %T (%v); an unavailable runtime must stay visible through the verb wrap", err, err)
+	}
+	if unavail.Reason != "pause not supported in M1a" {
+		t.Errorf("Reason = %q, want the runtime's own reason", unavail.Reason)
+	}
+}
+
 func TestManagerForceStopFromPaused(t *testing.T) {
 	// §5.2: force-stop from paused must not wait for guest cooperation.
 	st := openStoreForManager(t)
@@ -1084,8 +1162,15 @@ func TestManagerForceDeleteRuntimeFailureLeavesStopping(t *testing.T) {
 	if _, err = mgr.Delete(t.Context(), vm.VMID, true, nil); err == nil {
 		t.Fatalf("force delete with failing ForceStop: got nil error, want failure")
 	}
-	if !strings.Contains(err.Error(), "force-stop before delete") {
-		t.Errorf("error = %v, want it to name the force-stop step", err)
+	var opErr *runtime.ErrRuntimeOpFailed
+	if !errors.As(err, &opErr) {
+		t.Fatalf("error is %T (%v), want *runtime.ErrRuntimeOpFailed", err, err)
+	}
+	if opErr.Op != "force_stop" || opErr.VMID != vm.VMID {
+		t.Errorf("error names %s on %s, want force_stop on %s", opErr.Op, opErr.VMID, vm.VMID)
+	}
+	if !strings.Contains(opErr.Error(), "kvm said no") {
+		t.Errorf("error = %q, should carry the runtime's own words", opErr.Error())
 	}
 
 	after, err := st.GetVM(t.Context(), vm.VMID)
