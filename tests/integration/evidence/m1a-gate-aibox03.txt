@@ -1,9 +1,9 @@
 # M1a gate evidence
 # hostname: aibox03
-# date: 2026-09-02T23:27:05Z
-# pid: 855007
+# date: 2026-09-05T17:10:08Z
+# pid: 3160532
 # paths.runtime: /srv/vmobs
-# paths.state: /tmp/TestM1aGate2717049173/001/state
+# paths.state: /tmp/TestM1aGate3573538049/001/state
 
 ## Subtest: 1_doctor_pass
 GET /host/status: status=200 overall="pass" runtime.available=true
@@ -12,22 +12,23 @@ GET /host/status: status=200 overall="pass" runtime.available=true
 POST /vms on bad-privd daemon: status=501 cause="runtime_unavailable" message="runtime not available on this host: guest_channel: cannot reach privd socket: dial unix /nonexistent/privd.sock: connect: no such file or directory" details.reason="guest_channel: cannot reach privd socket: dial unix /nonexistent/privd.sock: connect: no such file or directory" guest_channel_found=true dial_failure_found=true socket_named=true not_configured_found=false
 
 ## Subtest: 3_two_real_vms
-vmA=1f390fb0-559b-4f72-bff5-bf6ccabc7612 uid=20000 cid=3 netns=vmobs-1f390fb0-559b-4f72-bff5-bf6ccabc7612 channel_established=true
-vmB=b8aa4421-cd37-4769-bc70-a6593208e62d uid=20001 cid=4 netns=vmobs-b8aa4421-cd37-4769-bc70-a6593208e62d channel_established=true
+vmA=e6b9cedc-c941-4ef2-98ba-9107af3fafae uid=20000 cid=3 netns=vmobs-e6b9cedc-c941-4ef2-98ba-9107af3fafae channel_established=true
+vmB=f0016148-a82f-4c31-a62a-945156e54180 uid=20001 cid=4 netns=vmobs-f0016148-a82f-4c31-a62a-945156e54180 channel_established=true
+root_image sha256=0d970896b92f5b4000f45074ba56a754efd1e43992c4ac0826275aaaa6d08858 reported by /host/status and vmA
 
 ## Subtest: 4_at011_graceful_stop
-vmA stopped graceful_stop=true; vmB state after vmA stop="running"; vmB state after vmA delete="running"; aStopTime=2026-09-02T23:27:21Z; vmB no state departure after stop=verified
+vmA stopped graceful_stop=true; vmB state after vmA stop="running"; vmB state after vmA delete="running"; aStopTime=2026-09-05T17:10:24Z; vmB no state departure after stop=verified
 
 ## Subtest: 5_at006_idempotency
-first_create=201 vm_id=60271f9f-e799-469b-bf6a-df33eaabc2d7 is_replay1=false replay=201 vm_id=60271f9f-e799-469b-bf6a-df33eaabc2d7 is_replay=true conflict=409 cause="idempotency_key_reused"
+first_create=201 vm_id=9c277b39-198a-42f1-b772-630c7907b528 is_replay1=false replay=201 vm_id=9c277b39-198a-42f1-b772-630c7907b528 is_replay=true conflict=409 cause="idempotency_key_reused"
 
 ## Subtest: 6_at009_four_concurrent_vms
-four VMs [76357a29-b084-49c4-ab5a-e6a35df40472 e373cb6c-3b63-4181-9665-b175390f1514 239a30ab-8b57-40d2-8725-ef8163328b23 0ea84265-0f1c-4ed2-a416-568eca0e8c69]: created concurrently (four simultaneous POST /vms launches); all reached running with channel_established; all stopped and deleted
+four VMs [aa97c80b-ae3f-46a0-a66b-67a00ecd64e9 efe73816-ff19-45b7-9cf0-3d3668ca3ee8 e1f638ec-8442-4885-ae62-d68f0a0ba881 83bb616b-d2c4-43fc-817b-ae4a43524905]: created concurrently (four simultaneous POST /vms launches); all reached running with channel_established; all stopped and deleted
 
 ## Subtest: 7_at018_resource_leaks
-baseline: netns=1 veth=1 jail=1 fc_procs=1 state_entries=1 stage_entries=1
-after 5 graceful cycles + 1 force-delete: netns=1 veth=1 jail=1 fc_procs=1 state_entries=1 stage_entries=1
+baseline: netns=2 veth=2 jail=1 fc_procs=1 state_entries=1 stage_entries=2
+after 5 graceful cycles + 1 force-delete: netns=2 veth=2 jail=1 fc_procs=1 state_entries=1 stage_entries=2
 delta: netns=+0 veth=+0 jail=+0 fc_procs=+0 state=+0 stage=+0
 
 ## Subtest: 8_at007_ordering
-vm=0abdf92a-ea04-4392-af56-dfc240597a7c running_transition_at="2026-09-02T23:28:36.211898Z" channel_established_at="2026-09-02T23:28:35.719357Z" running_not_before_channel=true
+vm=79fe79f2-4207-40be-9117-457f53bb8bdb running_transition_at="2026-09-05T17:11:48.501963Z" channel_established_at="2026-09-05T17:11:48.030138Z" running_not_before_channel=true

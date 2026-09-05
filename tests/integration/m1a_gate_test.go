@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,6 +26,7 @@ import (
 	"time"
 
 	"github.com/2389-research/observatory-v2/internal/auth"
+	"github.com/2389-research/observatory-v2/internal/lock"
 )
 
 // m1aPrivdSock is the socket path installed by scripts/aibox03/setup.sh.
@@ -139,7 +141,11 @@ type m1aDaemon struct {
 	configPath string
 	stateDir   string
 	runtimeDir string
-	cancel     context.CancelFunc
+	// lk is the runtime.lock.json this daemon was pointed at, read from the file
+	// rather than remembered from a constant: a gate carrying its own copy of the
+	// pin would pass a re-pin that never reached the lock.
+	lk     *lock.Lock
+	cancel context.CancelFunc
 	// label is the post-mortem subdirectory this daemon's rescued files land in
 	// (its only reader is the savePostmortem call in disposeVM), so a rescue
 	// triggered from a VM teardown lands beside the daemon's own logs. Log lines
@@ -290,6 +296,14 @@ func startDaemon(t *testing.T, repoRoot, daemonBin, runnerBin, label string, opt
 	// Write a minimal config file.
 	configPath := filepath.Join(t.TempDir(), "vmobsd.yaml")
 	lockPath := filepath.Join(repoRoot, "runtime.lock.json")
+	lk, err := lock.Load(lockPath)
+	if err != nil {
+		t.Fatalf("startDaemon %s: load %s: %v", label, lockPath, err)
+	}
+	// The digests this lock pins share the §15.3 token shape, and the API
+	// publishes them on purpose. Registered before the first request so the leak
+	// scan can tell them from a credential.
+	registerLockHashes(lk)
 
 	// runner binary must live beside daemonBin for T12's "resolve runner beside daemon".
 	// We copy the runner binary into the daemon's dir so os.Executable's sibling check passes.
@@ -535,6 +549,7 @@ performance_targets:
 		credDir:    credDir,
 		stateDir:   stateDir,
 		runtimeDir: runtimeDir,
+		lk:         lk,
 		cancel:     cancel,
 		label:      label,
 	}
@@ -1715,6 +1730,14 @@ performance_targets:
 		_ = daemon.waitEventKind(chanCtx, t, vmAID, "guest.channel_established")
 		_ = daemon.waitEventKind(chanCtx, t, vmBID, "guest.channel_established")
 
+		// Both the host and the VM must name the root image the lock pins. The
+		// host reads the lock per request and the VM row records what its boot
+		// actually staged, so the two answers come from different places and a
+		// re-pin that only half landed shows up as a disagreement here.
+		rootSHA := daemon.lockedRootImageSHA(t)
+		daemon.assertHostStagesRootImage(t, rootSHA)
+		daemon.assertVMBootedRootImage(t, vmAID, rootSHA)
+
 		uidAStr := "uid=N/A"
 		cidAStr := "cid=N/A"
 		uidBStr := "uid=N/A"
@@ -1729,9 +1752,10 @@ performance_targets:
 		}
 
 		evidenceSubtest(t, &evidence, "3_two_real_vms", fmt.Sprintf(
-			"vmA=%s %s %s netns=%s channel_established=true\nvmB=%s %s %s netns=%s channel_established=true",
+			"vmA=%s %s %s netns=%s channel_established=true\nvmB=%s %s %s netns=%s channel_established=true\nroot_image sha256=%s reported by /host/status and vmA",
 			vmAID, uidAStr, cidAStr, nsA,
 			vmBID, uidBStr, cidBStr, nsB,
+			rootSHA,
 		))
 	})
 
@@ -2239,6 +2263,70 @@ type m1aManifest struct {
 	CIDR   string `json:"cidr"`
 }
 
+// lockedRootImageSHA is the root image digest this daemon's lock pins — what
+// every launch it makes is required to stage.
+func (d *m1aDaemon) lockedRootImageSHA(t *testing.T) string {
+	t.Helper()
+	if d.lk.RootImage.SHA256 == "" {
+		t.Fatal("runtime.lock.json pins no root image sha256")
+	}
+	return d.lk.RootImage.SHA256
+}
+
+// assertHostStagesRootImage checks GET /host/status answers with the pinned
+// root image. The handler re-reads the lock per request, so this is the host
+// saying what a launch would stage right now, not what it read at startup.
+func (d *m1aDaemon) assertHostStagesRootImage(t *testing.T, want string) {
+	t.Helper()
+	got, err := rootImageSHAIn(d.apiGet(t, "/host/status"))
+	if err != nil {
+		t.Errorf("GET /host/status images: %v", err)
+		return
+	}
+	if got != want {
+		t.Errorf("/host/status stages root image %s, lock pins %s", got, want)
+	}
+}
+
+// assertVMBootedRootImage checks the VM row records the image its own launch
+// staged. Reported by the launch because nothing else can: doStage reads the
+// lock fresh on every launch, so a VM booted before a re-pin and one booted
+// after are entitled to different answers.
+func (d *m1aDaemon) assertVMBootedRootImage(t *testing.T, vmID, want string) {
+	t.Helper()
+	got, err := rootImageSHAIn(d.apiGet(t, "/vms/"+vmID))
+	if err != nil {
+		t.Errorf("GET /vms/%s images: %v", vmID, err)
+		return
+	}
+	if got != want {
+		t.Errorf("vm %s booted root image %s, lock pins %s", vmID, got, want)
+	}
+}
+
+// rootImageSHAIn digs images.root_image.sha256 out of an API body. Both
+// endpoints publish the same block, so both are read the same way — and an
+// images block reporting an error instead of entries surfaces it rather than
+// reading as an absent hash.
+func rootImageSHAIn(body map[string]any) (string, error) {
+	images, ok := body["images"].(map[string]any)
+	if !ok {
+		return "", fmt.Errorf("no images block")
+	}
+	if msg, ok := images["error"].(string); ok && msg != "" {
+		return "", fmt.Errorf("images block reports: %s", msg)
+	}
+	rootImage, ok := images["root_image"].(map[string]any)
+	if !ok {
+		return "", fmt.Errorf("images block names no root_image")
+	}
+	sha, ok := rootImage["sha256"].(string)
+	if !ok || sha == "" {
+		return "", fmt.Errorf("root_image names no sha256")
+	}
+	return sha, nil
+}
+
 func readM1aManifest(stateDir, vmID string) (m1aManifest, error) {
 	path := filepath.Join(stateDir, "vms", vmID, "manifest.json")
 	data, err := os.ReadFile(path)
@@ -2260,6 +2348,14 @@ func readM1aManifest(stateDir, vmID string) (m1aManifest, error) {
 var (
 	gateSecretsMu sync.Mutex
 	gateSecrets   []string
+	// publicHashes holds the artifact digests runtime.lock.json pins. They are
+	// 64-char lowercase hex — the same shape as a §15.3 capability token — and
+	// the API publishes them on purpose (/host/status and a VM's images block),
+	// so the shape scan below would otherwise redden the gate for the product
+	// doing exactly what it is supposed to. Exempted by exact value from the
+	// committed lock, never by field name: a token dropped into a field called
+	// sha256 still reddens the gate.
+	publicHashes []string
 )
 
 // registerGateSecret records one credential string that must never appear in
@@ -2274,6 +2370,22 @@ func registerGateSecret(secret string) {
 	gateSecrets = append(gateSecrets, secret)
 }
 
+// registerLockHashes records every digest the lock pins, so assertNoToken can
+// tell a published artifact hash from a leaked token. Called once per daemon
+// with the lock that daemon was pointed at.
+func registerLockHashes(lk *lock.Lock) {
+	gateSecretsMu.Lock()
+	defer gateSecretsMu.Unlock()
+	publicHashes = append(publicHashes,
+		lk.Firecracker.SHA256,
+		lk.Jailer.SHA256,
+		lk.GuestKernel.SourceSHA256,
+		lk.GuestKernel.ConfigSHA256,
+		lk.GuestKernel.VmlinuxSHA256,
+		lk.RootImage.SHA256,
+	)
+}
+
 // assertNoToken asserts that body carries no credential: neither a 64-char
 // lowercase hex string (the vsock auth token's shape, §15.3) nor any of the
 // exact secrets this run minted.
@@ -2283,12 +2395,17 @@ func registerGateSecret(secret string) {
 // that do exist in this process, whose own shape — "vmobs_" plus base64url for
 // a bearer token, bare base64url for a session — is too common to match on
 // appearance without reddening the gate for an unrelated blob.
+//
+// The hex scan exempts the digests runtime.lock.json pins, which share the
+// token's shape and which the API publishes deliberately. Exempted by exact
+// value, so the scan still catches any other 64-char hex the body carries.
 func assertNoToken(t *testing.T, body []byte) {
 	t.Helper()
 	s := string(body)
 
 	gateSecretsMu.Lock()
 	known := append([]string(nil), gateSecrets...)
+	published := append([]string(nil), publicHashes...)
 	gateSecretsMu.Unlock()
 	for _, secret := range known {
 		if idx := strings.Index(s, secret); idx >= 0 {
@@ -2308,9 +2425,16 @@ func assertNoToken(t *testing.T, body []byte) {
 				break
 			}
 		}
-		if isHex {
-			t.Errorf("§15.3 violation: 64-char hex token found in response body at offset %d: %q", i, candidate)
-			return
+		if !isHex {
+			continue
 		}
+		// A digest the lock pins is public by construction: it is committed, it
+		// names an artifact rather than an authority, and the API is required to
+		// publish it.
+		if slices.Contains(published, candidate) {
+			continue
+		}
+		t.Errorf("§15.3 violation: 64-char hex token found in response body at offset %d: %q", i, candidate)
+		return
 	}
 }

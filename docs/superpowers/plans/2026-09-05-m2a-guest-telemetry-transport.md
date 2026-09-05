@@ -186,9 +186,32 @@ wrote it.
 
 ### Task 4: Rootfs rebuild and lock re-pin
 
-- [ ] Rebuild the guest rootfs with the new guestd via `images/rootfs/build.sh` (docker, ordinary user).
-- [ ] Re-pin `runtime.lock.json` with the new root image SHA-256; confirm `/host/status` and a fresh VM's `images` block both report it.
-- [ ] Never write to `~/vmobs-build/images/dist/` except through the sanctioned rebuild (PLAN.md ruling 38).
+- [x] Rebuild the guest rootfs with the new guestd via `images/rootfs/build.sh` (docker, ordinary user).
+- [x] Re-pin `runtime.lock.json` with the new root image SHA-256; confirm `/host/status` and a fresh VM's `images` block both report it.
+- [x] Never write to `~/vmobs-build/images/dist/` except through the sanctioned rebuild (PLAN.md ruling 38).
+
+Rootfs 273M, sha256 `0d970896…`, carrying guestd `b8ff941b…` — `telemetry.(*Ring).Epoch` and
+`.Rewind` are both present in the shipped binary, so the image really holds this branch's guest.
+
+**The confirmation lives in the M1a gate, not in a probe.** `two_real_vms` now reads the lock the
+daemon was pointed at and asserts both `/host/status` and vmA's `images` block name that digest.
+*Ruling: the assertion goes in the existing subtest rather than a new one or a one-off shell
+command — a probe proves the pin once and the lock hash is exactly the thing that drifts quietly,
+and keeping the subtest count at 8 keeps the recorded evidence comparable across runs. Cost if
+wrong: a slower `two_real_vms`, by two HTTP requests.*
+
+**The re-pin reddened the gate, correctly, on a bug in the gate.** `assertNoToken` scans every
+response for a 64-char lowercase hex run, the §15.3 capability token's shape. It cannot tell a
+token from a SHA-256, and it had never been aimed at a body that carries one — until this task
+pointed `apiGet` at `/host/status`. *Ruling: the scan exempts the digests `runtime.lock.json` pins,
+by exact value read from the committed lock, never by field name. A token dropped into a field
+called `sha256` still reddens the gate, and any other 64-hex run in a body still reddens it. Cost
+if wrong: a leaked credential that happens to equal a pinned artifact digest goes unreported —
+which requires the leak to be a hash of an artifact we ship.*
+
+Live gate green on aibox03, 8/8 subtests, 102.55s; evidence in
+`tests/integration/evidence/m1a-gate-aibox03.txt` records
+`root_image sha256=0d970896… reported by /host/status and vmA`.
 
 # Phase B — the answer
 
