@@ -96,3 +96,15 @@ func DecodeTelemetryPush(raw json.RawMessage) (TelemetryPush, error) {
 	}
 	return push, nil
 }
+
+// KindTelemetryAck is the host's cumulative acknowledgement, the only frame
+// travelling host to guest on this port after the handshake.
+const KindTelemetryAck = "telemetry.ack"
+
+// TelemetryAck reports the highest sequence the host holds durably. It is
+// cumulative: acking 41 releases 1 through 41. The guest keeps everything past
+// it, so a host that stops acking makes the guest's bounded ring drop — and
+// count — rather than losing events nobody counted.
+type TelemetryAck struct {
+	ThroughSeq string `json:"through_seq"`
+}

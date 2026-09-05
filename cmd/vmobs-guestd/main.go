@@ -25,6 +25,7 @@ func main() {
 	configMount := fs.String("config-mount", "/run/vmobs/config", "mountpoint for the config device")
 	controlPort := fs.Uint("control-port", 10000, "vsock port to listen on (§7.3)")
 	streamPort := fs.Uint("stream-port", 10002, "vsock port carrying session byte streams (§7.3)")
+	telemetryPort := fs.Uint("telemetry-port", 10001, "vsock port carrying guest telemetry (§7.3)")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		log.Fatalf("parse flags: %v", err)
 	}
@@ -55,15 +56,31 @@ func main() {
 		defer streamLn.Close()
 	}
 
+	// Telemetry degrades the same way a stream port does, and for the same
+	// reason: losing sensing is worse than losing the VM only if you also lose
+	// the ability to stop it. A host that never sees a heartbeat reports the
+	// guest's telemetry unavailable, which is the honest answer.
+	telemetryLn, telemetryErr := vsock.Listen(uint32(*telemetryPort), nil)
+	if telemetryErr != nil {
+		fmt.Fprintf(os.Stderr, "vmobs-guestd: vsock listen port %d: %v; telemetry unavailable\n",
+			*telemetryPort, telemetryErr)
+	} else {
+		defer telemetryLn.Close()
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	fmt.Printf("vmobs-guestd: serving vsock control %d stream %d vm=%s boot=%s\n",
-		*controlPort, *streamPort, cfg.VMID, cfg.BootID)
+	fmt.Printf("vmobs-guestd: serving vsock control %d stream %d telemetry %d vm=%s boot=%s\n",
+		*controlPort, *streamPort, *telemetryPort, cfg.VMID, cfg.BootID)
 
-	// Both listeners close on ctx, so whichever returns first, the other is on
-	// its way down too; the first non-nil error is the one worth reporting.
-	done := make(chan error, 2)
+	// The heartbeat runs whether or not the port bound: what piles up in the
+	// ring while nobody reads is the evidence that nobody was reading.
+	go agent.RunHeartbeat(ctx, guest.HeartbeatInterval)
+
+	// Every listener closes on ctx, so whichever returns first, the others are
+	// on their way down too; the first non-nil error is the one worth reporting.
+	done := make(chan error, 3)
 	serve := func(name string, fn func(context.Context, net.Listener) error, l net.Listener) {
 		if err := fn(ctx, l); err != nil {
 			done <- fmt.Errorf("%s: %w", name, err)
@@ -74,6 +91,9 @@ func main() {
 	go serve("ServeControl", agent.ServeControl, ln)
 	if streamErr == nil {
 		go serve("ServeStreams", agent.ServeStreams, streamLn)
+	}
+	if telemetryErr == nil {
+		go serve("ServeTelemetry", agent.ServeTelemetry, telemetryLn)
 	}
 
 	if err := <-done; err != nil {

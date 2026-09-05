@@ -15,6 +15,7 @@ import (
 
 	"github.com/2389-research/observatory-v2/internal/guest/proto"
 	"github.com/2389-research/observatory-v2/internal/guest/pty"
+	"github.com/2389-research/observatory-v2/internal/guest/telemetry"
 )
 
 const (
@@ -30,6 +31,11 @@ type Agent struct {
 	manifest proto.CapabilityManifest
 	token    []byte // pre-converted for constant-time compare
 	broker   *pty.Broker
+
+	// telemetry holds the bounded ring sensors push into and the health block
+	// every heartbeat renders. It exists from construction so an event queued
+	// before any host connects still has somewhere to go.
+	telemetry *telemetry.Reporter
 
 	// PoweroffFunc is called after the agent sends shutdown_ack. Tests override
 	// this to avoid actually powering off the machine. Production default execs
@@ -62,10 +68,15 @@ func defaultPoweroff() {
 // NewAgent constructs an Agent from a validated BootConfig and a capability manifest.
 func NewAgent(cfg *BootConfig, manifest proto.CapabilityManifest) *Agent {
 	return &Agent{
-		cfg:          cfg,
-		manifest:     manifest,
-		token:        []byte(cfg.CapabilityToken),
-		broker:       pty.NewBroker(pty.BrokerConfig{}),
+		cfg:      cfg,
+		manifest: manifest,
+		token:    []byte(cfg.CapabilityToken),
+		broker:   pty.NewBroker(pty.BrokerConfig{}),
+		telemetry: telemetry.NewReporter(telemetry.ReporterConfig{
+			Version:           AgentVersion,
+			RingCapacity:      telemetryRingCapacity,
+			HeartbeatInterval: HeartbeatInterval,
+		}),
 		PoweroffFunc: defaultPoweroff,
 	}
 }
