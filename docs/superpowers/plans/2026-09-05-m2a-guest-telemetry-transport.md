@@ -154,11 +154,35 @@ Each sensor entry, once M2b/M2c add one:
 
 ### Task 3: The runner's telemetry loop — assign, validate, stamp, spool
 
-- [ ] `internal/runner/telemetry.go`: dial 10001 with the same retry/backoff shape the supervision loop uses; derive `telemetry_instance_id` from `cfg.InstanceID` plus a per-connection generation counter so a guestd restart is visible as a new stream; handshake; then read frames.
-- [ ] Per frame: reject reserved fields; validate `seq` strictly increasing; build the envelope with `Provenance: guest_reported`, `Sensor: "guestd"`, `HostReceivedAt: now`, the guest's `GuestWallAt`/`GuestMonotonicNS` carried through as reported; spool it.
-- [ ] On a seq regression or a disagreeing identity echo: drop the frame, emit one `telemetry.integrity_failure` (host_observed, the runner's own stream) per connection, and keep the connection.
-- [ ] Wire it beside the ping loop in `runner.go` so telemetry failure never ends supervision, and channel loss on 10000 does not silently stop telemetry.
-- [ ] Tests: a pushed heartbeat reaches the spool with `guest_reported` and the assigned instance id; a frame carrying `provenance` is rejected; a regressed seq is dropped and reported exactly once; a reconnect re-sending its tail produces no duplicate rows through a real store; a guestd restart yields a distinct instance id; telemetry stalling does not stop the ping cycle.
+- [x] `internal/runner/telemetry.go`: dial 10001 with the same retry/backoff shape the supervision loop uses; derive the stream identity from `cfg.InstanceID` and the guest's epoch; handshake; then read frames.
+- [x] Per frame: reject reserved fields; refuse a kind the registry does not carry as `guest_reported`; build the envelope with `Provenance: guest_reported`, `Sensor: "guestd"`, `HostReceivedAt: now`, the guest's `GuestWallAt`/`GuestMonotonicNS` carried through as reported; spool it, then acknowledge it.
+- [x] On a frame the runner cannot place in the stream: record a `telemetry.integrity_failure` (host_observed, the runner's own stream) and reconnect. On a frame it understands but will not accept: record the refusal, acknowledge the sequence, keep reading.
+- [x] Wire it beside the ping loop in `runner.go` so telemetry failure never ends supervision, and channel loss on 10000 does not silently stop telemetry. It stops before the spool closes, so the end marker stays last.
+- [x] Tests: `internal/runner/telemetry_test.go` (real guest agent, real runner, real spool, over a port-routing vsock stand-in) and `telemetry_internal_test.go` (stream identity).
+
+**Ruling — the stream identity is a UUIDv5 of (runner instance id, guest epoch), not a generation counter.** `source_instance_id` must be a lowercase UUID (`internal/events/validate.go`), which rules out both a counter suffix and the runner's own instance id. The guest contributes an opaque token bounded by `^[A-Za-z0-9_.-]{1,64}$` and learns nothing about what came out of it, so the identity stays a host claim. Without the epoch a guestd restart counts from one again under the same stream and every sequence collides with one already spooled. Cost if wrong: a reconnect that should have resumed instead forks a stream, which shows up as a duplicated tail rather than as loss.
+
+**Ruling — `seq` is not validated as strictly increasing; the plan's `guest_seq_regression` rule is dropped.** Under at-least-once delivery with cumulative acks, `seq <= lastSpooled` is the *expected* case: it is what a reconnect looks like. The runner acks it and does not spool it twice. The real failure — the same key carrying different bytes — is the store's `seq_payload_conflict`, which detects it by comparing payload hashes, which the runner cannot do without keeping every payload. Cost if wrong: a guest that reuses a sequence for a genuinely different event is caught one layer later, at import, with the event recorded rather than dropped.
+
+**Ruling — the runner refuses a kind the registry does not carry as `guest_reported`.** The store refuses it too, but with a hard `Append` error, and `internal/spool/importer.go` breaks out of a VM's segment on one of those *without advancing its cursor*. One guest-pushed `vm.vmm_exited` would therefore wedge that VM's import permanently and take every later event in its spool with it — a guest silencing its own host observation. The check belongs at the ingress that stamps the provenance. Two records, because they are two facts: `telemetry.unregistered_kind` for a kind nobody registered (version skew or a typo), `telemetry.integrity_failure` with `failure: guest_provenance_claim` for a registered `host_observed` kind arriving from a guest. Both acknowledge the sequence — the refusal is durable, so the sequence is decided, and an unacknowledged frame comes back on every reconnect forever. Cost if wrong: a legitimately new guest kind someone forgot to register is refused at the runner with a recorded reason instead of at the store, which is the better failure anyway.
+
+**Ruling — the dial backoff resets only for a connection that carried a frame.** A guest that fails the handshake, or that reproduces the same malformed frame every time, would otherwise be redialed once a second forever, and each attempt spools the runner's complaint — enough of them rotate the VM's real history out of a bounded spool. Cost if wrong: a healthy guest that says nothing for a while and then drops its connection redials a little slower than it might; the first frame that lands resets it.
+
+**Ruling — `telemetry.integrity_failure`'s registry semantics widen.** The kind now carries five named failures across two emitters (`seq_payload_conflict`, `stream_scope_rebind`, `guest_provenance_claim`, `unexpected_frame`, `malformed_push`); the old text described only the first. A semantics string that names one of five cases is published to API clients as though it were the whole contract.
+
+**Not a duplicate:** `internal/runner/vsockrouter_test.go` is the linux terminal test's `vsockRouter` moved to a shared unix-tagged file, not a second copy. The telemetry tests need the same port routing, and the existing single-port `connectOKListener` ignores the requested port — it would have handed telemetry to the control channel and called the test green.
+
+**Mutation proof: 17 of 17 killed.** Two survived the first pass and named two properties nothing
+asserted. *The epoch is not validated* survived because every fake guest sent an acceptable epoch —
+covered now by `TestRunnerRefusesAnUnacceptableEpoch`, which counts events rather than inspecting
+identities: a refused epoch that named a stream anyway would produce a second `guest.sensor_health`
+from the same seq 1, because a second identity carries its own sequence space. *The ack is sent
+before the spool append* survived because no test made an append fail — covered now by
+`TestRunnerNeverAcksWhatItCouldNotSpool`, which sends a spoolable push first (proving the ack path
+is live on that connection), then one whose `data` is a number where the envelope needs an object,
+and asserts the next thing on the wire is a close rather than an acknowledgement. Acking first
+loses the event on both sides at once: the guest releases it on the host's word, and the host never
+wrote it.
 
 ### Task 4: Rootfs rebuild and lock re-pin
 

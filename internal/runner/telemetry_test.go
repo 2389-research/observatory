@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -34,6 +35,9 @@ const (
 	telInstance  = "b1c2d3e4-f5a6-4b7c-8d9e-0f1a2b3c4d5e"
 	telToken     = "telemetry-capability-token-1234"
 	telSpoolWait = 10 * time.Second
+	// fakeEpoch is what a well-behaved fake guest names its sequence space.
+	// It has to satisfy guestEpochPattern, which is the point of naming it once.
+	fakeEpoch = "fake-epoch"
 )
 
 // TestRunnerSpoolsWhatTheGuestReports drives the whole path with real parts: a
@@ -311,6 +315,142 @@ func TestRunnerAcksADuplicateWithoutSpoolingItTwice(t *testing.T) {
 	}
 }
 
+// TestRunnerNeverAcksWhatItCouldNotSpool pins the ordering that gives an ack
+// its meaning. The ack tells the guest the host holds the event durably, and
+// the guest drops it on that word alone, so the ack can only follow an Append
+// that returned. Acknowledge first and a refused push is lost by both sides at
+// once: the guest released it, the host never wrote it, and nothing counted it.
+func TestRunnerNeverAcksWhatItCouldNotSpool(t *testing.T) {
+	h := newTelemetryHarness(t)
+	h.startGuest()
+
+	// What the guest heard back after the push the runner cannot spool.
+	// Buffered, and written by the first connection only, so a redial cannot
+	// overwrite the answer the test is waiting on.
+	afterBadPush := make(chan string, 1)
+	var served atomic.Int32
+	h.serveFakeTelemetry(func(conn net.Conn) {
+		hello, err := readHello(conn)
+		if err != nil {
+			return
+		}
+		_ = acceptHello(conn, hello)
+		if served.Add(1) != 1 {
+			io.Copy(io.Discard, conn) //nolint:errcheck
+			return
+		}
+
+		// A push the runner can spool, first, so the ack path is proven live on
+		// this connection before the interesting one goes out. Without it, "no
+		// ack arrived" would also be what a dead connection looks like.
+		if err := writeFakePush(conn, "1", "guest.sensor_health", `{"agent":{}}`); err != nil {
+			return
+		}
+		env, err := proto.ReadControl(conn)
+		if err != nil || env.Kind != proto.KindTelemetryAck {
+			afterBadPush <- fmt.Sprintf("the spoolable push went unacknowledged (%v, %v)", env.Kind, err)
+			return
+		}
+
+		// Now one the runner cannot write: data is a number where the envelope
+		// needs an object. The wire contract passes it — that layer never reads
+		// the payload — so the refusal happens where the append would have.
+		if err := writeFakePush(conn, "2", "guest.sensor_health", `5`); err != nil {
+			return
+		}
+		next, err := proto.ReadControl(conn)
+		if err != nil {
+			afterBadPush <- "closed"
+			return
+		}
+		afterBadPush <- next.Kind
+	})
+
+	h.run()
+
+	select {
+	case got := <-afterBadPush:
+		if got != "closed" {
+			t.Errorf("after a push it could not spool the runner sent %q; the guest would "+
+				"release an event no host holds", got)
+		}
+	case <-time.After(telSpoolWait):
+		t.Fatal("the fake guest never got as far as the unspoolable push")
+	}
+
+	if n := h.countKind("guest.sensor_health"); n != 1 {
+		t.Errorf("spooled %d events, want the 1 well-formed one", n)
+	}
+}
+
+// TestRunnerRefusesAnUnacceptableEpoch covers the guest's only contribution to
+// the identity the host assigns. The epoch is opaque, so the runner cannot
+// judge whether it is the right one — but it can insist it is a token, and it
+// has to: the epoch is folded into a stream id and named in the handshake
+// error, and an unbounded string from an untrusted guest belongs in neither.
+func TestRunnerRefusesAnUnacceptableEpoch(t *testing.T) {
+	h := newTelemetryHarness(t)
+	h.startGuest()
+
+	// Connections served, reported as they end. A progress signal, not a
+	// ledger: the send never blocks, because a fake guest that outlives the
+	// assertions must not hold the harness open.
+	conns := make(chan int, 64)
+	var served atomic.Int32
+	h.serveFakeTelemetry(func(conn net.Conn) {
+		n := int(served.Add(1))
+		defer func() {
+			select {
+			case conns <- n:
+			default:
+			}
+		}()
+		hello, err := readHello(conn)
+		if err != nil {
+			return
+		}
+		epoch := fakeEpoch
+		if n == 1 {
+			// Spaces and traversal are exactly what the pattern exists to keep
+			// out of a derived identity and out of the log line naming it.
+			epoch = "../not an epoch"
+		}
+		if err := proto.WriteControl(conn, proto.KindHelloAck, proto.HelloAck{
+			Accepted:            true,
+			TelemetryInstanceID: hello.SourceInstance,
+			TelemetryEpoch:      epoch,
+		}); err != nil {
+			return
+		}
+		if err := writeFakePush(conn, "1", "guest.sensor_health", `{"agent":{}}`); err != nil {
+			return
+		}
+		// One read, so the connection outlives whatever the runner decides
+		// about the push rather than racing its own close against the append.
+		_, _ = proto.ReadControl(conn)
+	})
+
+	h.run()
+
+	// Three connections: the refused one, the accepted one whose push is
+	// spooled, and one more whose re-send of seq 1 the dedup absorbs. A stream
+	// named from the refused epoch would have produced a second event by then,
+	// because it is a different identity with its own sequence space.
+	deadline := time.After(telSpoolWait)
+	for seen := 0; seen < 3; {
+		select {
+		case <-conns:
+			seen++
+		case <-deadline:
+			t.Fatalf("only %d telemetry connections in %s", seen, telSpoolWait)
+		}
+	}
+
+	if n := h.countKind("guest.sensor_health"); n != 1 {
+		t.Errorf("spooled %d events, want 1: an epoch the host refused must not name a stream", n)
+	}
+}
+
 // --- harness ---------------------------------------------------------------
 
 // telemetryHarness wires a runner to a fake VM: a unix socket standing in for
@@ -505,7 +645,7 @@ func acceptHello(conn net.Conn, hello proto.Hello) error {
 	return proto.WriteControl(conn, proto.KindHelloAck, proto.HelloAck{
 		Accepted:            true,
 		TelemetryInstanceID: hello.SourceInstance,
-		TelemetryEpoch:      "fake-epoch",
+		TelemetryEpoch:      fakeEpoch,
 	})
 }
 
