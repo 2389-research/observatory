@@ -210,6 +210,33 @@ the privd and jailer suite times locally; Linux ext4 is cheaper.
 creates `<stateDir>/vms/<id>/` and then publishes `manifest.json` into it, so a
 crash between the two leaves a directory with no record. That state is safe —
 the launch has provisioned nothing else at that point — and `allocateSlot`
-already reads an unreadable manifest as a free slot. Keep it that way: making
-a manifest read error fatal there turns a harmless empty directory into a
-daemon that cannot allocate.
+reads it as a free slot. Keep that case free: making an *absent* manifest fatal
+turns a harmless empty directory into a daemon that cannot allocate. A manifest
+that exists and will not parse is the opposite case and `allocateSlot` refuses
+it; see the next entry.
+
+**A record that names an identity is the lease on it.** The jailer manifest is
+not only a list of what a launch provisioned: `allocateSlot` reads a slot as
+taken for exactly as long as some manifest names it, and `uid = JailUIDBase +
+slot`, `cid = CIDBase + slot`. So removing the manifest *is* the act of
+reclaiming the uid and the CID, and every consequence follows from that.
+`doRelease` removes it last, after its verdict, because returning an error with
+the manifest already gone hands slot N to the next launch while the failed VM's
+chroot still lives under uid N on CID N. `allocateSlot` fails rather than skip a
+manifest it cannot parse, because unknown is not free — `Reconcile` has always
+called that case `ambiguous` and touched nothing (SPEC §5.5). The way out of a
+refusal is `Release`, which is keyed by `vm_id` alone and reads no manifest, so
+deleting the named VM clears it. Apply the same test to any other record that
+names a resource: privd's ledger entry, the netns name, the stage dir.
+
+**A retained row is a bounded result; it is not an actionable one.** SPEC §5.3
+asks for cleanup failures to be recorded *and* retried, and for a long time
+only the retry existed. A `DELETE` that cannot release answers its caller with
+a typed cause and remediations, but that is a response body — there is no
+operation row for a delete — and `Reconcile`'s retry at the next start answered
+nobody at all. `store.RecordCleanupFailure` appends `vm.cleanup_failed` (vm_id,
+the state the row is held in, the runtime's redacted reason) from all three
+sites, and the situation engine raises it as a `lifecycle_failed` attention item
+with a force-delete suggestion. It is a statement, not a transition: no revision
+is spent, because nothing about the VM changed — the controller merely failed
+again to change it.
