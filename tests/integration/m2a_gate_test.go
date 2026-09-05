@@ -28,6 +28,19 @@ const (
 	m2aChannelEstablishedKind = "guest.channel_established"
 )
 
+// guestdStateProbe asks the guest whether its agent is running, and guestdActive
+// is the answer that means yes.
+//
+// The tag is not decoration. `systemctl is-active` answers the bare words active,
+// inactive or failed, so a substring test for "active" passes on "inactive" — the
+// assertion would hold in exactly the case it exists to catch. Tagging the answer
+// makes the two words disjoint. The echoed command itself cannot forge a match:
+// what it contains is "guestd-state=/".
+const (
+	guestdStateProbe = `systemctl is-active guestd | sed 's/^/guestd-state=/'`
+	guestdActive     = "guestd-state=active"
+)
+
 // m2aRingCapacity is telemetryRingCapacity in internal/guest/telemetry.go. The
 // gate asserts the guest reports the bound it was built with: §139's drop count
 // says nothing without the capacity it was measured against.
@@ -207,7 +220,7 @@ func TestM2aGate(t *testing.T) {
 
 	// ── AT-074: the agent dies, the VM does not ────────────────────────────────
 	t.Run("at074_guestd_stopped_degrades", func(t *testing.T) {
-		if out := term.runGuest("systemctl is-active guestd", m1bCommandTimeout); !strings.Contains(out, "active") {
+		if out := term.runGuest(guestdStateProbe, m1bCommandTimeout); !strings.Contains(out, guestdActive) {
 			t.Fatalf("guestd is not active in the guest before the test starts: %s", tailOf(out, 400))
 		}
 
@@ -276,7 +289,7 @@ func TestM2aGate(t *testing.T) {
 		// the control channel recovered.
 		revived := daemon.openTerm(t, daemon.createTerminal(t, vmID).ID, "m2a-guest-revived")
 		revived.takeWriter()
-		if out := revived.runGuest("systemctl is-active guestd", m1bCommandTimeout); !strings.Contains(out, "active") {
+		if out := revived.runGuest(guestdStateProbe, m1bCommandTimeout); !strings.Contains(out, guestdActive) {
 			t.Fatalf("guestd is not active again: %s", tailOf(out, 400))
 		}
 		// Detached for the same reason as before, with a shorter fuse: this
@@ -372,56 +385,71 @@ func TestM2aGate(t *testing.T) {
 	})
 
 	// ── AT-075: a controller restarts, the VM it owns does not ─────────────────
+	//
+	// The kill and the restart run here, in the parent body, and the subtest below
+	// only reads what they produced. Two structural reasons. A daemon started
+	// under a subtest's t is torn down when that subtest returns, and the last
+	// subtest still needs a controller to answer. And the assertions compare facts
+	// captured on both sides of the kill, so the capture has to outlive whichever
+	// t.Run reads it.
+	//
+	// It is the primary controller that dies, and the VM this gate has been
+	// watching all along that gets adopted.
+	//
+	// An earlier draft ran the restart on a private state dir instead, booting a
+	// third VM under a pair of throwaway daemons while the primary was still up.
+	// That never reached the restart: the launch failed at stage attached with
+	// "runner exited before attaching", and doRollback removed the VM state dir
+	// with runner.log inside it, so the fatal step was never isolated. What is
+	// certain is that the setup put two live controllers on one host, which
+	// production never does, and that allocateSlot scans only its own state dir —
+	// so both handed out slot 0, and slot is what the jail uid and the guest CID
+	// are derived from. The scenario AT-075 names needs one controller anyway.
+	beforeVM := daemon.apiGet(t, "/vms/"+vmID)
+	beforeRevision := stringField(beforeVM, "revision")
+	beforeState := stringField(beforeVM, "observed_state")
+	beforeManifest, err := readM1aManifest(daemon.stateDir, vmID)
+	if err != nil {
+		t.Fatalf("read manifest before the controller restart: %v", err)
+	}
+	if beforeManifest.VMMPID == 0 || beforeManifest.RunnerPID == 0 {
+		t.Fatalf("manifest records no process identity to reconcile from: %+v", beforeManifest)
+	}
+	vmmStart := procStartTime(t, beforeManifest.VMMPID)
+	runnerStart := procStartTime(t, beforeManifest.RunnerPID)
+	// Read through the doomed controller while it can still answer.
+	beforePage := daemon.heartbeatPage(t, vmID)
+	beforeStreams, _ := telemetryStreams(beforePage)
+
+	// SIGKILL, not a shutdown: a controller that got to run its own teardown
+	// proves nothing about reconciliation.
+	daemon.cancel()
+	waitControllerGone(t, daemon, 30*time.Second)
+
+	// The successor needs its own daemon directory. startDaemon installs
+	// vmobs-runner beside the daemon binary with O_TRUNC, and the whole premise
+	// here is that the dead controller's runner is still executing that file —
+	// Linux answers ETXTBSY for a running executable opened for writing. Each
+	// buildBinary call answers a fresh temp dir, which is all it takes.
+	successorDaemonBin := buildBinary(t, "github.com/2389-research/observatory-v2/cmd/vmobsd")
+	successorRunnerBin := buildBinary(t, "github.com/2389-research/observatory-v2/cmd/vmobs-runner")
+	successor := startDaemon(t, repoRoot, successorDaemonBin, successorRunnerBin, "m2a-successor",
+		withRequiredAuth(m1bOperator, m1bPassword), withStateDir(daemon.stateDir))
+	// Teardown follows ownership: the VM belongs to whoever can still delete it.
+	successor.adoptVMsFrom(daemon)
+
+	// Reconcile has already run — it happens inside NewManager, before the daemon
+	// answers the readiness probe startDaemon waited on — so these read the
+	// verdict rather than race it.
+	afterVM := successor.apiGet(t, "/vms/"+vmID)
+	afterState := stringField(afterVM, "observed_state")
+	afterRevision := stringField(afterVM, "revision")
+	afterManifest, err := readM1aManifest(daemon.stateDir, vmID)
+	if err != nil {
+		t.Fatalf("read manifest after the controller restart: %v", err)
+	}
+
 	t.Run("at075_adoption_across_controller_restart", func(t *testing.T) {
-		// One state dir, two daemon directories. The state dir is the whole of a
-		// controller restart: the manifests, the spool and the database are what
-		// the second process inherits, and §320 reconciles from them.
-		//
-		// The daemon directories have to differ. startDaemon copies vmobs-runner
-		// beside the daemon binary with O_TRUNC, and the point of this test is
-		// that the first controller's runner outlives it — Linux refuses to open
-		// a running executable for writing, so a shared directory would fail the
-		// second startDaemon with ETXTBSY. Each buildBinary call answers a fresh
-		// temp dir, which is all it takes.
-		shared := filepath.Join(t.TempDir(), "adopt-state")
-		firstDaemonBin := buildBinary(t, "github.com/2389-research/observatory-v2/cmd/vmobsd")
-		firstRunnerBin := buildBinary(t, "github.com/2389-research/observatory-v2/cmd/vmobs-runner")
-		secondDaemonBin := buildBinary(t, "github.com/2389-research/observatory-v2/cmd/vmobsd")
-		secondRunnerBin := buildBinary(t, "github.com/2389-research/observatory-v2/cmd/vmobs-runner")
-
-		first := startDaemon(t, repoRoot, firstDaemonBin, firstRunnerBin, "m2a-adopt-first", withStateDir(shared))
-		adoptVM := first.createVM(t, "m2a-adopt")
-		adoptCtx, cancelAdopt := context.WithTimeout(context.Background(), 10*time.Minute)
-		defer cancelAdopt()
-		first.waitVMState(adoptCtx, t, adoptVM, "running")
-
-		beforeVM := first.apiGet(t, "/vms/"+adoptVM)
-		beforeRevision := stringField(beforeVM, "revision")
-		beforeManifest, err := readM1aManifest(shared, adoptVM)
-		if err != nil {
-			t.Fatalf("read manifest before restart: %v", err)
-		}
-		if beforeManifest.VMMPID == 0 || beforeManifest.RunnerPID == 0 {
-			t.Fatalf("manifest records no process identity to reconcile from: %+v", beforeManifest)
-		}
-		vmmStart := procStartTime(t, beforeManifest.VMMPID)
-
-		// SIGKILL, not a shutdown: a controller that got to run its own teardown
-		// proves nothing about reconciliation.
-		first.cancel()
-		waitControllerGone(t, first, 30*time.Second)
-
-		second := startDaemon(t, repoRoot, secondDaemonBin, secondRunnerBin, "m2a-adopt-second", withStateDir(shared))
-		second.adoptVMsFrom(first)
-
-		afterVM := second.apiGet(t, "/vms/"+adoptVM)
-		afterState := stringField(afterVM, "observed_state")
-		afterRevision := stringField(afterVM, "revision")
-		afterManifest, err := readM1aManifest(shared, adoptVM)
-		if err != nil {
-			t.Fatalf("read manifest after restart: %v", err)
-		}
-
 		if afterState != "running" {
 			t.Errorf("observed_state = %q after the controller restarted, want %q — a live VM the new "+
 				"controller could account for must not be failed", afterState, "running")
@@ -448,41 +476,50 @@ func TestM2aGate(t *testing.T) {
 			t.Errorf("runner pid %d -> %d; the runner was respawned, so this run did not exercise "+
 				"adoption of a healthy attached runner", beforeManifest.RunnerPID, afterManifest.RunnerPID)
 		}
-		if afterManifest.RunnerStart != beforeManifest.RunnerStart {
-			t.Errorf("runner start time %q -> %q on pid %d", beforeManifest.RunnerStart, afterManifest.RunnerStart, afterManifest.RunnerPID)
+		if got := procStartTime(t, afterManifest.RunnerPID); got != runnerStart {
+			t.Errorf("runner pid %d start time %q -> %q; the pid survived but the process behind it "+
+				"did not", afterManifest.RunnerPID, runnerStart, got)
 		}
 
-		// Adoption that cannot act is cosmetic: the new controller has to be able
-		// to stop the VM it claims to own.
-		second.stopVM(t, adoptVM)
-		stopCtx, cancelStop := context.WithTimeout(context.Background(), 3*time.Minute)
-		defer cancelStop()
-		second.waitVMState(stopCtx, t, adoptVM, "stopped")
-		second.deleteVM(t, adoptVM)
+		// Adoption that cannot observe is cosmetic. The heartbeats keep arriving
+		// on the same stream the dead controller's runner opened — the runner was
+		// never restarted, so a new identity here would mean the transport was
+		// rebuilt rather than inherited.
+		page := successor.waitHeartbeats(t, vmID, len(beforePage)+1, 90*time.Second)
+		afterStreams, _ := telemetryStreams(page)
+		if len(afterStreams) != len(beforeStreams) {
+			t.Errorf("stream identities %d -> %d across the controller restart (%v -> %v); the runner "+
+				"kept running, so its stream should have too", len(beforeStreams), len(afterStreams), beforeStreams, afterStreams)
+		}
 
 		evidenceSubtest(t, &evidence, "at075_adoption_across_controller_restart", fmt.Sprintf(
-			"vm=%s state dir shared by two daemons; first controller SIGKILLed (no teardown)\n"+
+			"vm=%s primary controller SIGKILLed (no teardown), successor started over the same state dir\n"+
 				"observed_state: %q -> %q\n"+
 				"revision: %s -> %s (unchanged: adoption writes no transition)\n"+
 				"vmm pid %d start %q -> pid %d start %q (same process, identity checked by both)\n"+
 				"runner pid %d start %q -> pid %d start %q (unchanged: the attached-runner branch ran, not a respawn)\n"+
-				"the second controller then stopped and deleted the VM it adopted",
-			adoptVM,
-			stringField(beforeVM, "observed_state"), afterState,
+				"telemetry stream identities across the restart: %v -> %v (%d heartbeats after)\n"+
+				"PARTIAL — the runner-kill half of AT-075 is not exercised here; it is unit-covered in "+
+				"internal/jailer (reconcile_adoption_linux_test.go, runner_argv_linux_test.go).",
+			vmID,
+			beforeState, afterState,
 			beforeRevision, afterRevision,
 			beforeManifest.VMMPID, vmmStart, afterManifest.VMMPID, procStartTimeOrGone(afterManifest.VMMPID),
-			beforeManifest.RunnerPID, beforeManifest.RunnerStart, afterManifest.RunnerPID, afterManifest.RunnerStart,
+			beforeManifest.RunnerPID, runnerStart, afterManifest.RunnerPID, procStartTimeOrGone(afterManifest.RunnerPID),
+			beforeStreams, afterStreams, len(page),
 		))
 	})
 
 	// ── The other half of §952: nothing to observe ─────────────────────────────
+	// It runs against the successor, which is also the last thing AT-075 needs: a
+	// controller that adopted a VM but cannot act on it has claimed nothing.
 	t.Run("stopped_vm_is_unavailable", func(t *testing.T) {
-		daemon.stopVM(t, vmID)
+		successor.stopVM(t, vmID)
 		stopCtx, cancelStop := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer cancelStop()
-		daemon.waitVMState(stopCtx, t, vmID, "stopped")
+		successor.waitVMState(stopCtx, t, vmID, "stopped")
 
-		vm := daemon.apiGet(t, "/vms/"+vmID)
+		vm := successor.apiGet(t, "/vms/"+vmID)
 		health := stringField(vm, "telemetry_health")
 		lifecycle := stringField(vm, "observed_state")
 		if health != "unavailable" {
@@ -492,10 +529,10 @@ func TestM2aGate(t *testing.T) {
 
 		// The heartbeats the VM sent while it ran are still there. Telemetry
 		// health is a fact about now; the record is not.
-		page := daemon.heartbeatPage(t, vmID)
+		page := successor.heartbeatPage(t, vmID)
 		order, _ := telemetryStreams(page)
 
-		daemon.deleteVM(t, vmID)
+		successor.deleteVM(t, vmID)
 
 		evidenceSubtest(t, &evidence, "stopped_vm_is_unavailable", fmt.Sprintf(
 			"vm=%s observed_state=%q telemetry_health=%q\n"+

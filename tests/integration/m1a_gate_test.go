@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -225,9 +226,9 @@ func withRequiredAuth(username, password string) daemonOption {
 // a controller restart: the manifests, the spool and the database are what the
 // second process inherits, and §320 adoption is decided from them.
 //
-// Not combinable with withRequiredAuth as it stands — auth.InitStore would be
-// asked to initialize a store the first daemon already built. No caller needs
-// both, and the gate that reproduces a restart needs no operator identity.
+// Combines with withRequiredAuth: the successor inherits the operator record its
+// predecessor wrote rather than initializing a second one. See the InitStore call
+// in startDaemon for why tolerating that is safe.
 func withStateDir(dir string) daemonOption {
 	return func(o *daemonOptions) {
 		o.stateDir = dir
@@ -299,9 +300,16 @@ func startDaemon(t *testing.T, repoRoot, daemonBin, runnerBin, label string, opt
 
 	// The credential store has to exist before the daemon opens it, so it is
 	// built here rather than by a later login.
+	//
+	// A successor daemon over a state dir its predecessor built finds the store
+	// already there, and InitStore refuses to overwrite one. That is the right
+	// refusal and the wrong outcome here: the operator record is exactly what a
+	// restarted controller is supposed to inherit. Tolerating the typed error is
+	// safe because the login immediately below proves the inherited credentials
+	// are the ones this daemon was handed.
 	credDir := filepath.Join(stateDir, "auth")
 	if o.operator != "" {
-		if _, err := auth.InitStore(credDir, o.operator, o.password); err != nil {
+		if _, err := auth.InitStore(credDir, o.operator, o.password); err != nil && !errors.Is(err, auth.ErrAlreadyInitialized) {
 			t.Fatalf("startDaemon %s: init credential store: %v", label, err)
 		}
 	}
