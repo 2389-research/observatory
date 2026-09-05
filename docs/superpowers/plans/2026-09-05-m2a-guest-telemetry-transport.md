@@ -98,13 +98,13 @@ guest  -> runner  hello_ack   { accepted, reason, telemetry_instance_id, resume_
 - `telemetry_instance_id` is echoed by the guest but **chosen by the runner** and carried in `Hello`; the guest stores it and stamps nothing with it. If the echo disagrees with what the runner sent, the runner closes the connection and reports `telemetry.integrity_failure`.
 - `resume_after_seq` is the guest's report of the highest seq it believes the host accepted, a decimal string. Advisory only — the runner does not trust it and the store's dedup is the real defence.
 
-**Push frames.** One direction, guest to host, newline-delimited JSON, each frame ≤ 64 KiB:
+**Push frames.** One direction, guest to host, riding the existing `FrameControl` path (`proto.WriteControl` / `proto.ReadControl`) with kind `telemetry.push`. Not a second framing: `ReadFrame` already validates a hostile length *before* allocating, which is exactly what a port fed by an untrusted guest needs, and the 1 MiB ceiling it enforces is one the same guest already reaches on port 10000. The telemetry layer caps the decoded payload at 64 KiB on top of that.
 
 ```json
 { "seq": "41", "kind": "guest.sensor_health", "guest_wall_at": "...", "guest_monotonic_ns": "...", "data": { ... } }
 ```
 
-The runner rejects a frame that carries any of `provenance`, `source_instance_id`, `host_received_at`, `event_id`, `vm_id`, `boot_id`, or `sensor` — those are the host's to assign, and a guest offering one is a protocol violation, not an input.
+**Those five keys and no others.** `DecodeTelemetryPush` runs an allow-list, not a deny-list naming the fields the host assigns — a deny-list would silently start permitting whichever field `events.Envelope` grows next, while an allow-list refuses it until someone decides otherwise. A guest offering `provenance`, `source_instance_id`, `host_received_at` or any other unlisted key is a protocol violation, not an input to sanitize.
 
 **Seq rule.** Strictly increasing within a connection *and* across reconnects on the same `telemetry_instance_id`. `seq <= last_accepted` is dropped, counted, and reported once per connection as `telemetry.integrity_failure` with `failure: "guest_seq_regression"`.
 
@@ -129,9 +129,12 @@ Each sensor entry, once M2b/M2c add one:
 
 ### Task 1: Register `guest.sensor_health` and define the telemetry frames
 
-- [ ] `internal/events/registry.go`: register `guest.sensor_health`, family `guest`, schema version 1, provenance `guest_reported`, with caveats stating honestly that a heartbeat proves the agent is alive and not that any sensor observed anything, that an empty sensor list means no sensor is registered rather than no activity, and that drop counts are the guest's own measurement.
-- [ ] `internal/guest/proto/telemetry.go`: `TelemetryPort = 10001`, the push frame type, the `HelloAck` telemetry fields, and the reserved-field rejection list as one exported set so the runner and any future guest cannot drift.
-- [ ] Tests: the kind round-trips through `LookupKind` and `/meta/event-kinds`; an envelope with this kind and `host_observed` fails `ErrProvenanceMismatch`; the reserved-field set rejects each name.
+- [x] `internal/events/registry.go`: register `guest.sensor_health`, family `guest`, schema version 1, provenance `guest_reported`, with caveats stating honestly that a heartbeat proves the agent is alive and not that any sensor observed anything, that an empty sensor list means no sensor is registered rather than no activity, and that drop counts are the guest's own measurement.
+- [x] `internal/guest/proto/telemetry.go`: `TelemetryPort = 10001`, `KindTelemetryPush`, `MaxTelemetryPayload`, the `TelemetryPush` type and `DecodeTelemetryPush`. `HelloAck` gains `telemetry_instance_id` and `resume_after_seq`, both `omitempty`, exactly as `resume_offset`/`gap` already serve only the stream port.
+- [x] Tests: the kind is registered as `guest_reported` in family `guest` with caveats; the port is 10001; a push frame round-trips with a `guest_monotonic_ns` past 2^53 intact; each of thirteen host-assigned keys is refused by name; a missing or non-decimal `seq` and a missing `kind` are refused; an over-cap payload is refused.
+- **Ruling: allow-list, not deny-list.** The plan first said "reject a frame carrying any of `provenance`, `source_instance_id`, …". A deny-list is wrong here for a reason that outlives this slice: it silently starts permitting whatever field the envelope grows next. The frame admits `seq`, `kind`, `guest_wall_at`, `guest_monotonic_ns`, `data` and nothing else. Cost if wrong: a later sensor wanting `process_key` or `run_id` on the frame adds it to the list deliberately, which is the point.
+- **Ruling: reuse `FrameControl`, do not invent a telemetry frame type.** The plan sketched newline-delimited JSON; the repo already has length-prefixed framing that bounds a hostile length before allocation, which is strictly better against an untrusted guest — a newline-delimited reader scans for a delimiter that may never arrive. A dedicated frame type would buy a smaller pre-allocation ceiling, but the guest already reaches the 1 MiB control ceiling on port 10000, so it is not new exposure. Cost if wrong: telemetry shares a size ceiling with control verbs, and the 64 KiB cap sits one layer up.
+- Six mutation proofs, all killed: the allow-list accepting any key; no payload cap; `seq` unvalidated; the port set to 10000; the kind registered `host_observed`; the kind registered with no caveats.
 
 ### Task 2: The guest's bounded ring, sensor registry, and third listener
 
