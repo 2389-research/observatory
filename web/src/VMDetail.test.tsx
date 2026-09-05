@@ -67,6 +67,21 @@ describe('VMDetail', () => {
     expect(head).toHaveTextContent('512 MiB')
   })
 
+  // SPEC §138: never encode observation quality only in lifecycle state. A VM
+  // that is running while nothing has been heard from its agent has to read as
+  // both, or the header quietly claims the VM is fine.
+  it('shows telemetry health beside lifecycle state', async () => {
+    vi.stubGlobal(
+      'fetch',
+      routeFetch({ vm: jsonResponse(testVM({ observed_state: 'running', telemetry_health: 'unavailable' })) }),
+    )
+    render(<VMDetail vmID="vm-1" onBack={() => {}} />)
+
+    const head = await screen.findByTestId('vm-identity')
+    expect(head).toHaveTextContent('running')
+    expect(within(head).getByTestId('telemetry-health')).toHaveTextContent('unavailable')
+  })
+
   it('says no guest address is published rather than inventing one', async () => {
     vi.stubGlobal('fetch', routeFetch())
     render(<VMDetail vmID="vm-1" onBack={() => {}} />)

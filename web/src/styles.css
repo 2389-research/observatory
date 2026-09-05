@@ -147,7 +147,8 @@ h2 {
   font-weight: 600;
 }
 
-.state-running {
+.state-running,
+.state-healthy {
   color: var(--ok);
 }
 
@@ -159,12 +160,20 @@ h2 {
 .state-provisioning,
 .state-starting,
 .state-stopping,
-.state-deleting {
+.state-deleting,
+.state-unavailable {
   color: var(--warn);
 }
 
 .state-stopped,
 .state-paused {
+  color: var(--dim);
+}
+
+.telemetry {
+  margin-left: 10px;
+  font-size: 12px;
+  font-weight: 400;
   color: var(--dim);
 }
 

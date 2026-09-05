@@ -37,7 +37,13 @@ function Identity({ vm }: { vm: VM }) {
       <h2>
         VM: {neutralize(vm.name)}{' '}
         <span className={`state state-${vm.observed_state}`}>{vm.observed_state}</span>
-        {vm.desired_state !== vm.observed_state && <span className="drift">want {vm.desired_state}</span>}
+        {vm.desired_state !== vm.observed_state && <span className="drift">want {vm.desired_state}</span>}{' '}
+        {/* Lifecycle and telemetry are two independent dimensions (§138): a
+            running VM whose agent has gone quiet is running and unavailable at
+            the same time, and showing only the first hides the second. */}
+        <span className="telemetry" data-testid="telemetry-health">
+          telemetry <span className={`state state-${vm.telemetry_health}`}>{vm.telemetry_health}</span>
+        </span>
       </h2>
       <dl className="vm-facts">
         <dt>Template</dt>

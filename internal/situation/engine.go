@@ -349,8 +349,9 @@ func (e *Engine) Evaluate(ctx context.Context) error {
 }
 
 // Snapshot is the situation summary: deterministic materialization of durable
-// records (P-08). VM roll-ups stay zero until the VM manager exists — served
-// as zeros because that is the truth of this host today, not a placeholder.
+// records (P-08). VMsRunning and VMsTotal stay zero here — the API counts them
+// straight from the registry for its own response, and a second count in this
+// struct would be a second source of truth for the same fact.
 type Snapshot struct {
 	AsOfCursor      string
 	SinceCursor     string
@@ -403,14 +404,19 @@ func (e *Engine) Snapshot(ctx context.Context, since string) (*Snapshot, error) 
 	if err != nil {
 		return nil, err
 	}
+	degraded, err := e.sensorsDegraded(ctx)
+	if err != nil {
+		return nil, err
+	}
 
 	snap := &Snapshot{
-		AsOfCursor:    strconv.FormatInt(latest, 10),
-		SinceCursor:   since,
-		Quiet:         open == 0 && (sinceID < 0 || latest <= sinceID),
-		ActiveClasses: e.ActiveClasses(),
-		AttentionOpen: open,
-		Head:          head,
+		AsOfCursor:      strconv.FormatInt(latest, 10),
+		SinceCursor:     since,
+		Quiet:           open == 0 && (sinceID < 0 || latest <= sinceID),
+		ActiveClasses:   e.ActiveClasses(),
+		SensorsDegraded: degraded,
+		AttentionOpen:   open,
+		Head:            head,
 	}
 	return snap, nil
 }

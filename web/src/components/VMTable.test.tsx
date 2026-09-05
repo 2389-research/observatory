@@ -29,6 +29,7 @@ const vm = (over: Partial<VM> = {}): VM => ({
   template_digest: 'sha256:abcdef0123456789',
   desired_state: 'running',
   observed_state: 'running',
+  telemetry_health: 'healthy',
   revision: '7',
   resources: { vcpu_count: 2, memory_mib: 2048, root_disk_mib: 4096, workspace_disk_mib: 64 },
   network_profile: 'http_inspect',
@@ -59,11 +60,24 @@ describe('VMTable', () => {
     expect(screen.queryByText(/want running/i)).not.toBeInTheDocument()
   })
 
-  it('says telemetry health and live usage are not measured, rather than showing zero', () => {
+  it('says live usage is not measured, rather than showing zero', () => {
     render(<VMTable vms={[vm()]} controls={inert} />)
-    const notMeasured = screen.getAllByText('not measured')
-    expect(notMeasured.length).toBeGreaterThanOrEqual(2)
+    expect(screen.getAllByText('not measured').length).toBeGreaterThanOrEqual(1)
     expect(screen.queryByText('0%')).not.toBeInTheDocument()
+  })
+
+  // §138: a running VM whose agent has gone quiet is running and unavailable at
+  // the same time. The Telemetry column carries the second answer; "not
+  // measured" there would now be false, because the heartbeat measures it.
+  it('reports telemetry health beside a lifecycle state that disagrees with it', () => {
+    render(
+      <VMTable
+        vms={[vm({ observed_state: 'running', telemetry_health: 'unavailable' })]}
+        controls={inert}
+      />,
+    )
+    expect(screen.getByTestId('vm-telemetry')).toHaveTextContent('unavailable')
+    expect(screen.getByText('running')).toBeInTheDocument()
   })
 
   it('renders allocation from the resources block', () => {

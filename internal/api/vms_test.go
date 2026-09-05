@@ -21,6 +21,7 @@ import (
 
 	"github.com/2389-research/observatory-v2/internal/api"
 	"github.com/2389-research/observatory-v2/internal/config"
+	"github.com/2389-research/observatory-v2/internal/events"
 	"github.com/2389-research/observatory-v2/internal/lock"
 	"github.com/2389-research/observatory-v2/internal/preflight"
 	"github.com/2389-research/observatory-v2/internal/runtime"
@@ -1074,9 +1075,99 @@ func TestSituationChangedVMs(t *testing.T) {
 	if links["vm"] == nil {
 		t.Error("changed_vm.links.vm missing")
 	}
-	// telemetry_health must be a known value (not omitted).
-	if entry["telemetry_health"] == nil {
-		t.Error("changed_vm.telemetry_health must be present (P-03 monitored calm)")
+	// telemetry_health must be one of the four §133 states. Presence alone let a
+	// placeholder like "unknown" through, which is not a state the spec has.
+	if !isTelemetryHealth(entry["telemetry_health"]) {
+		t.Errorf("changed_vm.telemetry_health = %v, want one of the §133 states", entry["telemetry_health"])
+	}
+}
+
+// isTelemetryHealth reports whether v is one of SPEC §133's four telemetry
+// health states. Nothing else may reach the wire: a value outside this set is
+// either a placeholder or a host failure wearing a guest's clothes.
+func isTelemetryHealth(v any) bool {
+	switch v {
+	case situation.TelemetryStarting, situation.TelemetryHealthy,
+		situation.TelemetryDegraded, situation.TelemetryUnavailable:
+		return true
+	}
+	return false
+}
+
+// The VM record carries telemetry health beside lifecycle state, because §138
+// forbids encoding observation quality only in lifecycle state. The fake
+// runtime boots a VM with no guest agent behind it, so a running VM here has
+// never been heard from — and the honest word for that is unavailable (§952).
+func TestVMRecordPublishesTelemetryHealth(t *testing.T) {
+	srv, st, _ := newTemplateServer(t)
+	var created map[string]any
+	doRequest(t, http.MethodPost, srv.URL+"/api/v1/vms",
+		map[string]any{"name": "health-vm", "template_id": testTemplateDef.TemplateID},
+		http.StatusCreated, &created)
+	vmID := created["vm"].(map[string]any)["vm_id"].(string)
+	if !isTelemetryHealth(created["vm"].(map[string]any)["telemetry_health"]) {
+		t.Errorf("create reply telemetry_health = %v, want a §133 state",
+			created["vm"].(map[string]any)["telemetry_health"])
+	}
+	pollOpState(t, srv.URL, created["operation"].(map[string]any)["operation_id"].(string), "succeeded")
+
+	var got map[string]any
+	getJSON(t, srv.URL+"/api/v1/vms/"+vmID, http.StatusOK, &got)
+	if got["observed_state"] != "running" {
+		t.Fatalf("observed_state = %v, want running", got["observed_state"])
+	}
+	if got["telemetry_health"] != situation.TelemetryUnavailable {
+		t.Errorf("telemetry_health = %v, want %q: this VM runs with no guest agent reporting",
+			got["telemetry_health"], situation.TelemetryUnavailable)
+	}
+
+	// One heartbeat from the guest, and the same running VM reads healthy. The
+	// lifecycle state does not move: that is the point of two dimensions.
+	vm, err := st.GetVM(t.Context(), vmID)
+	if err != nil {
+		t.Fatalf("get vm: %v", err)
+	}
+	if vm.CurrentBootID == "" {
+		t.Fatal("a running VM has no boot id; nothing can be scoped to its boot")
+	}
+	boot := vm.CurrentBootID
+	if _, err := st.Append(t.Context(), &events.Envelope{
+		SchemaVersion: 1, VMID: &vmID, BootID: &boot,
+		SourceInstanceID: "00000000-0000-4000-8000-0000000009f1", SourceSeq: "1",
+		Kind: "guest.sensor_health", Provenance: events.GuestReported, Sensor: "guestd",
+		HostReceivedAt: events.Timestamp{Time: time.Now().UTC()},
+		Quality: events.Quality{
+			PathResolution: events.PathNotApplicable,
+			Attribution:    events.AttributionNotApplicable,
+		},
+		Data: map[string]any{
+			"agent":   map[string]any{"heartbeat_interval_ns": "10000000000"},
+			"ring":    map[string]any{"capacity": 1024, "queued": 0, "dropped": "0"},
+			"sensors": []any{},
+		},
+	}); err != nil {
+		t.Fatalf("append heartbeat: %v", err)
+	}
+
+	getJSON(t, srv.URL+"/api/v1/vms/"+vmID, http.StatusOK, &got)
+	if got["telemetry_health"] != situation.TelemetryHealthy {
+		t.Errorf("telemetry_health = %v, want %q after a fresh heartbeat",
+			got["telemetry_health"], situation.TelemetryHealthy)
+	}
+	if got["observed_state"] != "running" {
+		t.Errorf("observed_state = %v, want running: telemetry health does not move it",
+			got["observed_state"])
+	}
+
+	// The list surface answers the same way as the single-VM surface.
+	var list map[string]any
+	getJSON(t, srv.URL+"/api/v1/vms", http.StatusOK, &list)
+	entries, _ := list["vms"].([]any)
+	if len(entries) != 1 {
+		t.Fatalf("listed %d vms, want 1", len(entries))
+	}
+	if h := entries[0].(map[string]any)["telemetry_health"]; h != situation.TelemetryHealthy {
+		t.Errorf("listed telemetry_health = %v, want %q", h, situation.TelemetryHealthy)
 	}
 }
 

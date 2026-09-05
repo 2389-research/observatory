@@ -33,13 +33,19 @@ type wireVMFailure struct {
 }
 
 type wireVM struct {
-	VMID            string            `json:"vm_id"`
-	Name            string            `json:"name"`
-	Owner           string            `json:"owner"`
-	TemplateID      string            `json:"template_id"`
-	TemplateDigest  string            `json:"template_digest"`
-	DesiredState    string            `json:"desired_state"`
-	ObservedState   string            `json:"observed_state"`
+	VMID           string `json:"vm_id"`
+	Name           string `json:"name"`
+	Owner          string `json:"owner"`
+	TemplateID     string `json:"template_id"`
+	TemplateDigest string `json:"template_digest"`
+	DesiredState   string `json:"desired_state"`
+	ObservedState  string `json:"observed_state"`
+	// TelemetryHealth is the second health dimension (§133): how well this VM is
+	// being observed, which is a different question from what it is doing. A VM
+	// can be running with degraded telemetry, and §138 forbids folding one
+	// answer into the other. Derived per request from the newest heartbeat of
+	// the current boot, never stored on the row — staleness is a fact about now.
+	TelemetryHealth string            `json:"telemetry_health"`
 	Revision        string            `json:"revision"` // decimal string; can grow with the event stream
 	Resources       wireVMResources   `json:"resources"`
 	NetworkProfile  string            `json:"network_profile"`
@@ -105,20 +111,21 @@ type wireTemplate struct {
 
 // --- render helpers ---
 
-func renderVM(vm *store.VM) wireVM {
+func renderVM(vm *store.VM, telemetryHealth string) wireVM {
 	labels := vm.Labels
 	if labels == nil {
 		labels = map[string]string{}
 	}
 	w := wireVM{
-		VMID:           vm.VMID,
-		Name:           vm.Name,
-		Owner:          vm.Owner,
-		TemplateID:     vm.TemplateID,
-		TemplateDigest: vm.TemplateDigest,
-		DesiredState:   vm.DesiredState,
-		ObservedState:  vm.ObservedState,
-		Revision:       strconv.FormatInt(vm.Revision, 10),
+		VMID:            vm.VMID,
+		Name:            vm.Name,
+		Owner:           vm.Owner,
+		TemplateID:      vm.TemplateID,
+		TemplateDigest:  vm.TemplateDigest,
+		DesiredState:    vm.DesiredState,
+		ObservedState:   vm.ObservedState,
+		TelemetryHealth: telemetryHealth,
+		Revision:        strconv.FormatInt(vm.Revision, 10),
 		Resources: wireVMResources{
 			VCPUCount:        vm.VCPUCount,
 			MemoryMiB:        vm.MemoryMiB,
@@ -146,6 +153,22 @@ func renderVM(vm *store.VM) wireVM {
 		w.Failure = f
 	}
 	return w
+}
+
+// telemetryHealth derives one VM's telemetry health for a response, writing the
+// error and reporting false when the host's own database cannot answer. There
+// is no fifth value meaning "the store broke": the four states are claims about
+// the guest, and returning one of them here would blame the guest for a host
+// failure.
+func (s *Server) telemetryHealth(w http.ResponseWriter, r *http.Request, vm *store.VM) (string, bool) {
+	h, err := s.engine.VMTelemetryHealth(r.Context(), vm)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, Error{
+			Code: "internal", Message: "telemetry health query failed", Retryable: true, Cause: "storage_failure",
+		})
+		return "", false
+	}
+	return h.State, true
 }
 
 // The store mints operation ids and names them; this endpoint publishes that
@@ -186,12 +209,12 @@ func renderOperation(op *store.Operation) wireOperation {
 	return w
 }
 
-func renderChangedVM(vm *store.VM, attentionOpen int64, activeRun *store.Run) wireChangedVM {
+func renderChangedVM(vm *store.VM, telemetryHealth string, attentionOpen int64, activeRun *store.Run) wireChangedVM {
 	w := wireChangedVM{
 		VMID:            vm.VMID,
 		Name:            vm.Name,
 		LifecycleState:  vm.ObservedState,
-		TelemetryHealth: "unknown", // honest: no sensors exist yet
+		TelemetryHealth: telemetryHealth,
 		AttentionOpen:   attentionOpen,
 		Links: map[string]string{
 			"vm": basePath + "/vms/" + vm.VMID,
@@ -805,10 +828,14 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 		writeVMErrorForOperation(w, err, op)
 		return
 	}
+	health, ok := s.telemetryHealth(w, r, vm)
+	if !ok {
+		return
+	}
 	// Replays return the same 201 as the original request (retry-transparent
 	// status) with is_replay marking the truth of what happened.
 	resp := map[string]any{
-		"vm":        renderVM(vm),
+		"vm":        renderVM(vm, health),
 		"operation": renderOperation(op),
 	}
 	if replayed {
@@ -873,7 +900,11 @@ func (s *Server) handleListVMs(w http.ResponseWriter, r *http.Request) {
 
 	wireVMs := make([]wireVM, 0, len(vms))
 	for _, vm := range vms {
-		wireVMs = append(wireVMs, renderVM(vm))
+		health, ok := s.telemetryHealth(w, r, vm)
+		if !ok {
+			return
+		}
+		wireVMs = append(wireVMs, renderVM(vm, health))
 	}
 	nextAfter := ""
 	if len(vms) > 0 {
@@ -895,7 +926,11 @@ func (s *Server) handleGetVM(w http.ResponseWriter, r *http.Request) {
 	if !s.resourceOwner(w, r, vm.Owner) {
 		return
 	}
-	writeJSON(w, http.StatusOK, renderVM(vm))
+	health, ok := s.telemetryHealth(w, r, vm)
+	if !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, renderVM(vm, health))
 }
 
 type vmActionBody struct {
@@ -966,8 +1001,12 @@ func (s *Server) handleVMAction(w http.ResponseWriter, r *http.Request) {
 		writeVMErrorForOperation(w, err, op)
 		return
 	}
+	health, ok := s.telemetryHealth(w, r, updVM)
+	if !ok {
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"vm":        renderVM(updVM),
+		"vm":        renderVM(updVM, health),
 		"operation": renderOperation(op),
 	})
 }
@@ -1012,7 +1051,11 @@ func (s *Server) handleDeleteVM(w http.ResponseWriter, r *http.Request) {
 		writeVMError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"vm": renderVM(vm)})
+	health, ok := s.telemetryHealth(w, r, vm)
+	if !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"vm": renderVM(vm, health)})
 }
 
 func (s *Server) handleGetOperation(w http.ResponseWriter, r *http.Request) {

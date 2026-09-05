@@ -77,6 +77,13 @@ export interface VM {
   template_digest: string
   desired_state: string
   observed_state: string
+  /**
+   * The second health dimension (SPEC §133): how well this VM is being
+   * observed, which is a separate question from what it is doing. A VM can be
+   * running with degraded telemetry, and §138 forbids showing only one.
+   * One of: starting, healthy, degraded, unavailable.
+   */
+  telemetry_health: string
   /** Decimal string: may exceed Number.MAX_SAFE_INTEGER. Never parse it. */
   revision: string
   resources: VMResources

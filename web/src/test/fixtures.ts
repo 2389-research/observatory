@@ -57,6 +57,7 @@ export function testVM(overrides: Partial<VM> = {}): VM {
     template_digest: 'sha256:abc',
     desired_state: 'running',
     observed_state: 'running',
+    telemetry_health: 'healthy',
     revision: '3',
     resources: { vcpu_count: 1, memory_mib: 512, root_disk_mib: 4096, workspace_disk_mib: 8192 },
     network_profile: 'transport',

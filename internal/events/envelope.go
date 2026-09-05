@@ -45,8 +45,13 @@ type Timestamp struct {
 	time.Time
 }
 
+// TimestampLayout is the wire form for every timestamp this system publishes:
+// UTC, microsecond precision. Anything that renders a time into an API field
+// formats with this, so two fields describing the same instant read alike.
+const TimestampLayout = "2006-01-02T15:04:05.000000Z07:00"
+
 func (t Timestamp) MarshalJSON() ([]byte, error) {
-	return json.Marshal(t.UTC().Format("2006-01-02T15:04:05.000000Z07:00"))
+	return json.Marshal(t.UTC().Format(TimestampLayout))
 }
 
 func (t *Timestamp) UnmarshalJSON(b []byte) error {

@@ -203,6 +203,13 @@ var migrations = []string{
 	// did stage; only the launch knows, and this is where it says so. Empty
 	// until a launch reports, and emptied again by every new boot.
 	`ALTER TABLE vms ADD COLUMN boot_images TEXT NOT NULL DEFAULT '';`,
+	// v9: the newest event of one kind inside one boot. telemetry_health asks
+	// that question for every running VM on every situation read, and the
+	// answer is most often "none" — a VM whose agent has never reported. Without
+	// this index that answer costs a backwards scan of the whole event log,
+	// because idx_events_kind cannot narrow to a VM and idx_events_vm cannot
+	// narrow to a boot or a kind.
+	`CREATE INDEX idx_events_vm_boot_kind ON events (vm_id, boot_id, kind, event_id);`,
 }
 
 // Store owns one SQLite database. All writes go through the writer pool, which

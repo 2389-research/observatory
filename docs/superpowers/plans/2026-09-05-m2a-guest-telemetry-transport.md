@@ -217,10 +217,83 @@ Live gate green on aibox03, 8/8 subtests, 102.55s; evidence in
 
 ### Task 5: `telemetry_health` and a real `SensorsDegraded`
 
-- [ ] `internal/situation/telemetry_health.go`: derive per-VM `telemetry_health` ∈ {starting, healthy, degraded, unavailable} from the newest `guest.sensor_health` for the VM's current boot — its age against the heartbeat interval, and its sensor states. No channel and no heartbeat is `unavailable` (§952); a stale heartbeat is `degraded`, not healthy.
-- [ ] `internal/situation/engine.go`: `SensorsDegraded` counts degraded and unavailable sensors across running VMs instead of returning zero.
-- [ ] Publish `telemetry_health` on the VM record and in the situation snapshot (§138: "Never encode observation quality only in lifecycle state").
-- [ ] Tests: a running VM with no heartbeat reads `unavailable`; a fresh heartbeat reads `healthy`; a heartbeat older than the threshold reads `degraded` while the VM stays `running`; a heartbeat from a previous boot does not count for the current one.
+- [x] `internal/situation/telemetry_health.go`: derive per-VM `telemetry_health` ∈ {starting, healthy, degraded, unavailable} from the newest `guest.sensor_health` for the VM's current boot — its age against the heartbeat interval, and its sensor states. No channel and no heartbeat is `unavailable` (§952); a stale heartbeat is `degraded`, not healthy.
+- [x] `internal/situation/engine.go`: `SensorsDegraded` counts degraded and unavailable sensors across running VMs instead of returning zero.
+- [x] Publish `telemetry_health` on the VM record and in the situation snapshot (§138: "Never encode observation quality only in lifecycle state").
+- [x] Tests: a running VM with no heartbeat reads `unavailable`; a fresh heartbeat reads `healthy`; a heartbeat older than the threshold reads `degraded` while the VM stays `running`; a heartbeat from a previous boot does not count for the current one.
+
+**Derivation, settled.** `provisioning` and `starting` read `starting`: the boot has
+not finished, so no agent has been asked yet and silence is not a fault. Every
+non-running state reads `unavailable`: a guest that is not executing cannot
+report, and calling that `degraded` accuses a healthy system. A `running` VM
+with no heartbeat for its current boot reads `unavailable` (§952). Otherwise the
+newest beat of the current boot decides: any sensor `degraded` or `unavailable`,
+or an age past three heartbeat intervals, reads `degraded`; anything else reads
+`healthy`.
+
+**Ruling: no `guest.channel_established` lookup.** "No channel and no heartbeat is
+unavailable" is satisfied by the heartbeat alone — a VM with a channel but no
+heartbeat is also unavailable, and a VM with a heartbeat had a channel. One store
+query per VM instead of two, for the same answer. Cost if wrong: a VM whose
+channel is up but whose agent has never beaten cannot be told from one with no
+channel at all, which the `guest.channel_established`/`_lost` events already
+record for anyone who needs the distinction.
+
+**Ruling: the guest-reported interval is clamped to 1s..5min, and anything
+unreadable — absent, non-decimal, zero, negative — gets the 5-minute end.** The
+interval sets the host's staleness threshold and rides an untrusted guest's
+heartbeat: unclamped, a guest declares a one-nanosecond interval and is
+permanently degraded, or a one-year interval and looks healthy forever after its
+agent dies. Garbage falls to the most generous window rather than the strictest,
+because clamping nonsense to 3 seconds turns a shape we cannot read into an
+accusation. Cost if wrong: a genuinely fast-beating guest that stops is called
+degraded up to 15 minutes late.
+
+**Ruling: a sensor entry the host cannot read is not counted, and does not stop
+the scan.** The heartbeat is `guest_reported`, so its `sensors` array is whatever
+an untrusted agent put there. Counting an unreadable entry invents a fault;
+abandoning the array at the first bad entry lets one piece of garbage hide the
+sensors that did answer. Cost if wrong: a sensor reporting its state in a shape
+we do not parse is silently well.
+
+**Ruling: `SensorsDegraded` sums the same per-VM derivation the VM record
+publishes**, walking running VMs by keyset page. It costs one indexed lookup per
+running VM on every `/situation` read, and buys the guarantee that the fleet
+count and a VM's own `telemetry_health` can never disagree about the same
+heartbeat. New index `idx_events_vm_boot_kind` (migration v9) keeps the most
+common answer — a VM whose agent has never reported — an index seek instead of a
+backwards scan of the whole event log. Cost if wrong: N+1 seeks on a hot endpoint,
+replaceable by one windowed query without changing the answer.
+
+**Ruling: `store.LatestForBoot` rather than `store.Query`.** `Query`'s VM filter is
+`(vm_id = ? OR json_extract(payload,'$.data.vm_id') = ?)`, which is right for a
+reader browsing a VM's stream and defeats `idx_events_vm`. A `Tail` lookup for a
+VM with no heartbeat would scan the entire events table — and that is the most
+common case. Cost if wrong: one more read method to keep in step with the schema.
+
+**Ruling: the VM record publishes the enum and nothing else.** `TelemetryHealth`
+carries `LastHeartbeatAt` and `SensorsDegraded` internally, but SPEC §2.3's
+coverage list also wants drops, unknown loss intervals, exclusions and capture
+mode, and M2a can derive none of those. Publishing two of six fields makes a
+half-shaped block a later task has to reshape, and reshaping a published field is
+worse than adding one. The VM's `links.events` already reaches the heartbeats.
+Cost if wrong: a UI wanting the heartbeat time makes a second request.
+
+**Fixed in path: the fleet table's Telemetry column.** `web/src/components/VMTable.tsx`
+rendered "not measured" there. That was true before this task and false after it,
+so the column now shows the state. Usage stays `NotMeasured` — nothing measures it.
+`VMDetail` shows telemetry health beside lifecycle state for the same reason: §138
+forbids encoding observation quality only in lifecycle state, and the header did
+exactly that.
+
+**Finding, not fixed: `internal/report/generate.go` hardcodes
+`telemetry_health_final: "unavailable"` and a `guest_channel_not_built` gap saying
+"no guest telemetry channel exists in this build".** M2a built one, so that sentence
+is now false. Not fixed here: the honest value is telemetry health *at the run's
+conclusion*, which needs a heartbeat lookup windowed to the run rather than
+`LatestForBoot`'s "now", and every edit to a report changes a content-addressed
+digest. Nothing serves `report.Generate` yet — only tests call it — so nothing false
+ships today. Belongs to the P4 runs-and-reports plan.
 
 ### Task 6: Reconcile adopts a healthy runner (kata `ffxv`, adoption half)
 

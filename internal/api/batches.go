@@ -3,6 +3,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -95,13 +96,17 @@ func renderBatch(b *store.Batch) wireBatch {
 	return wb
 }
 
-func renderBatchMember(m *store.BatchMemberResult) wireBatchMember {
+func (s *Server) renderBatchMember(ctx context.Context, m *store.BatchMemberResult) (wireBatchMember, error) {
 	wm := wireBatchMember{
 		Position: m.Position,
 		Name:     m.Name,
 	}
 	if m.VM != nil {
-		v := renderVM(m.VM)
+		health, err := s.engine.VMTelemetryHealth(ctx, m.VM)
+		if err != nil {
+			return wireBatchMember{}, err
+		}
+		v := renderVM(m.VM, health.State)
 		wm.VM = &v
 	}
 	if m.Operation != nil {
@@ -115,13 +120,17 @@ func renderBatchMember(m *store.BatchMemberResult) wireBatchMember {
 		}
 		wm.Refusal = &wireMemberRefusal{Cause: *m.RefusalCause, Message: msg}
 	}
-	return wm
+	return wm, nil
 }
 
-func renderBatchResult(result *store.CreateVMBatchResult) wireBatchResponse {
+func (s *Server) renderBatchResult(ctx context.Context, result *store.CreateVMBatchResult) (wireBatchResponse, error) {
 	members := make([]wireBatchMember, len(result.Members))
 	for i, m := range result.Members {
-		members[i] = renderBatchMember(m)
+		wm, err := s.renderBatchMember(ctx, m)
+		if err != nil {
+			return wireBatchResponse{}, err
+		}
+		members[i] = wm
 	}
 	resp := wireBatchResponse{
 		Batch:    renderBatch(result.Batch),
@@ -132,7 +141,20 @@ func renderBatchResult(result *store.CreateVMBatchResult) wireBatchResponse {
 		o := renderOperation(result.BatchOp)
 		resp.Operation = &o
 	}
-	return resp
+	return resp, nil
+}
+
+// writeBatchResult renders a batch reply, turning a store failure during
+// rendering into the same typed 500 every other read surface returns.
+func (s *Server) writeBatchResult(w http.ResponseWriter, r *http.Request, status int, result *store.CreateVMBatchResult) {
+	resp, err := s.renderBatchResult(r.Context(), result)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, Error{
+			Code: "internal", Message: "telemetry health query failed", Retryable: true, Cause: "storage_failure",
+		})
+		return
+	}
+	writeJSON(w, status, resp)
 }
 
 // createBatchBody is the JSON body for POST /vm-batches.
@@ -290,7 +312,7 @@ func (s *Server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 
 	// Replays return the same 201 as the original request (retry-transparent
 	// status); is_replay in the body marks the truth of what happened.
-	writeJSON(w, http.StatusCreated, renderBatchResult(result))
+	s.writeBatchResult(w, r, http.StatusCreated, result)
 }
 
 func (s *Server) handleGetBatch(w http.ResponseWriter, r *http.Request) {
@@ -346,5 +368,5 @@ func (s *Server) handleGetBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, renderBatchResult(result))
+	s.writeBatchResult(w, r, http.StatusOK, result)
 }

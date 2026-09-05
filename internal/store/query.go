@@ -4,6 +4,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strconv"
@@ -185,4 +186,32 @@ func (s *Store) Query(ctx context.Context, q Query) (QueryResult, error) {
 		result.LatestEventID = strconv.FormatInt(latest, 10)
 	}
 	return result, nil
+}
+
+// LatestForBoot returns the newest event of one kind inside one VM's named
+// boot, or nil when that boot has none. It answers a different question from
+// Query: Query's VM filter also matches events that merely name the VM in their
+// payload, which is right for a reader browsing a VM's stream and wrong here —
+// this is a scoped lookup of what a VM's own agent reported during one boot,
+// and it has to stay an index seek even when the answer is nothing.
+func (s *Store) LatestForBoot(ctx context.Context, vmID, bootID, kind string) (*events.Envelope, error) {
+	var id int64
+	var payload []byte
+	err := s.readers.QueryRowContext(ctx,
+		`SELECT event_id, payload FROM events
+		 WHERE vm_id = ? AND boot_id = ? AND kind = ?
+		 ORDER BY event_id DESC LIMIT 1`, vmID, bootID, kind).Scan(&id, &payload)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil, nil
+	case err != nil:
+		return nil, fmt.Errorf("latest %s for boot: %w", kind, err)
+	}
+	env, err := events.Parse(payload)
+	if err != nil {
+		return nil, fmt.Errorf("stored payload for event %d does not parse: %w", id, err)
+	}
+	cursor := strconv.FormatInt(id, 10)
+	env.EventID = &cursor
+	return env, nil
 }

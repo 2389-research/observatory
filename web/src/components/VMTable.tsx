@@ -7,6 +7,8 @@ import { RowActions, RowResult, type FleetControls } from './BulkActions'
 /**
  * A column SPEC §13.1 asks for that no emitter feeds in this build. Showing 0%
  * here would read as a measurement, and a wrong measurement is worse than a gap.
+ * Usage is the last of these: telemetry health is measured from the guest's
+ * heartbeat and reports a real state.
  */
 function NotMeasured() {
   return (
@@ -127,8 +129,8 @@ export function VMTable({ vms, controls, filtered = false, selectedVM, onSelectV
             <td>
               <Lifecycle vm={vm} />
             </td>
-            <td>
-              <NotMeasured />
+            <td data-testid="vm-telemetry">
+              <span className={`state state-${vm.telemetry_health}`}>{vm.telemetry_health}</span>
             </td>
             <td>
               <div>{vm.resources.vcpu_count} vCPU</div>

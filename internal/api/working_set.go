@@ -194,7 +194,14 @@ func (s *Server) handleSituation(w http.ResponseWriter, r *http.Request) {
 				})
 				return
 			}
-			changedVMs = append(changedVMs, renderChangedVM(vm, openByVM[vm.VMID], activeRun))
+			health, err := s.engine.VMTelemetryHealth(ctx, vm)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, Error{
+					Code: "internal", Message: "telemetry health query failed", Retryable: true, Cause: "storage_failure",
+				})
+				return
+			}
+			changedVMs = append(changedVMs, renderChangedVM(vm, health.State, openByVM[vm.VMID], activeRun))
 		}
 	}
 
