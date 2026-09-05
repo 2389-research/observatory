@@ -1,16 +1,17 @@
-// ABOUTME: Multi-select lifecycle actions — one request per VM, each with its own revision.
-// ABOUTME: SPEC §13.1: a fan-out never looks successful because its first member did.
+// ABOUTME: The fleet's lifecycle controls, and the confirm gesture that is the only path to DELETE.
+// ABOUTME: SPEC §13.1: one request per VM, and a fan-out never looks successful because its first did.
 import { useCallback, useState } from 'react'
 import { ApiFailure, deleteJSON, getJSON, postJSON } from '../api'
 import { neutralize } from '../text'
 import type { VM } from '../types'
 
-/** Actions POST /vms/{id}/actions accepts. Delete is not one of them. */
-export type LifecycleAction = 'start' | 'pause' | 'resume' | 'stop'
+/** Actions POST /vms/{id}/actions accepts (validActions, internal/runtime/manager.go). Delete is not one. */
+export type LifecycleAction = 'start' | 'pause' | 'resume' | 'stop' | 'force_stop'
 
 /** Every action a row offers, in the order the buttons appear. */
 export type RowAction = LifecycleAction | 'delete'
 
+/** What the fleet bar and each fleet row offer (§13.1), in button order. */
 export const ROW_ACTIONS: readonly RowAction[] = ['start', 'pause', 'resume', 'stop', 'delete']
 
 /**
@@ -41,7 +42,11 @@ export function actionLegality(vm: VM, action: RowAction): { allowed: boolean; r
       return state === 'running' ? { allowed: true, reason: '' } : no('running')
     case 'resume':
       return state === 'paused' ? { allowed: true, reason: '' } : no('paused')
+    // One rule for both: the daemon accepts either from running, paused or
+    // stopping. They differ in what they do to the guest, not in where they are
+    // legal.
     case 'stop':
+    case 'force_stop':
       return state === 'running' || state === 'paused' || state === 'stopping'
         ? { allowed: true, reason: '' }
         : no('running, paused or stopping')
@@ -273,12 +278,52 @@ export function useFleetControls(onSettled: () => void): FleetControls {
   }
 }
 
-const ACTION_LABEL: Record<RowAction, string> = {
+export const ACTION_LABEL: Record<RowAction, string> = {
   start: 'Start',
   pause: 'Pause',
   resume: 'Resume',
   stop: 'Stop',
+  force_stop: 'Force stop',
   delete: 'Delete',
+}
+
+/**
+ * The confirm gesture behind every Delete button, wherever one is drawn.
+ *
+ * It is its own component because three surfaces offer Delete — the fleet bar,
+ * the fleet table's rows and the detail workspace — and the prompt and the
+ * request are one unit: `confirmDelete` is the sole caller of DELETE, so
+ * `force=true` has no path to the wire that skips this prompt. A surface that
+ * drew a Delete button without rendering this one would ask and never send.
+ */
+export function DeleteConfirm({ controls }: { controls: FleetControls }) {
+  const { pendingDelete } = controls
+  if (pendingDelete.length === 0) return null
+  const forceTargets = pendingDelete.filter((vm) => LIVE_STATES.has(vm.observed_state))
+  return (
+    <div className="delete-confirm" role="alertdialog" aria-label="Confirm delete" data-testid="delete-confirm">
+      <p>
+        Delete {pendingDelete.length === 1 ? 'this VM' : `these ${pendingDelete.length} VMs`}? A deleted VM and its
+        workspace do not come back.
+      </p>
+      <p className="delete-names">{pendingDelete.map((vm) => neutralize(vm.name)).join(', ')}</p>
+      {forceTargets.length > 0 && (
+        <p className="delete-force">
+          These are still live, so their delete carries <code>force=true</code> — the host stops them first, with no
+          chance for the guest to shut down cleanly:{' '}
+          <strong data-testid="force-targets">{forceTargets.map((vm) => neutralize(vm.name)).join(', ')}</strong>
+        </p>
+      )}
+      <div className="delete-actions">
+        <button type="button" onClick={() => void controls.confirmDelete()}>
+          Delete {pendingDelete.length} {pendingDelete.length === 1 ? 'VM' : 'VMs'}
+        </button>
+        <button type="button" onClick={controls.cancelDelete}>
+          Cancel
+        </button>
+      </div>
+    </div>
+  )
 }
 
 interface Props {
@@ -294,8 +339,6 @@ interface Props {
 export function BulkActions({ vms, controls }: Props) {
   const chosen = vms.filter((vm) => controls.selected.has(vm.vm_id))
   const allSelected = vms.length > 0 && chosen.length === vms.length
-  const { pendingDelete } = controls
-  const forceTargets = pendingDelete.filter((vm) => LIVE_STATES.has(vm.observed_state))
 
   return (
     <section className="bulk" aria-labelledby="bulk-heading">
@@ -335,30 +378,7 @@ export function BulkActions({ vms, controls }: Props) {
         </div>
       </div>
 
-      {pendingDelete.length > 0 && (
-        <div className="delete-confirm" role="alertdialog" aria-label="Confirm delete" data-testid="delete-confirm">
-          <p>
-            Delete {pendingDelete.length === 1 ? 'this VM' : `these ${pendingDelete.length} VMs`}? A deleted VM and
-            its workspace do not come back.
-          </p>
-          <p className="delete-names">{pendingDelete.map((vm) => neutralize(vm.name)).join(', ')}</p>
-          {forceTargets.length > 0 && (
-            <p className="delete-force">
-              These are still live, so their delete carries <code>force=true</code> — the host stops them first, with
-              no chance for the guest to shut down cleanly:{' '}
-              <strong data-testid="force-targets">{forceTargets.map((vm) => neutralize(vm.name)).join(', ')}</strong>
-            </p>
-          )}
-          <div className="delete-actions">
-            <button type="button" onClick={() => void controls.confirmDelete()}>
-              Delete {pendingDelete.length} {pendingDelete.length === 1 ? 'VM' : 'VMs'}
-            </button>
-            <button type="button" onClick={controls.cancelDelete}>
-              Cancel
-            </button>
-          </div>
-        </div>
-      )}
+      <DeleteConfirm controls={controls} />
     </section>
   )
 }

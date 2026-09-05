@@ -719,7 +719,8 @@ h2 {
 .vms button:focus-visible,
 .bulk button:focus-visible,
 .bulk input:focus-visible,
-.vms input:focus-visible {
+.vms input:focus-visible,
+.vm-actions button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
@@ -861,6 +862,11 @@ h2 {
   flex-wrap: wrap;
   gap: 8px;
   align-items: baseline;
+}
+
+/* §13.2's action row: the same buttons the fleet rows draw, for one VM. */
+.vm-actions {
+  margin-bottom: 20px;
 }
 
 .terminal-section {

@@ -154,6 +154,48 @@ describe('VMDetail', () => {
     await waitFor(() => expect(FakeWebSocket.last.url).toContain('/terminals/sess-2/stream'))
   })
 
+  it('carries the lifecycle actions the workspace is supposed to offer', async () => {
+    vi.stubGlobal('fetch', routeFetch())
+    render(<VMDetail vmID="vm-1" onBack={() => {}} />)
+
+    const actions = within(await screen.findByTestId('vm-actions'))
+    expect(actions.getByRole('button', { name: /^stop/i })).toBeEnabled()
+    expect(actions.getByRole('button', { name: /^force stop/i })).toBeEnabled()
+    expect(actions.getByRole('button', { name: /^start/i })).toBeDisabled()
+  })
+
+  it('stops the VM from the workspace and re-reads what the host now says', async () => {
+    let state = 'running'
+    const f = vi.fn(async (url: string, init?: RequestInit) => {
+      if ((init?.method ?? 'GET') === 'POST' && url.includes('/actions')) {
+        state = 'stopped'
+        return jsonResponse({ vm: testVM({ observed_state: 'stopped' }), operation: { operation_id: 'op-55' } })
+      }
+      if (url.endsWith('/terminals')) return jsonResponse({ terminals: [], next_after: '', limit: 20 })
+      if (url.includes('/vms/')) return jsonResponse(testVM({ name: 'agent-03', observed_state: state }))
+      throw new Error(`unexpected fetch: ${url}`)
+    })
+    vi.stubGlobal('fetch', f)
+    render(<VMDetail vmID="vm-1" onBack={() => {}} />)
+
+    await userEvent.click(within(await screen.findByTestId('vm-actions')).getByRole('button', { name: /^stop/i }))
+
+    expect(await screen.findByTestId('vm-result')).toHaveTextContent('op-55')
+    // The workspace does not wait for its 5s poll to agree with the action it
+    // just watched succeed.
+    await waitFor(() => expect(screen.getByTestId('vm-identity')).toHaveTextContent('stopped'))
+  })
+
+  it('asks before it deletes the VM being looked at', async () => {
+    const f = routeFetch()
+    vi.stubGlobal('fetch', f)
+    render(<VMDetail vmID="vm-1" onBack={() => {}} />)
+
+    await userEvent.click(within(await screen.findByTestId('vm-actions')).getByRole('button', { name: /^delete/i }))
+    expect(screen.getByTestId('delete-confirm')).toHaveTextContent('agent-03')
+    expect(f.mock.calls.some((c) => (c[1]?.method ?? 'GET') === 'DELETE')).toBe(false)
+  })
+
   it('goes back to the fleet', async () => {
     const onBack = vi.fn()
     vi.stubGlobal('fetch', routeFetch())

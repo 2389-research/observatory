@@ -1,10 +1,12 @@
-// ABOUTME: The VM detail workspace (SPEC §13.2): identity, what it was built from, its terminal.
+// ABOUTME: The VM detail workspace (SPEC §13.2): identity, lifecycle actions, its terminal.
 // ABOUTME: It reports only fields the API returns; a guest address it was not given stays unclaimed.
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { ApiFailure, deleteJSON, getJSON, postJSON } from './api'
 import type { TerminalSession, TerminalSessionList, VM } from './types'
 import { neutralize, age } from './text'
 import { OperationFailure } from './components/OperationFailure'
+import { useFleetControls } from './components/BulkActions'
+import { VMActions } from './components/VMActions'
 
 // xterm.js and its addon are most of the bundle, and the fleet page never
 // draws a terminal. Loaded on demand, the landing page does not pay for it.
@@ -124,6 +126,12 @@ export function VMDetail({ vmID, onBack }: VMDetailProps) {
     }
   }, [vmID])
 
+  // The same controls the fleet page drives its rows with, pointed at the one
+  // VM on screen: one definition of what each action is legal on, and one
+  // confirm in front of DELETE. Settling re-reads the VM, so the identity block
+  // and the action's own outcome cannot disagree for a whole poll interval.
+  const controls = useFleetControls(() => void load())
+
   useEffect(() => {
     void load()
     const t = setInterval(() => void load(), REFRESH_MS)
@@ -186,6 +194,8 @@ export function VMDetail({ vmID, onBack }: VMDetailProps) {
             <Identity vm={vm} />
             <Network vm={vm} />
           </section>
+
+          <VMActions vm={vm} controls={controls} />
 
           <section className="terminal-section">
             <h2>Terminal</h2>
