@@ -1,4 +1,4 @@
-// ABOUTME: Tests for the runner ctl deadlines doStop chooses per command.
+// ABOUTME: Tests for the runner ctl traffic doStop sends: which commands, on what deadlines.
 // ABOUTME: A constant deadline guarding a configurable wait makes graceful stop unreachable.
 
 //go:build linux
@@ -11,6 +11,7 @@ import (
 	"errors"
 	"net"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -196,6 +197,48 @@ func silentCtlServer(t *testing.T) string {
 		}
 	}()
 	return sock
+}
+
+// TestForceStopSendsNoGuestShutdown: a forced stop must not ask the guest to
+// shut down. ForceStop is what a controller restart drives when it finds a stop
+// already in flight, and the guest may be acting on the first request right
+// then; a second one is a duplicate shutdown aimed at a guest already going
+// down.
+//
+// TestForceStopSendsKill cannot say this. Its harness never powers the guest
+// off, so a forced stop that wrongly took the graceful path would wait out the
+// poll and fall through to the same SIGKILL: same signals, seconds later, no
+// failure. The ctl traffic is the only place the difference shows.
+func TestForceStopSendsNoGuestShutdown(t *testing.T) {
+	var cmds []string
+	restore := dialCtlFn
+	dialCtlFn = func(_ string, req runner.CtlRequest, _ time.Duration) (runner.CtlReply, error) {
+		cmds = append(cmds, req.Cmd)
+		return runner.CtlReply{OK: false, Error: "recorded by test"}, nil
+	}
+	t.Cleanup(func() { dialCtlFn = restore })
+
+	a := stopOnlyAdapter(t)
+
+	// The control. The graceful branch is reachable only behind a live runner,
+	// so prove this manifest reaches it before reading anything into a forced
+	// run that stays quiet: a manifest that never got that far would satisfy the
+	// assertion below by never trying.
+	writeLiveRunnerManifest(t, a.cfg.StateDir, "vm-graceful")
+	_, err := a.doStop(t.Context(), "vm-graceful", time.Second, false)
+	requireOnlyCleanupDebt(t, err)
+	if !slices.Contains(cmds, "shutdown_guest") {
+		t.Fatalf("graceful stop sent %v, want a shutdown_guest among them; "+
+			"the forced assertion below would pass on a manifest that never reached the ctl path", cmds)
+	}
+
+	cmds = nil
+	writeLiveRunnerManifest(t, a.cfg.StateDir, "vm-forced")
+	_, err = a.doStop(t.Context(), "vm-forced", time.Second, true)
+	requireOnlyCleanupDebt(t, err)
+	if slices.Contains(cmds, "shutdown_guest") {
+		t.Errorf("forced stop sent %v; forceImmediate must skip the guest shutdown entirely", cmds)
+	}
 }
 
 // stopOnlyAdapter builds an Adapter with just the fields doStop reads. It has
