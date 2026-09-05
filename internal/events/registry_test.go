@@ -226,3 +226,22 @@ func TestTerminalCountersAreDecimalStrings(t *testing.T) {
 		t.Errorf("output_bytes round-tripped to %d (err %v), want %d", got, err, n)
 	}
 }
+
+// The heartbeat is the one kind M2a's transport carries end to end. It is
+// guest_reported and lives in the guest family: telemetry.* is host-side fact
+// about the pipeline, and a guest agent's self-report is neither.
+func TestGuestSensorHealthRegistered(t *testing.T) {
+	info, ok := events.LookupKind("guest.sensor_health")
+	if !ok {
+		t.Fatal("guest.sensor_health is not registered")
+	}
+	if info.Family != "guest" {
+		t.Errorf("family = %q, want %q", info.Family, "guest")
+	}
+	if info.Provenance != events.GuestReported {
+		t.Errorf("provenance = %q, want %q", info.Provenance, events.GuestReported)
+	}
+	if len(info.Caveats) == 0 {
+		t.Error("no caveats: a heartbeat proves the agent is alive and nothing about what a sensor saw")
+	}
+}

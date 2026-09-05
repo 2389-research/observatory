@@ -239,6 +239,22 @@ var registry = []KindInfo{
 			"channel loss does not imply guest crash; the VMM may still be running",
 		},
 	},
+	// guest.sensor_health: the guest agent's own periodic report on its sensors
+	// (M2a, §138–§139). The one guest_reported kind on the telemetry channel in
+	// this slice; every later sensor registers into its sensors array.
+	{
+		Kind:          "guest.sensor_health",
+		Family:        "guest",
+		SchemaVersion: 1,
+		Provenance:    GuestReported,
+		Semantics:     "The guest agent reported its own liveness, its bounded ring's drop count, and the state of each sensor it has registered.",
+		Caveats: []string{
+			"a heartbeat proves the guest agent is alive; it proves nothing about what any sensor observed",
+			"an empty sensors array means no sensor is registered, not that no activity occurred",
+			"drop counts are the guest's own measurement of its ring; loss elsewhere in the path is not counted here",
+			"the absence of heartbeats is not itself an event — staleness is derived by comparing the newest one against the host clock",
+		},
+	},
 	// vm.vmm_exited: host runner observed the supervised VMM process exit (L1a).
 	{
 		Kind:          "vm.vmm_exited",

@@ -163,6 +163,15 @@ type HelloAck struct {
 	// first frame will carry, and whether replay was lost reaching it.
 	ResumeOffset string `json:"resume_offset,omitempty"`
 	Gap          bool   `json:"gap,omitempty"`
+
+	// TelemetryInstanceID and ResumeAfterSeq answer a telemetry stream's hello.
+	// The id is the one the host just sent in Hello.SourceInstance, echoed so the
+	// runner can see the guest is counting inside the stream the host named. It
+	// is a confirmation, not a negotiation: a disagreement ends the connection.
+	// ResumeAfterSeq is the guest's belief about the highest seq the host took,
+	// and is advisory — the store's dedup is what actually prevents duplicates.
+	TelemetryInstanceID string `json:"telemetry_instance_id,omitempty"`
+	ResumeAfterSeq      string `json:"resume_after_seq,omitempty"`
 }
 
 // CapabilityManifest is the guest's response to get_capabilities. Schema is
