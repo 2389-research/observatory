@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -280,5 +281,52 @@ func TestSlotAllocationIgnoresAVMDirectoryWithNoManifest(t *testing.T) {
 	}
 	if retry != 1 {
 		t.Errorf("allocateSlot for the crashed vm = %d, want 1", retry)
+	}
+}
+
+// TestSlotAllocationRefusesAnUnreadableManifest pins the other half of the split
+// TestSlotAllocationIgnoresAVMDirectoryWithNoManifest opens. An absent manifest
+// means the launch provisioned nothing but the directory, so the slot is free. A
+// manifest that exists and cannot be read means the opposite: a launch did run,
+// and the one record of which slot, uid and CID it took is the file that will not
+// parse. Reading that as free hands the next VM a jail uid and a guest CID that
+// may still belong to a VM that is alive. Reconcile already calls this case
+// ambiguous and touches nothing (§5.5); allocateSlot has to agree.
+func TestSlotAllocationRefusesAnUnreadableManifest(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "vms", "vm-corrupt"), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(manifestPath(dir, "vm-corrupt"), []byte("{\"slot\": tru"), 0o600); err != nil {
+		t.Fatalf("write truncated manifest: %v", err)
+	}
+
+	got, err := allocateSlot(dir, "vm-new", 4)
+	if err == nil {
+		t.Fatalf("allocateSlot handed out slot %d beside an unreadable manifest; want a refusal", got)
+	}
+	if !strings.Contains(err.Error(), "vm-corrupt") {
+		t.Errorf("error = %v, want it to name the VM whose manifest cannot be read", err)
+	}
+}
+
+// TestSlotAllocationRefusesToReidentifyAVMWhoseManifestIsUnreadable covers the
+// same corruption from the other side. allocateSlot answers a restart by matching
+// the caller's vm_id against the manifests it reads, so a VM whose own manifest
+// will not parse never matches itself: it would be handed a fresh slot, and with
+// it a different uid and CID than the chroot and vsock its last launch left on the
+// host. Its resources would still exist under identities nothing names any more.
+func TestSlotAllocationRefusesToReidentifyAVMWhoseManifestIsUnreadable(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "vms", "vm-corrupt"), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(manifestPath(dir, "vm-corrupt"), []byte("not json at all"), 0o600); err != nil {
+		t.Fatalf("write corrupt manifest: %v", err)
+	}
+
+	got, err := allocateSlot(dir, "vm-corrupt", 4)
+	if err == nil {
+		t.Fatalf("allocateSlot gave vm-corrupt the fresh slot %d; want a refusal", got)
 	}
 }

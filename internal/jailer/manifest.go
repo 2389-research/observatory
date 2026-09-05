@@ -118,6 +118,11 @@ func readManifest(stateDir, vmID string) (Manifest, error) {
 // for this vmID. If the vm already has a manifest (stopped VM restarting), its
 // existing slot is returned unchanged. Otherwise the lowest free slot < maxSlots
 // is returned. Returns ErrSlotsExhausted when all slots are taken.
+//
+// A manifest that exists but cannot be read fails the whole allocation rather
+// than freeing its slot: the slot, and the jail uid and guest CID derived from
+// it, are then unknown, and unknown identities must not be handed out. An absent
+// manifest is a different answer -- see the comment on that case below.
 func allocateSlot(stateDir, vmID string, maxSlots int) (int, error) {
 	vmsDir := filepath.Join(stateDir, "vms")
 
@@ -133,9 +138,27 @@ func allocateSlot(stateDir, vmID string, maxSlots int) (int, error) {
 			continue
 		}
 		m, err := readManifest(stateDir, e.Name())
-		if err != nil {
-			// Missing or corrupt manifest — treat as free.
+		if errors.Is(err, os.ErrNotExist) {
+			// A directory with no manifest in it. writeManifest creates the
+			// directory and then publishes the manifest into it, so this is the
+			// crash window between those two steps -- at which point the launch
+			// has provisioned nothing but the directory. The slot is free.
 			continue
+		}
+		if err != nil {
+			// The manifest exists and cannot be read. A launch did run here, and
+			// the one record of the slot -- and so of the jail uid and guest CID
+			// derived from it -- is the file that will not parse. Unknown is not
+			// free: handing this slot out would start a VM under the uid and on
+			// the CID of one that may still be alive, and answering a restart
+			// with a fresh slot would strand the chroot and vsock its last launch
+			// left behind. Reconcile calls this ambiguous and touches nothing
+			// (SPEC 5.5); refusing is how allocateSlot says the same thing.
+			//
+			// The way out is Release, which is keyed by vm_id alone and needs no
+			// manifest: delete the named VM and the slot comes back with it.
+			return 0, fmt.Errorf("jailer: vm %q has an unreadable manifest, so the slot it holds is unknown "+
+				"and no slot can be handed out; delete that VM to release it: %w", e.Name(), err)
 		}
 		// Restart: this vm_id already has a slot; reuse it.
 		if m.VMID == vmID {
