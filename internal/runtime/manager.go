@@ -1035,7 +1035,9 @@ func (m *Manager) Delete(ctx context.Context, vmID string, force bool, expectedR
 	// VM someone apparently wanted stopped.
 	wantDeleted := "deleted"
 
-	// Live states require force.
+	// Live states require force. signalled records whether this call has already
+	// asked the VMM to die, so the pre-release guard below does not ask twice.
+	signalled := false
 	liveStates := map[string]bool{
 		"provisioning": true, "starting": true,
 		"running": true, "paused": true, "stopping": true,
@@ -1080,6 +1082,7 @@ func (m *Manager) Delete(ctx context.Context, vmID string, force bool, expectedR
 				return vm, &ErrRuntimeOpFailed{VMID: vmID, Op: "force_stop", Err: err}
 			}
 		}
+		signalled = true
 		_, stopErr := m.st.TransitionVM(ctx, store.TransitionInput{
 			VMID:             vmID,
 			ExpectedRevision: pin,
@@ -1112,6 +1115,33 @@ func (m *Manager) Delete(ctx context.Context, vmID string, force bool, expectedR
 		})
 		if err != nil {
 			return vm, err
+		}
+	}
+
+	// Signal before releasing. Every path arriving here leaves a row reading
+	// "deleting", and a row is a record, not a reading of the host: the launch
+	// rollbacks write "failed" and then discard the error from their best-effort
+	// ForceStop (failLaunch's call sites), doStop's forced path writes "stopped"
+	// while dropping its SignalVM errors, and Reconcile settles a "stopping" row
+	// without observing anything. Each of those can leave a live VMM behind a
+	// terminal row, and privd answers release_vm with invalid_state "vm process is
+	// still alive; signal first" (internal/privd/server.go). The delete then fails
+	// and the row parks at "deleting" with nothing to unstick it but the root
+	// helper — observed on aibox03 2026-09-04, issue ffxv.
+	//
+	// The guard runs after the transition rather than before it, so the caller's
+	// revision pin is checked before anything is destroyed: a "stopped" VM that
+	// someone restarted under us fails that transition and keeps its process.
+	//
+	// A ForceStop returning nil is not proof of death either — the forced path
+	// drops SignalVM's errors — so this narrows the window rather than closing it.
+	// What it removes is the case where nobody asked at all.
+	if !signalled {
+		if err := m.rt.ForceStop(ctx, vmID); err != nil {
+			var ue *UnavailableError
+			if !errors.As(err, &ue) {
+				return vm, &ErrRuntimeOpFailed{VMID: vmID, Op: "force_stop", Err: err}
+			}
 		}
 	}
 
@@ -1264,10 +1294,22 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 			// why nothing is logged (this package logs nowhere) and why
 			// Reconcile does not fail: a release error must not stop the daemon
 			// from starting.
+			// The signal comes first here for the same reason it does in Delete:
+			// a row parked at "deleting" is disproportionately one privd refused
+			// to release because the VM's process was still alive, and releasing
+			// without asking it to die again just reproduces that refusal on
+			// every restart. A ForceStop that fails for any reason but an absent
+			// runtime skips the release entirely — the retained row is the record.
 			releaseOK := true
-			if err := m.rt.Release(ctx, vm.VMID); err != nil {
+			if err := m.rt.ForceStop(ctx, vm.VMID); err != nil {
 				var ue *UnavailableError
 				releaseOK = errors.As(err, &ue)
+			}
+			if releaseOK {
+				if err := m.rt.Release(ctx, vm.VMID); err != nil {
+					var ue *UnavailableError
+					releaseOK = errors.As(err, &ue)
+				}
 			}
 			if releaseOK {
 				wantDeleted := "deleted"
