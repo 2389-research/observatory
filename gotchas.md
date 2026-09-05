@@ -269,3 +269,20 @@ re-breaks it.
 Reconcile finds a row no adoption finding accounts for and is right to fail it.
 Build the manager first, then create rows, unless the reconcile is the thing
 under test.
+
+**`os.Root` ignores a caller's `O_NOFOLLOW` for a symlink inside the root.**
+Measured on go1.27.0: `Root.OpenFile("link", O_RDONLY|O_NOFOLLOW)` follows a
+symlink that stays under the root, where plain `os.OpenFile` on the same path
+refuses with ELOOP. `Root` guarantees containment, not link avoidance — it
+resolves each component itself with `openat`+`O_NOFOLLOW` and then re-checks the
+target is still inside. So porting an `O_NOFOLLOW` open to `os.Root` can quietly
+loosen it. When the leaf name is already known to be a bare filename, one
+`unix.Openat(dirfd, name, O_NOFOLLOW)` is both simpler and stricter.
+
+**`os.FindProcess` on Linux takes a pidfd.** It calls `pidfd_open`, and
+`Process.Signal` then routes through `pidfd_send_signal`; the fd shows up in
+`/proc/self/fd` as `anon_inode:[pidfd]`. Signalling a process that has exited
+and been reaped returns `os: process already finished` instead of hitting
+whatever inherited the pid. Take the descriptor *before* re-reading `/proc` for
+identity — that order closes the check/use window without needing the process
+to still be alive. `Release` the handle or the fd leaks.
