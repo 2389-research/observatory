@@ -20,6 +20,7 @@ import (
 
 	"github.com/2389-research/observatory-v2/internal/api"
 	"github.com/2389-research/observatory-v2/internal/config"
+	"github.com/2389-research/observatory-v2/internal/lock"
 	"github.com/2389-research/observatory-v2/internal/preflight"
 	"github.com/2389-research/observatory-v2/internal/runtime"
 	"github.com/2389-research/observatory-v2/internal/runtime/runtimetest"
@@ -76,7 +77,7 @@ func newTemplateServer(t *testing.T) (*httptest.Server, *store.Store, *runtimete
 // admission settings, for tests about what those settings change.
 func newTemplateServerAdmission(t *testing.T, adm config.Admission) (*httptest.Server, *store.Store, *runtimetest.Fake) {
 	t.Helper()
-	return newTemplateServerFull(t, nil, adm, nil)
+	return newTemplateServerFull(t, nil, adm, nil, nil)
 }
 
 // newTemplateServerWrapped is newTemplateServer with a middleware hook. wrap is
@@ -85,7 +86,14 @@ func newTemplateServerAdmission(t *testing.T, adm config.Admission) (*httptest.S
 // the hook instead of guessing at timing.
 func newTemplateServerWrapped(t *testing.T, wrap func(http.Handler) http.Handler) (*httptest.Server, *store.Store, *runtimetest.Fake) {
 	t.Helper()
-	return newTemplateServerFull(t, wrap, testAdmission(), nil)
+	return newTemplateServerFull(t, wrap, testAdmission(), nil, nil)
+}
+
+// newTemplateServerLock is newTemplateServer on a host whose runtime lock is
+// wired, for tests about what the lock publishes.
+func newTemplateServerLock(t *testing.T, lk *lock.Lock) (*httptest.Server, *store.Store, *runtimetest.Fake) {
+	t.Helper()
+	return newTemplateServerFull(t, nil, testAdmission(), nil, lk)
 }
 
 func newTemplateServerFull(
@@ -93,6 +101,7 @@ func newTemplateServerFull(
 	wrap func(http.Handler) http.Handler,
 	adm config.Admission,
 	tr *terminal.Registry,
+	lk *lock.Lock,
 ) (*httptest.Server, *store.Store, *runtimetest.Fake) {
 	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "events.sqlite"))
@@ -114,6 +123,7 @@ func newTemplateServerFull(
 		VMDefaults: testVMDefaults(),
 		Templates:  map[string]runtime.Template{testTemplateDef.TemplateID: testTemplateDef},
 		Host:       runtime.HostResources{TotalMemoryMiB: 8192, CPUCores: 8, StateDiskFreeMiB: 100 * 1024},
+		Lock:       lk,
 	})
 	if err != nil {
 		t.Fatalf("create manager: %v", err)

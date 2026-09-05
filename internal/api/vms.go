@@ -670,6 +670,22 @@ func (s *Server) handleHostStatus(w http.ResponseWriter, r *http.Request) {
 		"stop_grace_seconds":    def.StopGraceSeconds,
 	}
 
+	// Images: the kernel and root image this host stages, straight from
+	// runtime.lock.json. These are the digests doStage verifies the staged bytes
+	// against on every launch (internal/jailer/launch.go), so this is the running
+	// system describing itself from the source it executes (R-17), not a second
+	// declaration of it — the template manifest used to carry image paths nothing
+	// read, and they were retired for exactly that reason. Host scope: it is what
+	// a launch would stage now, not a record of what any particular VM booted.
+	// Omitted entirely when no lock is configured, for the same reason preflight
+	// is: an empty block claims "nothing is pinned", which is a different fact.
+	if lk := s.manager.RuntimeLock(); lk != nil {
+		resp["images"] = map[string]any{
+			"guest_kernel": lk.GuestKernel,
+			"root_image":   lk.RootImage,
+		}
+	}
+
 	// Preflight block: present only when the hook is wired. Never an empty fake block.
 	if s.preflight != nil {
 		refresh := r.URL.Query().Get("refresh") == "1"

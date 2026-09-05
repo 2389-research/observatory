@@ -142,7 +142,7 @@ func newTerminalServer(t *testing.T) (*httptest.Server, *store.Store, *runtimete
 			return d.DialContext(ctx, "unix", fr.sockPath)
 		},
 	})
-	srv, st, fake := newTemplateServerFull(t, nil, testAdmission(), reg)
+	srv, st, fake := newTemplateServerFull(t, nil, testAdmission(), reg, nil)
 	return srv, st, fake, fr, reg
 }
 

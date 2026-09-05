@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/2389-research/observatory-v2/internal/config"
+	"github.com/2389-research/observatory-v2/internal/lock"
 	"github.com/2389-research/observatory-v2/internal/store"
 )
 
@@ -126,6 +127,19 @@ type ManagerConfig struct {
 	VMDefaults config.VMDefaults
 	Templates  map[string]Template
 	Host       HostResources
+
+	// Lock is the parsed runtime.lock.json, or nil when this daemon has none.
+	// The manager does not act on it — the jailer loads the lock itself at stage
+	// time — it holds it so the API can publish what this host stages without
+	// re-reading the file behind the runtime's back.
+	Lock *lock.Lock
+}
+
+// RuntimeLock returns the pinned runtime artifacts, or nil when no lock is
+// configured. Nil is an answer: a daemon with no lock cannot say what it would
+// boot, and /host/status omits the block rather than serving an empty one.
+func (m *Manager) RuntimeLock() *lock.Lock {
+	return m.cfg.Lock
 }
 
 // Manager is the single lifecycle authority. It owns a bounded worker pool for

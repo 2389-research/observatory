@@ -36,7 +36,7 @@ func newStreamServer(t *testing.T, maxInflight int64) (*httptest.Server, *store.
 			return d.DialContext(ctx, "unix", fr.sockPath)
 		},
 	})
-	srv, st, _ := newTemplateServerFull(t, nil, testAdmission(), reg)
+	srv, st, _ := newTemplateServerFull(t, nil, testAdmission(), reg, nil)
 	return srv, st, fr, reg
 }
 

@@ -8,6 +8,7 @@ import (
 
 	"github.com/2389-research/observatory-v2/internal/config"
 	"github.com/2389-research/observatory-v2/internal/lock"
+	"github.com/2389-research/observatory-v2/internal/runtime"
 )
 
 // exampleConfigPath is the shipped host config. config.Load applies no default
@@ -80,5 +81,41 @@ func TestPreflightConfigFromExampleConfigHasGuestChannelPaths(t *testing.T) {
 	}
 	if pf.StageRoot == "" {
 		t.Error("StageRoot is empty for the shipped example config; guest_channel would report not_configured")
+	}
+}
+
+// TestManagerConfigCarriesTheSameLockAsPreflight: /host/status publishes the
+// kernel and root image the host stages, and the manager is where the API reads
+// them from. The daemon loads the lock once for the doctor; handing the manager
+// a different one — or none — makes the images block disappear on a host that
+// has pins, with every unit test still green, because the wiring is the only
+// place the two are joined.
+func TestManagerConfigCarriesTheSameLockAsPreflight(t *testing.T) {
+	cfg := &config.Config{
+		Server:  config.Server{Mode: "loopback_only"},
+		Storage: config.Storage{Database: "/var/lib/vmobs/state/events.sqlite"},
+		Paths:   config.Paths{Runtime: "/srv/vmobs"},
+	}
+	pfLock := &lock.Lock{
+		GuestKernel: lock.GuestKernelEntry{Version: "6.1.128"},
+		RootImage:   lock.RootImageEntry{SHA256: "abc"},
+	}
+
+	got := managerConfig(cfg, nil, runtime.HostResources{}, pfLock)
+
+	if got.Lock != pfLock {
+		t.Fatalf("ManagerConfig.Lock = %v, want the lock preflight was handed", got.Lock)
+	}
+	if got.Lock.GuestKernel.Version != "6.1.128" || got.Lock.RootImage.SHA256 != "abc" {
+		t.Errorf("the manager holds a different lock: %+v", got.Lock)
+	}
+}
+
+// A daemon with no lock hands the manager nil rather than an empty lock, so
+// /host/status omits the images block instead of publishing zeroed pins.
+func TestManagerConfigWithoutALockIsNil(t *testing.T) {
+	cfg := &config.Config{Storage: config.Storage{Database: "/x/events.sqlite"}}
+	if got := managerConfig(cfg, nil, runtime.HostResources{}, nil); got.Lock != nil {
+		t.Errorf("ManagerConfig.Lock = %+v with no lock configured, want nil", got.Lock)
 	}
 }
