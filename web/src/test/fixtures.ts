@@ -42,8 +42,6 @@ export const testTemplates: Template[] = [
     template_id: 'standard',
     description: 'Demo VM template',
     digest: 'sha256:abc',
-    kernel_image: '/srv/vmobs/images/vmlinux',
-    root_image: '/srv/vmobs/images/rootfs.img',
     guest_privilege_profiles: ['unprivileged'],
     sensors: ['fanotify'],
     protocol_versions: { guestd: '1' },

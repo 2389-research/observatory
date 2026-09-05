@@ -48,8 +48,6 @@ export interface Template {
   template_id: string
   description: string
   digest: string
-  kernel_image: string
-  root_image: string
   guest_privilege_profiles: string[]
   sensors: string[]
   protocol_versions: Record<string, string>

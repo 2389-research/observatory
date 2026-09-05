@@ -266,14 +266,13 @@ func startDaemon(t *testing.T, repoRoot, daemonBin, runnerBin, label string, opt
 	}
 
 	// Write the "standard" template the gate's POST /vms calls request.
-	// kernel_image and root_image must be paths that exist on aibox03 (/srv/vmobs).
+	// The manifest declares no images: the kernel and rootfs come from
+	// runtime.lock.json, and a manifest naming its own is refused at load.
 	// Field names match internal/runtime/templates.go:Template exactly; DisallowUnknownFields
 	// will reject any stray field, so match the struct precisely.
 	const standardTemplateJSON = `{
 	"template_id": "standard",
 	"description": "Standard M1a gate VM template",
-	"kernel_image": "/srv/vmobs/images/vmlinux",
-	"root_image": "/srv/vmobs/images/rootfs.img",
 	"guest_privilege_profiles": ["unprivileged"],
 	"sensors": ["fanotify"],
 	"protocol_versions": {"guestd": "1"}
@@ -1395,8 +1394,6 @@ func TestM1aGate(t *testing.T) {
 		const badStandardTemplateJSON = `{
 	"template_id": "standard",
 	"description": "Standard M1a gate VM template",
-	"kernel_image": "/srv/vmobs/images/vmlinux",
-	"root_image": "/srv/vmobs/images/rootfs.img",
 	"guest_privilege_profiles": ["unprivileged"],
 	"sensors": ["fanotify"],
 	"protocol_versions": {"guestd": "1"}

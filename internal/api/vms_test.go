@@ -31,8 +31,6 @@ import (
 var testTemplateDef = runtime.Template{
 	TemplateID:  "test-small-v1",
 	Description: "small test VM",
-	KernelImage: "/boot/vmlinuz",
-	RootImage:   "/images/rootfs.ext4",
 	Digest:      "sha256:aabbcc0011223344",
 }
 
@@ -425,6 +423,31 @@ func TestTemplatesSorted(t *testing.T) {
 	}
 	if tpl["description"] == nil {
 		t.Error("template missing description")
+	}
+}
+
+// TestTemplatesPublishNoImagePaths: GET /templates used to serve kernel_image
+// and root_image verbatim from the manifest, telling an operator — and the
+// launch form, which reads this endpoint — where the kernel came from, and
+// telling them wrong. The images come from runtime.lock.json; the manifest's
+// paths were read by nothing and on the demo host resolved to a directory that
+// does not exist. SPEC §18 defines this endpoint as templates, profiles, sensor
+// support and toolchain inventory, and §7 puts image identity in the lock.
+// Issue 52pj.
+func TestTemplatesPublishNoImagePaths(t *testing.T) {
+	srv, _, _ := newTemplateServer(t)
+	var got map[string]any
+	getJSON(t, srv.URL+"/api/v1/templates", http.StatusOK, &got)
+
+	tpls, _ := got["templates"].([]any)
+	if len(tpls) != 1 {
+		t.Fatalf("templates = %d items, want 1", len(tpls))
+	}
+	tpl := tpls[0].(map[string]any)
+	for _, field := range []string{"kernel_image", "root_image"} {
+		if v, present := tpl[field]; present {
+			t.Errorf("templates still publish %s = %v; the lock owns image identity", field, v)
+		}
 	}
 }
 

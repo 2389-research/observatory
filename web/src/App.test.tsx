@@ -80,8 +80,6 @@ const templates = {
       template_id: 'python-dev',
       description: 'Python dev box',
       digest: 'sha256:abcdef0123456789',
-      kernel_image: '/srv/vmobs/images/vmlinux',
-      root_image: '/srv/vmobs/images/rootfs.img',
       guest_privilege_profiles: ['unprivileged'],
       sensors: ['fanotify'],
       protocol_versions: { guestd: '1' },

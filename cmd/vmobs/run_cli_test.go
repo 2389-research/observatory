@@ -24,8 +24,6 @@ import (
 var runCLITestTemplate = runtime.Template{
 	TemplateID:  "run-test-small-v1",
 	Description: "small run test VM",
-	KernelImage: "/boot/vmlinuz",
-	RootImage:   "/images/rootfs.ext4",
 	Digest:      "sha256:aabbccddeeff0011",
 }
 

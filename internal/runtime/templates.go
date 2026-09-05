@@ -20,13 +20,19 @@ import (
 type Template struct {
 	TemplateID             string            `json:"template_id"`
 	Description            string            `json:"description"`
-	KernelImage            string            `json:"kernel_image"`
-	RootImage              string            `json:"root_image"`
 	GuestPrivilegeProfiles []string          `json:"guest_privilege_profiles"`
 	Sensors                []string          `json:"sensors"`
 	ProtocolVersions       map[string]string `json:"protocol_versions"`
 	// Digest is populated by LoadTemplates, not from the JSON.
 	Digest string `json:"-"`
+}
+
+// retiredFields names manifest keys that were once accepted and are refused now,
+// each with the reason an operator needs to hear. A bare "unknown field" reads as
+// a typo when the field is one we shipped in our own demo template.
+var retiredFields = []struct{ key, reason string }{
+	{"kernel_image", "the guest kernel comes from runtime.lock.json (guest_kernel.vmlinux_path)"},
+	{"root_image", "the root image comes from runtime.lock.json (root_image.path)"},
 }
 
 // LoadTemplates reads every *.json manifest in dir with strict unknown-field
@@ -53,6 +59,18 @@ func LoadTemplates(dir string) (map[string]Template, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read template %s: %w", path, err)
 		}
+		// Retired keys are named before the strict decode, so the operator is
+		// told where images actually come from instead of "unknown field".
+		var keys map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &keys); err != nil {
+			return nil, fmt.Errorf("parse template %s: %w", path, err)
+		}
+		for _, f := range retiredFields {
+			if _, ok := keys[f.key]; ok {
+				return nil, fmt.Errorf("template %s declares %q, which nothing reads: %s; remove the field", path, f.key, f.reason)
+			}
+		}
+
 		var t Template
 		dec := json.NewDecoder(bytes.NewReader(raw))
 		dec.DisallowUnknownFields()

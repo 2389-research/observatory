@@ -90,8 +90,6 @@ type wireTemplate struct {
 	TemplateID             string            `json:"template_id"`
 	Description            string            `json:"description"`
 	Digest                 string            `json:"digest"`
-	KernelImage            string            `json:"kernel_image"`
-	RootImage              string            `json:"root_image"`
 	GuestPrivilegeProfiles []string          `json:"guest_privilege_profiles"`
 	Sensors                []string          `json:"sensors"`
 	ProtocolVersions       map[string]string `json:"protocol_versions"`
@@ -216,8 +214,6 @@ func renderTemplate(id string, tpl runtime.Template) wireTemplate {
 		TemplateID:             id,
 		Description:            tpl.Description,
 		Digest:                 tpl.Digest,
-		KernelImage:            tpl.KernelImage,
-		RootImage:              tpl.RootImage,
 		GuestPrivilegeProfiles: profiles,
 		Sensors:                sensors,
 		ProtocolVersions:       versions,

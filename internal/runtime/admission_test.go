@@ -243,8 +243,6 @@ func TestLoadTemplatesHappyPath(t *testing.T) {
 	manifest := `{
 		"template_id": "tmpl-001",
 		"description": "Test template",
-		"kernel_image": "/images/vmlinux",
-		"root_image": "/images/rootfs.img",
 		"guest_privilege_profiles": ["unprivileged"],
 		"sensors": ["fanotify"],
 		"protocol_versions": {"guestd": "1"}
@@ -276,8 +274,6 @@ func TestLoadTemplatesDisallowsUnknownFields(t *testing.T) {
 	manifest := `{
 		"template_id": "tmpl-bad",
 		"description": "Test",
-		"kernel_image": "/images/vmlinux",
-		"root_image": "/images/rootfs.img",
 		"unknown_field": "should_fail"
 	}`
 	if err := os.WriteFile(filepath.Join(dir, "tmpl-bad.json"), []byte(manifest), 0o644); err != nil {

@@ -37,8 +37,6 @@ func testTemplate() runtime.Template {
 	return runtime.Template{
 		TemplateID:             "tmpl-test",
 		Description:            "Test template",
-		KernelImage:            "/images/vmlinux",
-		RootImage:              "/images/rootfs.img",
 		GuestPrivilegeProfiles: []string{"unprivileged"},
 		Sensors:                []string{"fanotify"},
 		ProtocolVersions:       map[string]string{"guestd": "1"},

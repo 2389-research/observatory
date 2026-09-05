@@ -32,14 +32,13 @@ running() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
 
 write_config() {
   mkdir -p "$DEMO/state/templates" "$DEMO/state/spool" "$DEMO/bin"
-  # The template's image paths are decorative: the real kernel and rootfs come
-  # from runtime.lock.json, resolved against the repo root.
+  # The template declares no image paths: the kernel and rootfs come from
+  # runtime.lock.json, resolved against the repo root, and a manifest that
+  # declares its own is refused at load.
   cat > "$DEMO/state/templates/standard.json" <<'JSON'
 {
   "template_id": "standard",
   "description": "Demo VM template",
-  "kernel_image": "/srv/vmobs/images/vmlinux",
-  "root_image": "/srv/vmobs/images/rootfs.img",
   "guest_privilege_profiles": ["unprivileged"],
   "sensors": ["fanotify"],
   "protocol_versions": {"guestd": "1"}

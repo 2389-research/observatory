@@ -67,9 +67,7 @@ sed -e "s|127.0.0.1:8787|127.0.0.1:$PORT|g" \
 cat >"$TMP/state/templates/smoke-tpl.json" <<'EOF'
 {
   "template_id": "smoke-tpl-v1",
-  "description": "smoke-test template; image paths are not resolvable on a dev host",
-  "kernel_image": "/nonexistent/vmlinuz",
-  "root_image": "/nonexistent/rootfs.ext4",
+  "description": "smoke-test template",
   "guest_privilege_profiles": ["unprivileged"],
   "sensors": [],
   "protocol_versions": {"guest": "1"}

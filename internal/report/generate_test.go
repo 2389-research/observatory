@@ -415,8 +415,6 @@ func TestManagerWiring_TerminalRunTriggersReportOp(t *testing.T) {
 			"tmpl-test": {
 				TemplateID:       "tmpl-test",
 				Description:      "test",
-				KernelImage:      "/k",
-				RootImage:        "/r",
 				Digest:           fmt.Sprintf("sha256:%064d", 1),
 				ProtocolVersions: map[string]string{"guestd": "1"},
 			},
