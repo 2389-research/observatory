@@ -31,6 +31,17 @@ import (
 //
 // §15.3: error messages name the file, never dump its contents.
 func VerifyStagedFile(stageDir string, f StagedFile) (*os.File, error) {
+	// The name is joined onto stageDir here and onto the jail root by
+	// CopyFromPinnedFd. Both joins are only as safe as the name, and this
+	// function is exported: the server's check is the gate, and this one is what
+	// makes the gate's absence in some future caller a refusal instead of a
+	// traversal.
+	if !ValidStagedName(f.Name) {
+		return nil, &BackendError{
+			Cause:   "bad_request",
+			Message: fmt.Sprintf("%q is not a staged file name", truncateName(f.Name)),
+		}
+	}
 	fpath := filepath.Join(stageDir, f.Name)
 
 	// O_NOFOLLOW: if the path is a symlink the open fails (ELOOP on Linux).

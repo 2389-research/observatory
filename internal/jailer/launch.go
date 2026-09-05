@@ -428,9 +428,10 @@ func (a *Adapter) doStage(ctx context.Context, vmID, bootID string, cid uint32, 
 // computeStagedFiles builds the list of StagedFiles for privd.StartVM by computing
 // the SHA-256 of each file in the stage directory that privd will copy.
 func (a *Adapter) computeStagedFiles(stageDir string) ([]privd.StagedFile, error) {
-	names := []string{"vmlinux", "rootfs.ext4", "config.ext4", "workspace.ext4", "fc-config.json"}
+	// privd validates every name against this same list and refuses anything
+	// else, so the list lives on its side of the wire and is read from there.
 	var files []privd.StagedFile
-	for _, name := range names {
+	for _, name := range privd.StagedFileNames {
 		path := filepath.Join(stageDir, name)
 		digest, err := sha256File(path)
 		if err != nil {

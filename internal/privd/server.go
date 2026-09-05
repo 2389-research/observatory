@@ -257,6 +257,21 @@ func (s *Server) handleStartVM(raw json.RawMessage) Response {
 		return errResp("bad_request", fmt.Sprintf("uid %d outside allowed range [%d, %d)", r.UID, s.cfg.UIDMin, s.cfg.UIDMax))
 	}
 
+	// Every staged file must be one privd knows. The name is joined onto the
+	// stage dir to read the file and onto the jail root to write it, so a name
+	// that is not a bare filename reaches two different places -- and privd is
+	// root where its caller is not. Refused here, before the backend creates a
+	// jail tree or opens an fd on the caller's behalf.
+	//
+	// The offending name is echoed back truncated: it is the caller's own bytes
+	// and the caller needs to see which entry was refused, but an unbounded echo
+	// hands a 64 KiB request a 64 KiB response.
+	for i, f := range r.Files {
+		if !ValidStagedName(f.Name) {
+			return errResp("bad_request", fmt.Sprintf("files[%d]: %q is not a staged file name", i, truncateName(f.Name)))
+		}
+	}
+
 	// StageDir must resolve under StageRoot.
 	// Both sides get EvalSymlinks so a symlink StageRoot (e.g. /var/vmobs/stage →
 	// /mnt/storage/stage) doesn't produce a false containment failure.

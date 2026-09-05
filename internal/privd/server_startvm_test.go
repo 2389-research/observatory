@@ -197,3 +197,86 @@ func TestStartVMSuccessDoesNotRollBack(t *testing.T) {
 		t.Errorf("ledger pid = %d; want 4242", entry.PID)
 	}
 }
+
+// startVMWithFiles runs start_vm carrying a file list, which the helper above
+// omits because the rollback tests drive the backend at its seam.
+func startVMWithFiles(t *testing.T, s *Server, vmID, stageDir string, files []StagedFile) Response {
+	t.Helper()
+	payload, err := json.Marshal(StartVMReq{
+		VMID:     vmID,
+		UID:      30001,
+		GID:      30001,
+		CID:      10,
+		StageDir: stageDir,
+		Files:    files,
+	})
+	if err != nil {
+		t.Fatalf("marshal start: %v", err)
+	}
+	return s.dispatch(Request{V: ProtoVersion, Verb: "start_vm", Payload: payload})
+}
+
+// TestStartVMRefusesAStagedNameThatIsNotOneOfOurs: the handler validates the
+// file list the way it validates vm_id and the uid range -- before the backend
+// runs, so nothing is created and no fd is opened on the caller's behalf.
+//
+// The backend is where the name would do its damage, so the assertion that
+// matters is that StartVM was never called at all. A refusal the backend has to
+// make for itself is a second chance, not a gate.
+func TestStartVMRefusesAStagedNameThatIsNotOneOfOurs(t *testing.T) {
+	hostile := []string{
+		"../../victim/owned.txt",
+		"sub/vmlinux",
+		"/etc/cron.d/pwn",
+		"..",
+		"",
+		"initrd",
+	}
+	for _, name := range hostile {
+		t.Run(name, func(t *testing.T) {
+			s, ops, stageDir := startVMFixture(t)
+			const vmID = "vm-rollback"
+			allocate(t, s, vmID)
+
+			// A legal name alongside it: the refusal must be about the list, not
+			// about the first element.
+			files := []StagedFile{
+				{Name: "vmlinux", SHA256: "00"},
+				{Name: name, SHA256: "00"},
+			}
+			resp := startVMWithFiles(t, s, vmID, stageDir, files)
+
+			if resp.OK {
+				t.Fatalf("start_vm accepted staged name %q", name)
+			}
+			if resp.Cause != "bad_request" {
+				t.Errorf("cause = %q, want bad_request (message %q)", resp.Cause, resp.Message)
+			}
+			if len(ops.startCalls) != 0 {
+				t.Errorf("backend StartVM ran %v for a request the handler should have refused", ops.startCalls)
+			}
+		})
+	}
+}
+
+// TestStartVMTakesTheFileListALaunchSends: the refusal above must not be bought
+// by refusing every list. The names computeStagedFiles builds still reach the
+// backend.
+func TestStartVMTakesTheFileListALaunchSends(t *testing.T) {
+	s, ops, stageDir := startVMFixture(t)
+	const vmID = "vm-rollback"
+	allocate(t, s, vmID)
+
+	files := make([]StagedFile, 0, len(StagedFileNames))
+	for _, name := range StagedFileNames {
+		files = append(files, StagedFile{Name: name, SHA256: "00"})
+	}
+	resp := startVMWithFiles(t, s, vmID, stageDir, files)
+
+	if !resp.OK {
+		t.Fatalf("start_vm refused the list every launch sends: cause=%q message=%q", resp.Cause, resp.Message)
+	}
+	if len(ops.startCalls) != 1 {
+		t.Errorf("backend StartVM ran %v; want exactly one call", ops.startCalls)
+	}
+}

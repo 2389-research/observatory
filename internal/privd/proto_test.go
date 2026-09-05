@@ -1,5 +1,6 @@
 // ABOUTME: Tests for the privd wire protocol: message round-trips, oversize rejection,
-// ABOUTME: truncated-body handling, ValidVMID table, and client↔fake-listener round-trip.
+// ABOUTME: truncated-body handling, the ValidVMID and ValidStagedName tables, and
+// ABOUTME: the client↔fake-listener round-trip.
 package privd_test
 
 import (
@@ -195,3 +196,62 @@ func contains(s, sub string) bool {
 
 // compile-time import use sentinel.
 var _ = os.DevNull
+
+// TestValidStagedName: the set of files a launch may stage is closed and privd
+// knows it, so the predicate is an allowlist rather than a search for hostile
+// syntax. That matters for the rejects below: "vmlinux/../vmlinux" and
+// "./vmlinux" both clean to a legal name, and neither is a name a launch sends.
+// A predicate that cleaned first and compared after would take them, and would
+// then be one Clean bug away from taking their neighbours.
+func TestValidStagedName(t *testing.T) {
+	cases := []struct {
+		name string
+		want bool
+	}{
+		// Accept: every name computeStagedFiles builds, and nothing else.
+		{"vmlinux", true},
+		{"rootfs.ext4", true},
+		{"config.ext4", true},
+		{"workspace.ext4", true},
+		{"fc-config.json", true},
+		// Reject: traversal, in both directions and both separators' worth of it.
+		{"../../victim/owned.txt", false},
+		{"../vmlinux", false},
+		{"sub/vmlinux", false},
+		{"vmlinux/../vmlinux", false},
+		{"./vmlinux", false},
+		{"/etc/cron.d/pwn", false},
+		{"/vmlinux", false},
+		// Reject: the directory names themselves.
+		{".", false},
+		{"..", false},
+		{"", false},
+		// Reject: a plausible file that is still not one of ours.
+		{"initrd", false},
+		{"vmlinux.bak", false},
+		{"VMLINUX", false},
+		{"vmlinux\x00", false},
+	}
+	for _, c := range cases {
+		if got := privd.ValidStagedName(c.name); got != c.want {
+			t.Errorf("ValidStagedName(%q) = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestStagedFileNamesAreBasenames guards the allowlist itself: a name added to
+// it later must still be a bare filename, or the allowlist becomes the hole it
+// was written to close.
+func TestStagedFileNamesAreBasenames(t *testing.T) {
+	if len(privd.StagedFileNames) == 0 {
+		t.Fatal("StagedFileNames is empty; no launch could stage anything")
+	}
+	for _, name := range privd.StagedFileNames {
+		if name != filepath.Base(name) || name == "." || name == ".." || name == "" {
+			t.Errorf("StagedFileNames contains %q, which is not a bare filename", name)
+		}
+		if !privd.ValidStagedName(name) {
+			t.Errorf("ValidStagedName rejects %q, which is in StagedFileNames", name)
+		}
+	}
+}

@@ -28,6 +28,43 @@ func ValidVMID(id string) bool {
 	return vmIDRe.MatchString(id)
 }
 
+// StagedFileNames is every file a launch may stage into a VM's jail, in the
+// order a launch copies them. It is the allowlist ValidStagedName enforces and
+// the list the jailer builds its request from, so the two cannot drift: privd
+// refusing a name the controller sends would fail every launch, and privd
+// accepting one the controller never sends is the hole this list closes.
+var StagedFileNames = []string{
+	"vmlinux",
+	"rootfs.ext4",
+	"config.ext4",
+	"workspace.ext4",
+	"fc-config.json",
+}
+
+// ValidStagedName reports whether name is one of the files a launch stages.
+//
+// The name is not a path and privd must not treat it as one. StartVM joins it
+// onto two different bases -- the caller's stage dir when the file is opened and
+// digest-verified, and the jail root when it is copied -- and those bases sit at
+// different depths, so a name carrying ".." can resolve inside the stage root on
+// the read and outside the jail on the write. privd runs as root and its one
+// permitted caller does not; SPEC 3.3 makes validating path roots privd's job.
+//
+// An allowlist rather than a hunt for hostile syntax, because the set of files a
+// launch stages is closed and privd knows all of it. A predicate that cleaned
+// the name first and compared after would accept "./vmlinux" and
+// "vmlinux/../vmlinux" -- names no launch sends -- and would then rest on
+// filepath.Clean agreeing with the kernel about every input, which is the
+// argument this avoids having.
+func ValidStagedName(name string) bool {
+	for _, allowed := range StagedFileNames {
+		if name == allowed {
+			return true
+		}
+	}
+	return false
+}
+
 // Request is the request envelope sent to privd.
 type Request struct {
 	V       int             `json:"v"`
@@ -144,4 +181,15 @@ func ReadMsg(r io.Reader, dst any) error {
 		return fmt.Errorf("privd: decode message: %w", err)
 	}
 	return nil
+}
+
+// truncateName bounds a caller-supplied name before it is echoed into a
+// response message. Long enough to recognise the entry that was refused, short
+// enough that a maximal request cannot buy a maximal reply.
+func truncateName(name string) string {
+	const max = 64
+	if len(name) > max {
+		return name[:max] + "…"
+	}
+	return name
 }
