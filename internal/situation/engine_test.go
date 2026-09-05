@@ -710,3 +710,50 @@ func TestEvaluateRunConcludedDisabledClass(t *testing.T) {
 		}
 	}
 }
+
+// TestEvaluateRaisesOnStalledCleanup: a cleanup the controller could not finish
+// leaves host resources owned by a VM the operator has already asked it to let
+// go. The row retains that fact, but a row is something you have to go and look
+// at; the attention queue is what tells an operator there is something to look
+// at. The item has to name the VM, carry the runtime's own reason, and say what
+// to do about it — a stalled cleanup's remedy is not obvious from its summary.
+func TestEvaluateRaisesOnStalledCleanup(t *testing.T) {
+	s := openStore(t)
+	eng := engineOver(s, allTriggers())
+	ctx := t.Context()
+
+	vmID := testUUID(140)
+	makeTestVM(t, s, vmID)
+
+	reason := "privd: invalid_state: vm process is still alive; signal first"
+	if err := s.RecordCleanupFailure(ctx, vmID, "deleting", reason); err != nil {
+		t.Fatalf("RecordCleanupFailure: %v", err)
+	}
+	if err := eng.Evaluate(ctx); err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+
+	items, err := s.ListAttention(ctx, store.AttentionQuery{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, it := range items {
+		if it.TriggerClass != "lifecycle_failed" {
+			continue
+		}
+		found = true
+		if !strings.Contains(it.Summary, vmID) || !strings.Contains(it.Summary, "still alive") {
+			t.Errorf("summary %q must name the VM and carry the runtime's reason", it.Summary)
+		}
+		if it.SystemAction == "" {
+			t.Errorf("stalled cleanup item lacks a system action: %+v", it)
+		}
+		if len(it.SuggestedActions) == 0 {
+			t.Errorf("stalled cleanup item suggests no action: %+v", it)
+		}
+	}
+	if !found {
+		t.Errorf("no attention raised for a stalled cleanup; items: %+v", items)
+	}
+}

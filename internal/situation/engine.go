@@ -167,6 +167,36 @@ var rulesByKind = map[string][]rule{
 		},
 	},
 
+	// vm.cleanup_failed is a lifecycle operation that did not complete: the
+	// operator asked for a stop or a delete and the host still owns the
+	// resources. It fires lifecycle_failed rather than reconciliation_surprise
+	// because it is raised on both paths -- the synchronous DELETE and the
+	// restart retry -- and only one of those is a restart.
+	"vm.cleanup_failed": {{
+		class:    "lifecycle_failed",
+		severity: store.SeverityNeedsDecision,
+		summary: func(env *events.Envelope) string {
+			vmID, _ := env.Data["vm_id"].(string)
+			state, _ := env.Data["state"].(string)
+			reason, _ := env.Data["reason"].(string)
+			return fmt.Sprintf("cleanup of VM %s did not complete; the row is held at %s: %s", vmID, state, reason)
+		},
+		systemAction: "retained the row and its resource reservations; the cleanup is retried at every controller start",
+		actionsFn: func(env *events.Envelope) []store.SuggestedAction {
+			vmID, _ := env.Data["vm_id"].(string)
+			if vmID == "" {
+				return nil
+			}
+			return []store.SuggestedAction{
+				{
+					Action:    "delete",
+					Params:    map[string]any{"path": "/api/v1/vms/" + vmID + "?force=true"},
+					Rationale: "retry the cleanup once the cause named in the summary is cleared on the host",
+				},
+			}
+		},
+	}},
+
 	// run.state_changed fires only on terminal transitions. The event is
 	// store-synthesized: vm_id is in data, not the envelope. succeeded → info;
 	// failed/inconclusive/aborted → needs_decision (operator must review report).

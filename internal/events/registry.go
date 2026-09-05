@@ -109,6 +109,17 @@ var registry = []KindInfo{
 		},
 	},
 	{
+		Kind:          "vm.cleanup_failed",
+		Family:        "vm",
+		SchemaVersion: 1,
+		Provenance:    HostObserved,
+		Semantics:     "A cleanup the controller retried did not complete; the VM's host resources are still owned. Data carries vm_id, the state the row is retained in, and reason.",
+		Caveats: []string{
+			"the row is not terminal: the cleanup is retried at every controller start until it succeeds",
+			"reason is the runtime's own error text, redacted per SPEC §15.3",
+		},
+	},
+	{
 		Kind:          "vm.deleted",
 		Family:        "vm",
 		SchemaVersion: 1,

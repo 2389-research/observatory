@@ -1266,6 +1266,13 @@ func (m *Manager) Delete(ctx context.Context, vmID string, force bool, expectedR
 	if err := m.rt.Release(ctx, vmID); err != nil {
 		var ue *UnavailableError
 		if !errors.As(err, &ue) {
+			// The typed error below tells this caller everything, and tells
+			// nobody else anything: it is a response body, and the row parked at
+			// "deleting" outlives the request that produced it. Record the
+			// reason beside the row so the next operator to look -- days later,
+			// after a restart, from the event stream -- finds the same answer
+			// this caller got (SPEC 5.3: record cleanup failures and retry them).
+			_ = m.st.RecordCleanupFailure(ctx, vmID, "deleting", err.Error())
 			return nil, &ErrReleaseFailed{VMID: vmID, Reason: err.Error()}
 		}
 		// UnavailableError is tolerated: an absent runtime must not wedge deletes.
@@ -1371,10 +1378,12 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 			// and leave the row alone when the answer is no. Tolerance mirrors
 			// that branch exactly — an absent runtime must not wedge the row,
 			// and any other failure leaves it at "stopping" for the next
-			// restart. The retained row is the record of the failure, which is
-			// why nothing is logged (this package logs nowhere) and why
-			// Reconcile does not fail: a stop that will not complete must not
-			// stop the daemon from starting.
+			// restart. The row is retained and the reason is recorded beside
+			// it as vm.cleanup_failed, which is the whole of the report: this
+			// package logs nowhere, and Reconcile does not fail either, because
+			// a stop that will not complete must not stop the daemon from
+			// starting. A store that cannot take the record is a bigger problem
+			// than the stop, and one that startup will hit again on its own.
 			//
 			// Not adopted: nothing looked, or the runtime cannot look. Absent
 			// evidence is not evidence of health — but it is not evidence of a
@@ -1387,6 +1396,7 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 				if err := m.rt.ForceStop(ctx, vm.VMID); err != nil {
 					var ue *UnavailableError
 					if !errors.As(err, &ue) {
+						_ = m.st.RecordCleanupFailure(ctx, vm.VMID, "stopping", err.Error())
 						continue
 					}
 				}
@@ -1419,10 +1429,11 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 			// expected here -- reconcile runs at startup, where the runtime may
 			// legitimately be absent -- and must not wedge the delete. Any
 			// other failure leaves the row at "deleting" for the next restart to
-			// retry; that retained row is the record of the failure, which is
-			// why nothing is logged (this package logs nowhere) and why
-			// Reconcile does not fail: a release error must not stop the daemon
-			// from starting.
+			// retry, with the reason recorded beside it as vm.cleanup_failed
+			// (SPEC 5.3 asks for cleanup failures to be recorded, not only
+			// retried). That pair is the whole of the report: this package logs
+			// nowhere, and Reconcile does not fail either, because a release
+			// error must not stop the daemon from starting.
 			// The signal comes first here for the same reason it does in Delete:
 			// a row parked at "deleting" is disproportionately one privd refused
 			// to release because the VM's process was still alive, and releasing
@@ -1430,15 +1441,23 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 			// every restart. A ForceStop that fails for any reason but an absent
 			// runtime skips the release entirely — the retained row is the record.
 			releaseOK := true
+			var stalled error
 			if err := m.rt.ForceStop(ctx, vm.VMID); err != nil {
 				var ue *UnavailableError
-				releaseOK = errors.As(err, &ue)
+				if releaseOK = errors.As(err, &ue); !releaseOK {
+					stalled = err
+				}
 			}
 			if releaseOK {
 				if err := m.rt.Release(ctx, vm.VMID); err != nil {
 					var ue *UnavailableError
-					releaseOK = errors.As(err, &ue)
+					if releaseOK = errors.As(err, &ue); !releaseOK {
+						stalled = err
+					}
 				}
+			}
+			if stalled != nil {
+				_ = m.st.RecordCleanupFailure(ctx, vm.VMID, "deleting", stalled.Error())
 			}
 			if releaseOK {
 				wantDeleted := "deleted"
