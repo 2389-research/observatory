@@ -155,7 +155,7 @@ func launchTestVM(t *testing.T, adapter *jailer.Adapter, stateDir, jailBase stri
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	if err := adapter.Launch(ctx, spec); err != nil {
+	if _, err := adapter.Launch(ctx, spec); err != nil {
 		t.Fatalf("Launch %s: %v", vmID, err)
 	}
 	return vmID

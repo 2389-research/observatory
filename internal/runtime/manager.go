@@ -664,8 +664,11 @@ func (m *Manager) runLaunch(vm *store.VM, opID int64, tpl Template, vcpu int, me
 		return
 	}
 
-	// Launch the VMM.
-	if err := m.rt.Launch(ctx, spec); err != nil {
+	// Launch the VMM. What it reports having staged rides the transition below:
+	// the boot id was established before any of it existed, so this is the first
+	// write that can say what this boot actually runs.
+	staged, err := m.rt.Launch(ctx, spec)
+	if err != nil {
 		m.failLaunch(ctx, vmID, opID, "launch", err.Error())
 		_ = m.rt.ForceStop(ctx, vmID) // best-effort cleanup
 		return
@@ -679,6 +682,7 @@ func (m *Manager) runLaunch(vm *store.VM, opID int64, tpl Template, vcpu int, me
 		To:          "running",
 		Reason:      "launch_complete",
 		OperationID: opID,
+		Images:      staged,
 	}); err != nil {
 		if errors.Is(err, new(store.InvalidTransitionError)) {
 			return // stop raced us after launch; leave cleanup to the stop path
@@ -831,7 +835,7 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 		if err != nil {
 			return m.failAction(startCtx, vmID, opID, action, err)
 		}
-		if err := m.rt.Launch(startCtx, VMSpec{
+		staged, err := m.rt.Launch(startCtx, VMSpec{
 			VMID:             vmID,
 			BootID:           bootID,
 			VCPUCount:        vm.VCPUCount,
@@ -842,7 +846,8 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 			NetworkPolicyID:  vm.NetworkPolicyID,
 			TemplateID:       vm.TemplateID,
 			TemplateDigest:   vm.TemplateDigest,
-		}); err != nil {
+		})
+		if err != nil {
 			// A launch fails most often because its budget ran out, so this
 			// branch must assume startCtx is already dead. Recording the failure
 			// and cleaning up on that context would do neither.
@@ -864,6 +869,7 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 			To:          "running",
 			Reason:      "start_complete",
 			OperationID: opID,
+			Images:      staged,
 		})
 		if err != nil {
 			return m.failAction(okCtx, vmID, opID, action, err)

@@ -47,22 +47,25 @@ const (
 	stageAttached      = "attached"
 )
 
-// Launch executes the §5.3 launch transaction for the given VMSpec.
+// Launch executes the §5.3 launch transaction for the given VMSpec and reports
+// the images it staged — the lock entries doStage verified the copied bytes
+// against, which is the only honest answer to what this boot runs: the lock file
+// is read fresh at stage time and can differ from the one the daemon loaded.
 // Exactly one Launch call executes at a time; concurrent calls queue on launchMu.
-func (a *Adapter) Launch(ctx context.Context, spec runtime.VMSpec) error {
+func (a *Adapter) Launch(ctx context.Context, spec runtime.VMSpec) (*lock.Images, error) {
 	a.launchMu.Lock()
 	defer a.launchMu.Unlock()
 	return a.launch(ctx, spec)
 }
 
 // launch is the real implementation, called with launchMu held.
-func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (retErr error) {
+func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (*lock.Images, error) {
 	vmID := spec.VMID
 
 	// ── Step 1: Slot ──────────────────────────────────────────────────────────
 	slot, err := allocateSlot(a.cfg.StateDir, vmID, a.cfg.MaxSlots)
 	if err != nil {
-		return fmt.Errorf("launch %s failed at stage reserved: %w", vmID, err)
+		return nil, fmt.Errorf("launch %s failed at stage reserved: %w", vmID, err)
 	}
 
 	uid := a.cfg.JailUIDBase + slot
@@ -79,7 +82,7 @@ func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (retErr error
 	} else {
 		prefix, err := a.cfg.Allocator.Next()
 		if err != nil {
-			return fmt.Errorf("launch %s failed at stage reserved: allocate CIDR: %w", vmID, err)
+			return nil, fmt.Errorf("launch %s failed at stage reserved: allocate CIDR: %w", vmID, err)
 		}
 		cidr = prefix.String()
 	}
@@ -89,7 +92,7 @@ func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (retErr error
 	if bootID == "" {
 		bootID, err = newUUID()
 		if err != nil {
-			return fmt.Errorf("launch %s failed at stage reserved: generate boot ID: %w", vmID, err)
+			return nil, fmt.Errorf("launch %s failed at stage reserved: generate boot ID: %w", vmID, err)
 		}
 	}
 
@@ -105,7 +108,7 @@ func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (retErr error
 	}
 	vmStateDir := filepath.Join(a.cfg.StateDir, "vms", vmID)
 	if err := os.MkdirAll(vmStateDir, 0o700); err != nil {
-		return fmt.Errorf("launch %s failed at stage reserved: mkdir state dir: %w", vmID, err)
+		return nil, fmt.Errorf("launch %s failed at stage reserved: mkdir state dir: %w", vmID, err)
 	}
 	m.Stages = append(m.Stages, stageReserved)
 	if err := writeManifest(a.cfg.StateDir, m); err != nil {
@@ -116,7 +119,7 @@ func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (retErr error
 		if os.IsNotExist(existingErr) {
 			_ = os.RemoveAll(vmStateDir)
 		}
-		return fmt.Errorf("launch %s failed at stage reserved: write manifest: %w", vmID, err)
+		return nil, fmt.Errorf("launch %s failed at stage reserved: write manifest: %w", vmID, err)
 	}
 
 	// Rollback state is tracked by manifest.Stages; rollback runs in reverse.
@@ -131,24 +134,24 @@ func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (retErr error
 	// ── Step 3: Stage ─────────────────────────────────────────────────────────
 	currentStage = stageStaged
 	stageDir := filepath.Join(a.cfg.StageRoot, vmID)
-	stageErr := a.doStage(ctx, vmID, bootID, cid, uid, gid, stageDir, spec)
+	staged, stageErr := a.doStage(ctx, vmID, bootID, cid, uid, gid, stageDir, spec)
 	if stageErr != nil {
 		// doRollback removes the state dir and whatever doStage left in the stage dir.
-		return rollback(stageErr)
+		return nil, rollback(stageErr)
 	}
 	m.Stages = append(m.Stages, stageStaged)
 	if err := writeManifest(a.cfg.StateDir, m); err != nil {
-		return rollback(err)
+		return nil, rollback(err)
 	}
 
 	// ── Step 4: Network ───────────────────────────────────────────────────────
 	currentStage = stageNetwork
 	if err := a.pc.AllocateNetwork(ctx, privd.AllocateNetworkReq{VMID: vmID, CIDR: cidr}); err != nil {
-		return rollback(fmt.Errorf("allocate_network: %w", err))
+		return nil, rollback(fmt.Errorf("allocate_network: %w", err))
 	}
 	m.Stages = append(m.Stages, stageNetwork)
 	if err := writeManifest(a.cfg.StateDir, m); err != nil {
-		return rollback(err)
+		return nil, rollback(err)
 	}
 
 	// ── Step 5: VMM ───────────────────────────────────────────────────────────
@@ -156,7 +159,7 @@ func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (retErr error
 	// Compute SHA-256s of the staged files for privd's TOCTOU-safe staging.
 	stagedFiles, err := a.computeStagedFiles(stageDir)
 	if err != nil {
-		return rollback(fmt.Errorf("compute staged file hashes: %w", err))
+		return nil, rollback(fmt.Errorf("compute staged file hashes: %w", err))
 	}
 
 	startResp, err := a.pc.StartVM(ctx, privd.StartVMReq{
@@ -168,20 +171,20 @@ func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (retErr error
 		Files:    stagedFiles,
 	})
 	if err != nil {
-		return rollback(fmt.Errorf("start_vm: %w", err))
+		return nil, rollback(fmt.Errorf("start_vm: %w", err))
 	}
 	m.VMMPID = startResp.PID
 	m.VMMStart = startResp.StartTime
 	m.Stages = append(m.Stages, stageVMMStarted)
 	if err := writeManifest(a.cfg.StateDir, m); err != nil {
-		return rollback(err)
+		return nil, rollback(err)
 	}
 
 	// ── Step 6: Runner ────────────────────────────────────────────────────────
 	currentStage = stageRunnerSpawned
 	instanceID, err := newUUID()
 	if err != nil {
-		return rollback(fmt.Errorf("generate instance ID: %w", err))
+		return nil, rollback(fmt.Errorf("generate instance ID: %w", err))
 	}
 
 	// vSock path: the adapter polls runner-state.json for the attached phase;
@@ -195,7 +198,7 @@ func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (retErr error
 
 	logFile, err := os.OpenFile(runnerLog, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
-		return rollback(fmt.Errorf("open runner log: %w", err))
+		return nil, rollback(fmt.Errorf("open runner log: %w", err))
 	}
 
 	argv := []string{
@@ -217,7 +220,7 @@ func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (retErr error
 
 	if err := cmd.Start(); err != nil {
 		logFile.Close()
-		return rollback(fmt.Errorf("spawn runner: %w", err))
+		return nil, rollback(fmt.Errorf("spawn runner: %w", err))
 	}
 	logFile.Close()
 
@@ -225,7 +228,7 @@ func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (retErr error
 	m.RunnerStart = readRunnerStart(cmd.Process.Pid)
 	m.Stages = append(m.Stages, stageRunnerSpawned)
 	if err := writeManifest(a.cfg.StateDir, m); err != nil {
-		return rollback(err)
+		return nil, rollback(err)
 	}
 
 	// ── Step 7: Attach wait ───────────────────────────────────────────────────
@@ -239,7 +242,7 @@ func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (retErr error
 
 	attachErr := a.waitAttached(attachCtx, stateFile, cmd)
 	if attachErr != nil {
-		return rollback(attachErr)
+		return nil, rollback(attachErr)
 	}
 	m.Stages = append(m.Stages, stageAttached)
 	if err := writeManifest(a.cfg.StateDir, m); err != nil {
@@ -248,7 +251,7 @@ func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (retErr error
 		fmt.Fprintf(os.Stderr, "jailer: warn: failed to record attached stage for %s: %v\n", vmID, err)
 	}
 
-	return nil
+	return &staged, nil
 }
 
 // doStage builds the staging directory for the VM:
@@ -257,51 +260,51 @@ func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (retErr error
 //  2. Generate a per-boot token, write to token file, and build config.ext4.
 //  3. Create workspace.ext4.
 //  4. Write fc-config.json.
-func (a *Adapter) doStage(ctx context.Context, vmID, bootID string, cid uint32, uid, gid int, stageDir string, spec runtime.VMSpec) error {
+func (a *Adapter) doStage(ctx context.Context, vmID, bootID string, cid uint32, uid, gid int, stageDir string, spec runtime.VMSpec) (lock.Images, error) {
 	// Load and verify lock artifacts.
 	lk, err := lock.Load(a.cfg.LockPath)
 	if err != nil {
-		return fmt.Errorf("load lock: %w", err)
+		return lock.Images{}, fmt.Errorf("load lock: %w", err)
 	}
 	// RepoRoot is the directory the lock's artifact paths resolve against.
 	// Lock paths like "images/dist/vmlinux" are relative to it — one source of truth.
 	repoRoot := a.cfg.RepoRoot
 	if mismatches := lk.VerifyArtifacts(repoRoot); len(mismatches) > 0 {
-		return fmt.Errorf("artifact hash mismatch: %+v", mismatches)
+		return lock.Images{}, fmt.Errorf("artifact hash mismatch: %+v", mismatches)
 	}
 
 	// Create stage dir.
 	if err := os.MkdirAll(stageDir, 0o755); err != nil {
-		return fmt.Errorf("mkdir stage dir: %w", err)
+		return lock.Images{}, fmt.Errorf("mkdir stage dir: %w", err)
 	}
 
 	// Copy vmlinux — path comes from the lock, resolved against repoRoot.
 	vmlinuxSrc := filepath.Join(repoRoot, lk.GuestKernel.VmlinuxPath)
 	if err := copyFile(vmlinuxSrc, filepath.Join(stageDir, "vmlinux")); err != nil {
-		return fmt.Errorf("copy vmlinux: %w", err)
+		return lock.Images{}, fmt.Errorf("copy vmlinux: %w", err)
 	}
 
 	// Copy rootfs.ext4 — path comes from the lock, resolved against repoRoot.
 	rootfsSrc := filepath.Join(repoRoot, lk.RootImage.Path)
 	if err := copyFile(rootfsSrc, filepath.Join(stageDir, "rootfs.ext4")); err != nil {
-		return fmt.Errorf("copy rootfs: %w", err)
+		return lock.Images{}, fmt.Errorf("copy rootfs: %w", err)
 	}
 
 	// Generate capability token — 32 random bytes, hex-encoded.
 	// §15.3: token never appears in logs, argv, manifests, or error strings.
 	tokenBytes := make([]byte, 32)
 	if _, err := rand.Read(tokenBytes); err != nil {
-		return fmt.Errorf("generate token: %w", err)
+		return lock.Images{}, fmt.Errorf("generate token: %w", err)
 	}
 	token := hex.EncodeToString(tokenBytes)
 
 	// Write token file 0600.
 	tokenFile := filepath.Join(filepath.Join(a.cfg.StateDir, "vms", vmID), "token")
 	if err := os.MkdirAll(filepath.Dir(tokenFile), 0o700); err != nil {
-		return fmt.Errorf("mkdir token dir: %w", err)
+		return lock.Images{}, fmt.Errorf("mkdir token dir: %w", err)
 	}
 	if err := os.WriteFile(tokenFile, []byte(token), 0o600); err != nil {
-		return fmt.Errorf("write token file: %w", err)
+		return lock.Images{}, fmt.Errorf("write token file: %w", err)
 	}
 
 	// Build config.ext4 containing guest.BootConfig as context.json.
@@ -314,15 +317,15 @@ func (a *Adapter) doStage(ctx context.Context, vmID, bootID string, cid uint32, 
 	}
 	contextJSON, err := json.Marshal(bootCfg)
 	if err != nil {
-		return fmt.Errorf("marshal boot config: %w", err)
+		return lock.Images{}, fmt.Errorf("marshal boot config: %w", err)
 	}
 
 	diskStageDir := filepath.Join(stageDir, "disk-stage")
 	if err := os.MkdirAll(diskStageDir, 0o755); err != nil {
-		return fmt.Errorf("mkdir disk stage: %w", err)
+		return lock.Images{}, fmt.Errorf("mkdir disk stage: %w", err)
 	}
 	if err := os.WriteFile(filepath.Join(diskStageDir, "context.json"), contextJSON, 0o644); err != nil {
-		return fmt.Errorf("write context.json: %w", err)
+		return lock.Images{}, fmt.Errorf("write context.json: %w", err)
 	}
 
 	configDiskPath := filepath.Join(stageDir, "config.ext4")
@@ -332,7 +335,7 @@ func (a *Adapter) doStage(ctx context.Context, vmID, bootID string, cid uint32, 
 		fmt.Sprintf("%dK", configDiskMiB*1024),
 	)
 	if out, err := mkfs.CombinedOutput(); err != nil {
-		return fmt.Errorf("mkfs config.ext4: %w\n%s", err, out)
+		return lock.Images{}, fmt.Errorf("mkfs config.ext4: %w\n%s", err, out)
 	}
 
 	// Create workspace.ext4: truncate to WorkspaceDiskMiB, then mkfs.ext4.
@@ -346,11 +349,11 @@ func (a *Adapter) doStage(ctx context.Context, vmID, bootID string, cid uint32, 
 		workspacePath,
 	)
 	if out, err := truncCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("truncate workspace: %w\n%s", err, out)
+		return lock.Images{}, fmt.Errorf("truncate workspace: %w\n%s", err, out)
 	}
 	mkfsWS := exec.CommandContext(ctx, "mkfs.ext4", "-F", "-t", "ext4", workspacePath)
 	if out, err := mkfsWS.CombinedOutput(); err != nil {
-		return fmt.Errorf("mkfs workspace: %w\n%s", err, out)
+		return lock.Images{}, fmt.Errorf("mkfs workspace: %w\n%s", err, out)
 	}
 
 	// Write fc-config.json using the same FCConfig shape as the M0 fixture.
@@ -412,13 +415,13 @@ func (a *Adapter) doStage(ctx context.Context, vmID, bootID string, cid uint32, 
 	}
 	fcJSON, err := json.MarshalIndent(fc, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshal fc-config: %w", err)
+		return lock.Images{}, fmt.Errorf("marshal fc-config: %w", err)
 	}
 	if err := os.WriteFile(filepath.Join(stageDir, "fc-config.json"), fcJSON, 0o644); err != nil {
-		return fmt.Errorf("write fc-config.json: %w", err)
+		return lock.Images{}, fmt.Errorf("write fc-config.json: %w", err)
 	}
 
-	return nil
+	return lk.Images(), nil
 }
 
 // computeStagedFiles builds the list of StagedFiles for privd.StartVM by computing

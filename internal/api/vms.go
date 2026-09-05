@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/2389-research/observatory-v2/internal/auth"
+	"github.com/2389-research/observatory-v2/internal/lock"
 	"github.com/2389-research/observatory-v2/internal/runtime"
 	"github.com/2389-research/observatory-v2/internal/store"
 )
@@ -45,8 +46,15 @@ type wireVM struct {
 	NetworkPolicyID string            `json:"network_policy_id"`
 	Labels          map[string]string `json:"labels"`
 	Failure         *wireVMFailure    `json:"failure,omitempty"`
-	CreatedAt       string            `json:"created_at"`
-	UpdatedAt       string            `json:"updated_at"`
+	// Images: the kernel and root image this VM's current boot staged, reported by
+	// the launch that staged them. Not the same question /host/status answers —
+	// that one says what a launch would stage now, and runtime.lock.json can be
+	// edited under a VM that has been running for a week. Omitted when the launch
+	// staged nothing of its own, because an empty block would claim it staged
+	// nothing, which is a different fact from not knowing.
+	Images    *lock.Images `json:"images,omitempty"`
+	CreatedAt string       `json:"created_at"`
+	UpdatedAt string       `json:"updated_at"`
 	// Links carry the event stream for this VM; executable as returned (P-06).
 	Links map[string]string `json:"links"`
 }
@@ -120,6 +128,7 @@ func renderVM(vm *store.VM) wireVM {
 		NetworkProfile:  vm.NetworkProfile,
 		NetworkPolicyID: vm.NetworkPolicyID,
 		Labels:          labels,
+		Images:          vm.BootImages,
 		CreatedAt:       vm.CreatedAt,
 		UpdatedAt:       vm.UpdatedAt,
 		Links: map[string]string{
@@ -680,10 +689,7 @@ func (s *Server) handleHostStatus(w http.ResponseWriter, r *http.Request) {
 	// Omitted entirely when no lock is configured, for the same reason preflight
 	// is: an empty block claims "nothing is pinned", which is a different fact.
 	if lk := s.manager.RuntimeLock(); lk != nil {
-		resp["images"] = map[string]any{
-			"guest_kernel": lk.GuestKernel,
-			"root_image":   lk.RootImage,
-		}
+		resp["images"] = lk.Images()
 	}
 
 	// Preflight block: present only when the hook is wired. Never an empty fake block.

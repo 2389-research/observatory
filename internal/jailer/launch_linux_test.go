@@ -26,6 +26,7 @@ import (
 	"github.com/2389-research/observatory-v2/internal/guest"
 	"github.com/2389-research/observatory-v2/internal/guest/proto"
 	"github.com/2389-research/observatory-v2/internal/jailer"
+	"github.com/2389-research/observatory-v2/internal/lock"
 	"github.com/2389-research/observatory-v2/internal/network"
 	"github.com/2389-research/observatory-v2/internal/preflight"
 	"github.com/2389-research/observatory-v2/internal/privd"
@@ -539,8 +540,25 @@ func TestLaunchTransactionAgainstFakePrivd(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	if err := adapter.Launch(ctx, spec); err != nil {
+	staged, err := adapter.Launch(ctx, spec)
+	if err != nil {
 		t.Fatalf("Launch: %v", err)
+	}
+
+	// The launch reports the images it staged, and this is the only report of
+	// them: doStage reads runtime.lock.json itself, on every launch, while the
+	// daemon serves the copy it loaded at startup. Compare against a fresh read
+	// of the same file — what the stage verified the bytes against is what the
+	// VM row must end up saying it booted.
+	if staged == nil {
+		t.Fatal("Launch reported no staged images although it staged and verified two artifacts")
+	}
+	lk, err := lock.Load(lockPath)
+	if err != nil {
+		t.Fatalf("load lock: %v", err)
+	}
+	if *staged != lk.Images() {
+		t.Errorf("Launch reported %+v, want the entries from the lock it staged from %+v", *staged, lk.Images())
 	}
 
 	// Assert manifest has all six stages in order.
@@ -670,7 +688,7 @@ func TestLaunchDigestTamperingBlocksNetwork(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	launchErr := adapter.Launch(ctx, runtime.VMSpec{
+	_, launchErr := adapter.Launch(ctx, runtime.VMSpec{
 		VMID:             "vm-tamper",
 		BootID:           "boot-tamper",
 		VCPUCount:        1,

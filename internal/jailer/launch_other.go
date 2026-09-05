@@ -8,14 +8,15 @@ package jailer
 import (
 	"context"
 
+	"github.com/2389-research/observatory-v2/internal/lock"
 	"github.com/2389-research/observatory-v2/internal/runtime"
 )
 
 // Launch is not supported on non-Linux hosts — Firecracker requires KVM.
-func (a *Adapter) Launch(_ context.Context, _ runtime.VMSpec) error {
+func (a *Adapter) Launch(_ context.Context, _ runtime.VMSpec) (*lock.Images, error) {
 	a.launchMu.Lock()
 	defer a.launchMu.Unlock()
-	return &runtime.UnavailableError{Reason: "Launch requires Linux/KVM; not supported on this platform"}
+	return nil, &runtime.UnavailableError{Reason: "Launch requires Linux/KVM; not supported on this platform"}
 }
 
 // Ensure Adapter satisfies runtime.Runtime on non-Linux builds.

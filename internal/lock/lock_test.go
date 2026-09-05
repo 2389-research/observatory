@@ -412,3 +412,41 @@ func TestLoadRealLockFile(t *testing.T) {
 		t.Error("jailer.install_path is empty")
 	}
 }
+
+// TestImagesCarriesBothEntriesWhole: the pair of entries that identify what a VM
+// boots is one value, so the host block and a VM row cannot describe it
+// differently. Whole entries, not a chosen subset — a digest with no
+// base_image_ref or apt_snapshot beside it says what booted without saying where
+// it came from.
+func TestImagesCarriesBothEntriesWhole(t *testing.T) {
+	lk := &lock.Lock{
+		GuestKernel: lock.GuestKernelEntry{Version: "6.1.186", VmlinuxSHA256: "aaaa", VmlinuxPath: "images/dist/vmlinux", SourceURL: "https://example.invalid/linux.tar.xz"},
+		RootImage:   lock.RootImageEntry{SHA256: "bbbb", Path: "images/dist/rootfs.ext4", BaseImageRef: "ubuntu:24.04", AptSnapshot: "2026-01-01"},
+	}
+	img := lk.Images()
+	if img.GuestKernel != lk.GuestKernel {
+		t.Errorf("guest kernel entry = %+v, want %+v", img.GuestKernel, lk.GuestKernel)
+	}
+	if img.RootImage != lk.RootImage {
+		t.Errorf("root image entry = %+v, want %+v", img.RootImage, lk.RootImage)
+	}
+
+	// The wire names are the lock's own JSON tags, so a round trip through
+	// storage or the API cannot rename a field the lock file owns.
+	blob, err := json.Marshal(img)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var back lock.Images
+	if err := json.Unmarshal(blob, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if back != img {
+		t.Errorf("round trip = %+v, want %+v", back, img)
+	}
+	for _, want := range []string{`"guest_kernel"`, `"root_image"`, `"vmlinux_sha256"`, `"base_image_ref"`, `"apt_snapshot"`} {
+		if !strings.Contains(string(blob), want) {
+			t.Errorf("marshalled images missing %s: %s", want, blob)
+		}
+	}
+}

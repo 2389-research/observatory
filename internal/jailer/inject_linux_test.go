@@ -247,7 +247,7 @@ func assertRecoveryLaunch(t *testing.T, h *injectHarness, vmID string) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	if err := h.adapter.Launch(ctx, defaultSpec(vmID)); err != nil {
+	if _, err := h.adapter.Launch(ctx, defaultSpec(vmID)); err != nil {
 		t.Errorf("recovery Launch for %s: %v", vmID, err)
 		// No wait here, and nothing recorded to wait with. A failed Launch has
 		// already run doRollback, which SIGKILLs the runner and then removes the
@@ -522,7 +522,7 @@ func launchWriteFailHelper() int {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if err := adapter.Launch(ctx, defaultSpec(get("VM_ID"))); err != nil {
+	if _, err := adapter.Launch(ctx, defaultSpec(get("VM_ID"))); err != nil {
 		fmt.Println(err.Error())
 		return 1
 	}
@@ -611,7 +611,7 @@ func TestInject(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
-		launchErr := h.adapter.Launch(ctx, defaultSpec(vmID))
+		_, launchErr := h.adapter.Launch(ctx, defaultSpec(vmID))
 
 		// assertCleanup verifies error contains the failed stage and all artifacts are gone.
 		// Stage is "reserved": the state dir mkdir is the first filesystem step after
@@ -738,7 +738,7 @@ func TestInject(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
-		launchErr := h.adapter.Launch(ctx, defaultSpec(vmID))
+		_, launchErr := h.adapter.Launch(ctx, defaultSpec(vmID))
 		assertCleanup(t, h, vmID, "staged", launchErr)
 
 		// Exact call sequence: staging fails before any backend verb, and before
@@ -791,7 +791,7 @@ func TestInject(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
-		launchErr := h.adapter.Launch(ctx, defaultSpec(vmID))
+		_, launchErr := h.adapter.Launch(ctx, defaultSpec(vmID))
 		assertCleanup(t, h, vmID, "staged", launchErr)
 		// Pin the injection point: the rootfs copy, not artifact verification.
 		if !strings.Contains(launchErr.Error(), "copy rootfs") {
@@ -817,7 +817,7 @@ func TestInject(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
-		launchErr := h.adapter.Launch(ctx, defaultSpec(vmID))
+		_, launchErr := h.adapter.Launch(ctx, defaultSpec(vmID))
 		assertCleanup(t, h, vmID, "network", launchErr)
 
 		// Exact call sequence: allocate_network is attempted (and injected to fail); doRollback
@@ -842,7 +842,7 @@ func TestInject(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
-		launchErr := h.adapter.Launch(ctx, defaultSpec(vmID))
+		_, launchErr := h.adapter.Launch(ctx, defaultSpec(vmID))
 		assertCleanup(t, h, vmID, "vmm_started", launchErr)
 
 		// Exact call sequence: allocate_network succeeds (stageSet[network]=true), then start_vm
@@ -891,7 +891,7 @@ func TestInject(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		launchErr := brokenAdapter.Launch(ctx, defaultSpec(vmID))
+		_, launchErr := brokenAdapter.Launch(ctx, defaultSpec(vmID))
 		assertCleanup(t, h, vmID, "runner_spawned", launchErr)
 
 		// Exact call sequence: allocate_network+start_vm succeed; runner exec.Start() fails.
@@ -958,7 +958,7 @@ func TestInject(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		launchErr := h.adapter.Launch(ctx, defaultSpec(vmID))
+		_, launchErr := h.adapter.Launch(ctx, defaultSpec(vmID))
 
 		// Assert runner process is actually gone BEFORE recovery — doRollback's killRunnerByPID
 		// is synchronous inside rollback (called with launchMu held), so by the time Launch
@@ -1050,7 +1050,7 @@ func TestRollbackRetriesReleaseVM(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	launchErr := brokenAdapter.Launch(ctx, defaultSpec(vmID))
+	_, launchErr := brokenAdapter.Launch(ctx, defaultSpec(vmID))
 	assertCleanup(t, h, vmID, "runner_spawned", launchErr)
 
 	// Two refusals then an accepted call: fewer means the rollback took the first

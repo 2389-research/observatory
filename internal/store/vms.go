@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/2389-research/observatory-v2/internal/lock"
 )
 
 // --- sentinel errors ---
@@ -134,8 +136,12 @@ type VM struct {
 	// A VMM observation that names a different boot describes a boot that is
 	// already over and says nothing about this one.
 	CurrentBootID string
-	CreatedAt     string
-	UpdatedAt     string
+	// BootImages names the kernel and root image the current boot staged, as the
+	// launch reported them. Nil when no launch has reported for this boot: a VM
+	// that never booted, a boot still starting, or a launch that failed.
+	BootImages *lock.Images
+	CreatedAt  string
+	UpdatedAt  string
 	// LastEventID is the event cursor of the last change to this VM row.
 	// It is the source of truth for changed_vms in the situation delta (P-08).
 	LastEventID int64
@@ -234,6 +240,11 @@ type TransitionInput struct {
 	AcquireCompute   bool    // true on a restart: takes RAM+CPU back, Admit permitting
 	ReleaseAll       bool    // true on deleted: frees everything
 	BootID           *string // non-nil when a new boot identity is established
+	// Images is what the launch staged for this boot, set on the transition that
+	// follows a successful Launch. A new BootID clears it: the boot is
+	// established before anything is staged, and the row must say nothing rather
+	// than answer with the previous boot's images.
+	Images *lock.Images
 
 	// Admit gates AcquireCompute, evaluated inside the tx against totals that
 	// exclude this VM's own released compute — the room it has to fit back
@@ -521,18 +532,18 @@ func (s *Store) TransitionVM(ctx context.Context, in TransitionInput) (*VM, erro
 
 	// Load current state with an exclusive lock (single-writer conn serializes this).
 	var current VM
-	var labelsJSON string
+	var labelsJSON, imagesJSON string
 	err = tx.QueryRowContext(ctx,
 		`SELECT row_id, vm_id, name, owner, template_id, template_digest, desired_state, observed_state, revision,
 		        vcpu, memory_mib, root_disk_mib, workspace_disk_mib, network_profile, network_policy_id, labels,
-		        failure_stage, failure_reason, current_boot_id, created_at, updated_at, last_event_id
+		        failure_stage, failure_reason, current_boot_id, boot_images, created_at, updated_at, last_event_id
 		 FROM vms WHERE vm_id = ?`, in.VMID,
 	).Scan(&current.RowID, &current.VMID, &current.Name, &current.Owner,
 		&current.TemplateID, &current.TemplateDigest,
 		&current.DesiredState, &current.ObservedState, &current.Revision,
 		&current.VCPUCount, &current.MemoryMiB, &current.RootDiskMiB, &current.WorkspaceDiskMiB,
 		&current.NetworkProfile, &current.NetworkPolicyID, &labelsJSON,
-		&current.FailureStage, &current.FailureReason, &current.CurrentBootID,
+		&current.FailureStage, &current.FailureReason, &current.CurrentBootID, &imagesJSON,
 		&current.CreatedAt, &current.UpdatedAt, &current.LastEventID)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
@@ -542,6 +553,9 @@ func (s *Store) TransitionVM(ctx context.Context, in TransitionInput) (*VM, erro
 	}
 	if err := json.Unmarshal([]byte(labelsJSON), &current.Labels); err != nil {
 		return nil, fmt.Errorf("decode labels: %w", err)
+	}
+	if current.BootImages, err = decodeBootImages(imagesJSON); err != nil {
+		return nil, err
 	}
 
 	if in.ExpectedRevision != nil && *in.ExpectedRevision != current.Revision {
@@ -582,18 +596,29 @@ func (s *Store) TransitionVM(ctx context.Context, in TransitionInput) (*VM, erro
 	}
 
 	// A transition that establishes a boot moves the row onto it; every other
-	// transition is the same boot continuing, and leaves it where it is.
+	// transition is the same boot continuing, and leaves it where it is. The
+	// previous boot's images go with it: the new boot has staged nothing yet, and
+	// the old answer describes a boot that is over.
 	boot := current.CurrentBootID
+	images := imagesJSON
 	if in.BootID != nil {
 		boot = *in.BootID
+		images = ""
+	}
+	if in.Images != nil {
+		encoded, err := json.Marshal(*in.Images)
+		if err != nil {
+			return nil, fmt.Errorf("encode boot images: %w", err)
+		}
+		images = string(encoded)
 	}
 
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE vms SET observed_state = ?, desired_state = ?, revision = ?,
-		               failure_stage = ?, failure_reason = ?, current_boot_id = ?,
+		               failure_stage = ?, failure_reason = ?, current_boot_id = ?, boot_images = ?,
 		               updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
 		 WHERE vm_id = ?`,
-		in.To, desired, newRevision, in.FailureStage, in.FailureReason, boot, in.VMID); err != nil {
+		in.To, desired, newRevision, in.FailureStage, in.FailureReason, boot, images, in.VMID); err != nil {
 		return nil, fmt.Errorf("update vm state: %w", err)
 	}
 
@@ -908,18 +933,18 @@ const vmColumns = `SELECT row_id, vm_id, name, owner, template_id, template_dige
 	desired_state, observed_state, revision,
 	vcpu, memory_mib, root_disk_mib, workspace_disk_mib,
 	network_profile, network_policy_id, labels,
-	failure_stage, failure_reason, current_boot_id, created_at, updated_at, last_event_id`
+	failure_stage, failure_reason, current_boot_id, boot_images, created_at, updated_at, last_event_id`
 
 func scanVM(sc vmScanner) (*VM, error) {
 	var vm VM
-	var labelsJSON string
+	var labelsJSON, imagesJSON string
 	if err := sc.Scan(
 		&vm.RowID, &vm.VMID, &vm.Name, &vm.Owner,
 		&vm.TemplateID, &vm.TemplateDigest,
 		&vm.DesiredState, &vm.ObservedState, &vm.Revision,
 		&vm.VCPUCount, &vm.MemoryMiB, &vm.RootDiskMiB, &vm.WorkspaceDiskMiB,
 		&vm.NetworkProfile, &vm.NetworkPolicyID, &labelsJSON,
-		&vm.FailureStage, &vm.FailureReason, &vm.CurrentBootID,
+		&vm.FailureStage, &vm.FailureReason, &vm.CurrentBootID, &imagesJSON,
 		&vm.CreatedAt, &vm.UpdatedAt, &vm.LastEventID,
 	); err != nil {
 		return nil, err
@@ -927,7 +952,24 @@ func scanVM(sc vmScanner) (*VM, error) {
 	if err := json.Unmarshal([]byte(labelsJSON), &vm.Labels); err != nil {
 		return nil, fmt.Errorf("decode vm labels: %w", err)
 	}
+	var err error
+	if vm.BootImages, err = decodeBootImages(imagesJSON); err != nil {
+		return nil, err
+	}
 	return &vm, nil
+}
+
+// decodeBootImages reads the boot_images column. Empty means no launch has
+// reported for this boot, which is a different fact from an empty object.
+func decodeBootImages(raw string) (*lock.Images, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	var img lock.Images
+	if err := json.Unmarshal([]byte(raw), &img); err != nil {
+		return nil, fmt.Errorf("decode boot images: %w", err)
+	}
+	return &img, nil
 }
 
 func scanVMInTx(ctx context.Context, tx *sql.Tx, vmID string) (*VM, error) {

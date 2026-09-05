@@ -197,6 +197,12 @@ var migrations = []string{
 	// and the reader has to tell an exit of the boot running now from an exit of
 	// the boot before it. Empty until the VM's first boot.
 	`ALTER TABLE vms ADD COLUMN current_boot_id TEXT NOT NULL DEFAULT '';`,
+	// v8: the images the current boot staged, as one JSON object holding the
+	// lock's guest_kernel and root_image entries. runtime.lock.json can change
+	// under a running VM, so what this host would stage now is not what this VM
+	// did stage; only the launch knows, and this is where it says so. Empty
+	// until a launch reports, and emptied again by every new boot.
+	`ALTER TABLE vms ADD COLUMN boot_images TEXT NOT NULL DEFAULT '';`,
 }
 
 // Store owns one SQLite database. All writes go through the writer pool, which

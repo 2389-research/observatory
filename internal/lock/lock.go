@@ -73,6 +73,25 @@ type GuestDEntry struct {
 	ProtocolVersion int `json:"protocol_version"`
 }
 
+// Images names the two artifacts a VM boots: the guest kernel and the root
+// filesystem image, whole entries straight from the lock. Two readers share this
+// one type on purpose — GET /host/status answers what a launch would stage now,
+// and a VM row answers what its current boot did stage — so neither can describe
+// the same fact in different words. Whole entries rather than a chosen subset:
+// base_image_ref and apt_snapshot are the provenance half of SPEC §7, and a
+// digest with neither beside it says what booted without saying where it came
+// from. The JSON tags are the lock file's own, so storage and the wire cannot
+// rename a field runtime.lock.json owns.
+type Images struct {
+	GuestKernel GuestKernelEntry `json:"guest_kernel"`
+	RootImage   RootImageEntry   `json:"root_image"`
+}
+
+// Images returns the image half of this lock.
+func (l *Lock) Images() Images {
+	return Images{GuestKernel: l.GuestKernel, RootImage: l.RootImage}
+}
+
 // Mismatch reports a single hash verification failure.
 type Mismatch struct {
 	// Subject names the artifact or binary that failed verification.

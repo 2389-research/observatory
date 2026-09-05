@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/2389-research/observatory-v2/internal/lock"
 	"github.com/2389-research/observatory-v2/internal/store"
 )
 
@@ -775,6 +776,94 @@ func TestTransitionVMRecordsCurrentBoot(t *testing.T) {
 	}
 	if got.CurrentBootID != second {
 		t.Errorf("GetVM current_boot_id = %q, want %q", got.CurrentBootID, second)
+	}
+}
+
+// TestTransitionVMRecordsTheImagesTheBootStaged: the row answers what this VM
+// booted, not only what the host would stage now. The two differ the moment
+// runtime.lock.json changes under a running VM, which is the whole reason the
+// field exists.
+func TestTransitionVMRecordsTheImagesTheBootStaged(t *testing.T) {
+	st := openStore(t)
+	vm, op := mustCreateVM(t, st, testUUID(1), "alpha", nil)
+	if vm.BootImages != nil {
+		t.Errorf("a VM that never booted carries images: %+v", vm.BootImages)
+	}
+
+	boot := testUUID(90)
+	if _, err := st.TransitionVM(t.Context(), store.TransitionInput{
+		VMID: vm.VMID, To: "starting", Reason: "launch", OperationID: op.OperationID, BootID: &boot,
+	}); err != nil {
+		t.Fatalf("TransitionVM starting: %v", err)
+	}
+	// The boot is established before the launch stages anything, so between the
+	// two writes the row must say nothing rather than guess.
+	mid, err := st.GetVM(t.Context(), vm.VMID)
+	if err != nil {
+		t.Fatalf("GetVM: %v", err)
+	}
+	if mid.BootImages != nil {
+		t.Errorf("images before the launch reported any: %+v", mid.BootImages)
+	}
+
+	first := lock.Images{
+		GuestKernel: lock.GuestKernelEntry{Version: "6.1.186", VmlinuxSHA256: "aaaa", VmlinuxPath: "images/dist/vmlinux"},
+		RootImage:   lock.RootImageEntry{SHA256: "bbbb", Path: "images/dist/rootfs.ext4", BaseImageRef: "ubuntu:24.04", AptSnapshot: "2026-01-01"},
+	}
+	running, err := st.TransitionVM(t.Context(), store.TransitionInput{
+		VMID: vm.VMID, To: "running", Reason: "launch_complete", OperationID: op.OperationID, Images: &first,
+	})
+	if err != nil {
+		t.Fatalf("TransitionVM running: %v", err)
+	}
+	if running.BootImages == nil || *running.BootImages != first {
+		t.Fatalf("images after launch = %+v, want %+v", running.BootImages, first)
+	}
+	got, err := st.GetVM(t.Context(), vm.VMID)
+	if err != nil {
+		t.Fatalf("GetVM: %v", err)
+	}
+	if got.BootImages == nil || *got.BootImages != first {
+		t.Errorf("GetVM images = %+v, want %+v", got.BootImages, first)
+	}
+}
+
+// TestTransitionVMNewBootClearsTheOldImages: a boot inherits nothing. A VM
+// stopped and started across a repin booted a different rootfs, and the row must
+// not answer with the previous boot's images while the new one is still staging.
+func TestTransitionVMNewBootClearsTheOldImages(t *testing.T) {
+	st := openStore(t)
+	vm, op := mustCreateVM(t, st, testUUID(1), "alpha", nil)
+	first := testUUID(90)
+	images := lock.Images{RootImage: lock.RootImageEntry{SHA256: "old", Path: "images/dist/rootfs.ext4"}}
+	for _, in := range []store.TransitionInput{
+		{To: "starting", Reason: "launch", BootID: &first},
+		{To: "running", Reason: "launch_complete", Images: &images},
+		{To: "stopping", Reason: "stop"},
+		{To: "stopped", Reason: "stop_complete", ReleaseCompute: true},
+	} {
+		in.VMID, in.OperationID = vm.VMID, op.OperationID
+		if _, err := st.TransitionVM(t.Context(), in); err != nil {
+			t.Fatalf("TransitionVM %s: %v", in.To, err)
+		}
+	}
+	stopped, err := st.GetVM(t.Context(), vm.VMID)
+	if err != nil {
+		t.Fatalf("GetVM: %v", err)
+	}
+	if stopped.BootImages == nil || stopped.BootImages.RootImage.SHA256 != "old" {
+		t.Fatalf("a stop dropped the images of the boot that ran: %+v", stopped.BootImages)
+	}
+
+	second := testUUID(91)
+	restarted, err := st.TransitionVM(t.Context(), store.TransitionInput{
+		VMID: vm.VMID, To: "starting", Reason: "start", OperationID: op.OperationID, BootID: &second,
+	})
+	if err != nil {
+		t.Fatalf("TransitionVM restart: %v", err)
+	}
+	if restarted.BootImages != nil {
+		t.Errorf("the new boot inherited the old boot's images: %+v", restarted.BootImages)
 	}
 }
 

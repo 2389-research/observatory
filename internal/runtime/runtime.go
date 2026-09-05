@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"runtime"
 	"time"
+
+	"github.com/2389-research/observatory-v2/internal/lock"
 )
 
 // VMSpec is everything a runtime needs to launch a VM. Allocated by the caller
@@ -35,7 +37,12 @@ type Runtime interface {
 	// surface to the operator (AT-001: rejected with the failed check).
 	Availability(ctx context.Context) error
 
-	Launch(ctx context.Context, spec VMSpec) error
+	// Launch starts the VM and reports the images it staged for this boot: the
+	// kernel and root filesystem it copied in and verified. Nil when this runtime
+	// stages no images of its own — an absence, not an empty answer. Only the
+	// launch can say, because the lock it reads at stage time may already differ
+	// from the one this daemon loaded at startup.
+	Launch(ctx context.Context, spec VMSpec) (*lock.Images, error)
 	Pause(ctx context.Context, vmID string) error
 	Resume(ctx context.Context, vmID string) error
 
@@ -82,8 +89,8 @@ func (u *unavailableRuntime) Availability(_ context.Context) error {
 	}
 	return &UnavailableError{Reason: reason}
 }
-func (u *unavailableRuntime) Launch(_ context.Context, _ VMSpec) error {
-	return &UnavailableError{Reason: u.reason}
+func (u *unavailableRuntime) Launch(_ context.Context, _ VMSpec) (*lock.Images, error) {
+	return nil, &UnavailableError{Reason: u.reason}
 }
 func (u *unavailableRuntime) Pause(_ context.Context, _ string) error {
 	return &UnavailableError{Reason: u.reason}

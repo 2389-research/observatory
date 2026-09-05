@@ -327,7 +327,8 @@ func (m *Manager) runBatchMemberLaunch(lm batchLaunchMember, coord *batchCoord) 
 		return false
 	}
 
-	if err := m.rt.Launch(ctx, spec); err != nil {
+	staged, err := m.rt.Launch(ctx, spec)
+	if err != nil {
 		m.failLaunch(ctx, vm.VMID, opID, "launch", err.Error())
 		_ = m.rt.ForceStop(ctx, vm.VMID)
 		coord.stopSiblings(vm.VMID)
@@ -341,6 +342,7 @@ func (m *Manager) runBatchMemberLaunch(lm batchLaunchMember, coord *batchCoord) 
 		To:          "running",
 		Reason:      "launch_complete",
 		OperationID: opID,
+		Images:      staged,
 	}); err != nil {
 		if errors.Is(err, new(store.InvalidTransitionError)) {
 			return false

@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/2389-research/observatory-v2/internal/lock"
 	"github.com/2389-research/observatory-v2/internal/runtime"
 )
 
@@ -47,6 +48,9 @@ type Fake struct {
 	// VM ID is server-generated and unknowable at injection time.
 	failCalls map[string]callFailure
 	counts    map[string]int
+
+	// staged is what Launch reports having staged for a boot; nil reports none.
+	staged *lock.Images
 }
 
 type callFailure struct {
@@ -176,12 +180,25 @@ func (f *Fake) Availability(ctx context.Context) error {
 	return err
 }
 
-func (f *Fake) Launch(ctx context.Context, spec runtime.VMSpec) error {
+func (f *Fake) Launch(ctx context.Context, spec runtime.VMSpec) (*lock.Images, error) {
 	ch, ignoreCtx, err := f.record(ctx, "Launch", spec.VMID)
 	if waitErr := wait(ctx, ch, ignoreCtx); waitErr != nil {
-		return waitErr
+		return nil, waitErr
 	}
-	return err
+	if err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.staged, nil
+}
+
+// SetStagedImages sets what Launch reports having staged. Nil, the default, is a
+// runtime that stages no images of its own.
+func (f *Fake) SetStagedImages(img *lock.Images) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.staged = img
 }
 
 func (f *Fake) Pause(ctx context.Context, vmID string) error {
