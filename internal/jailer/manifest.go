@@ -52,8 +52,8 @@ type Manifest struct {
 	// RunnerStart is /proc/<RunnerPID>/stat field 22 read just after the spawn.
 	// It is to RunnerPID what VMMStart is to VMMPID: the pid alone cannot tell a
 	// live runner from a recycled pid (SPEC §9.1). Empty when the spawn's read
-	// failed or the manifest predates the field; runnerAlive falls back to a
-	// pid-only check for those.
+	// failed or the manifest predates the field; runnerAlive answers those from
+	// the runner's argv, and from a bare /proc entry when even that is unreadable.
 	RunnerStart string   `json:"runner_starttime,omitempty"`
 	Stages      []string `json:"stages"`
 }

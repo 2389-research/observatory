@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -127,27 +128,72 @@ func pollRunnerPhase(ctx context.Context, stateFile string, wantPhases ...string
 }
 
 // runnerAlive reports whether the process at pid is still the runner the manifest
-// recorded.
+// recorded for vmID.
 //
-// With a start time recorded it is a real identity check: privd.PIDAlive compares
-// /proc/<pid>/stat field 22 against it, so a pid the kernel has handed to some other
-// process reads dead (SPEC §9.1 — a pid alone is not an identity).
+// Three facts answer it, in order of how much they prove.
 //
-// With starttime empty it degrades to a bare /proc/<pid> existence check, which does
-// report a recycled pid alive. That fallback is deliberate: a manifest written before
-// runner_starttime existed, or by a spawn whose start-time read lost the race with a
-// runner that died immediately, has nothing to compare. Calling those runners dead
-// would send doStop straight past the graceful path and let Reconcile spawn a second
-// runner onto a live VM — worse than the false positive it would avoid.
-func runnerAlive(pid int, starttime string) bool {
+// The runner's own argv is the strongest: every spawn site passes "--vm-id <id>",
+// and the runner is a host process, so /proc/<pid>/cmdline is the argv it started
+// with. An argv naming some other VM — or naming none — is proof this pid is not
+// ours, whatever the other two say. This is the identity check the VMM cannot have:
+// firecracker pivot_roots into its jail, so nothing about a jailed process may be
+// read from paths under its /proc entry.
+//
+// The recorded start time is next: privd.PIDAlive compares /proc/<pid>/stat field 22
+// against it, so a pid the kernel has handed on reads dead (SPEC §9.1 — a pid alone
+// is not an identity).
+//
+// A bare /proc/<pid> existence check is last, and it does report a recycled pid
+// alive. It is reached only when neither of the others can speak: a manifest written
+// before runner_starttime existed, or by a spawn whose start-time read lost the race,
+// whose pid also has no readable argv. Calling those runners dead would send doStop
+// straight past the graceful path and let Reconcile spawn a second runner onto a live
+// VM — worse than the false positive it keeps.
+func runnerAlive(pid int, starttime, vmID string) bool {
 	if pid <= 0 {
 		return false
 	}
-	if starttime != "" {
+	switch named, known := runnerNamesVM(pid, vmID); {
+	case known && !named:
+		return false
+	case starttime != "":
 		return privd.PIDAlive(pid, starttime)
+	case known:
+		// named is true here: the argv supplies the identity this manifest lacks.
+		return true
+	default:
+		_, err := os.Stat(fmt.Sprintf("/proc/%d", pid))
+		return err == nil
 	}
-	_, err := os.Stat(fmt.Sprintf("/proc/%d", pid))
-	return err == nil
+}
+
+// runnerNamesVM asks the process at pid which VM it is running, and says when it
+// has no answer rather than guessing one.
+//
+// known is false when the argv cannot be read at all — a reaped pid has no /proc
+// entry, and a zombie's cmdline is empty. That is no evidence either way, and must
+// not turn a live runner dead. When known is true, named is proof: this pid either
+// is running vmID or is not.
+func runnerNamesVM(pid int, vmID string) (named, known bool) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil || len(data) == 0 {
+		return false, false
+	}
+	// cmdline is NUL-separated with a trailing NUL.
+	argv := strings.Split(strings.TrimSuffix(string(data), "\x00"), "\x00")
+	for i, arg := range argv {
+		switch {
+		case arg == "--vm-id" && i+1 < len(argv):
+			return argv[i+1] == vmID, true
+		case strings.HasPrefix(arg, "--vm-id="):
+			// Go's flag package takes the joined form as readily as the separated
+			// one, so a runner restarted by hand can carry it.
+			return strings.TrimPrefix(arg, "--vm-id=") == vmID, true
+		}
+	}
+	// Every spawn site passes --vm-id, so an argv without it belongs to whatever
+	// the kernel handed this pid to next.
+	return false, true
 }
 
 // readRunnerStart reads a freshly spawned runner's start time from /proc/<pid>/stat
@@ -212,7 +258,7 @@ func (a *Adapter) doStop(ctx context.Context, vmID string, grace time.Duration, 
 
 	graceful := false
 
-	if !forceImmediate && m.RunnerPID > 0 && runnerAlive(m.RunnerPID, m.RunnerStart) {
+	if !forceImmediate && m.RunnerPID > 0 && runnerAlive(m.RunnerPID, m.RunnerStart, vmID) {
 		// Runner is alive — attempt graceful shutdown via ctl.
 		graceS := int(grace.Seconds())
 		if graceS <= 0 {
@@ -535,12 +581,17 @@ func ignoreNotFound(err error) error {
 
 // Reconcile scans <StateDir>/vms/*/manifest.json at startup and classifies each VM.
 // Outcomes:
-//   - "adopted": runner alive + attached + VMM identity matches → healthy, no action.
+//   - "adopted": runner alive, attached, naming this VM in its argv, and agreeing
+//     with the manifest about which VMM it is attached to → healthy, no action.
 //   - "vmm_gone": VMM process gone → report for manager to mark failed.
 //   - "ambiguous": unreadable manifest or identity mismatch → touch nothing (§5.5).
 //
 // When the runner is dead but the VMM is alive and identity matches, a fresh runner
 // is respawned with a new instance-id (so the store importer deduplicates correctly).
+//
+// These findings are what tells a controller restart from a fleet outage: the
+// manager fails every running VM it cannot account for, so an "adopted" that never
+// reaches it costs a live VM its row (ManagerConfig.AdoptedVMs).
 func (a *Adapter) Reconcile(ctx context.Context) ([]Finding, error) {
 	vmsDir := filepath.Join(a.cfg.StateDir, "vms")
 	entries, err := os.ReadDir(vmsDir)
@@ -593,7 +644,7 @@ func (a *Adapter) reconcileOne(ctx context.Context, vmID string) Finding {
 	s, stateErr := runner.ReadState(stateFile)
 
 	runnerAttached := stateErr == nil && s.Phase == runner.PhaseAttached &&
-		runnerAlive(m.RunnerPID, m.RunnerStart)
+		runnerAlive(m.RunnerPID, m.RunnerStart, vmID)
 
 	if runnerAttached {
 		// Verify runner's recorded VMM identity matches the manifest.

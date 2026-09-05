@@ -50,10 +50,12 @@ func TestReadRunnerStartOnADeadPID(t *testing.T) {
 // called that the runner. doStop would then try a graceful shutdown through a ctl
 // socket nobody is serving, and Reconcile would adopt a VM whose runner is gone.
 func TestRunnerAliveRejectsARecycledPID(t *testing.T) {
-	pid := os.Getpid()
+	// A process whose argv names the VM, so the argv check has nothing to veto and
+	// the start-time comparison is what decides.
+	pid := spawnRunnerLookalike(t, "--vm-id", "vm-ours")
 	real := readRunnerStart(pid)
 	if real == "" {
-		t.Fatalf("cannot read this process's start time; the case under test needs it")
+		t.Fatalf("cannot read pid %d's start time; the case under test needs it", pid)
 	}
 
 	// A start time this process cannot have: its own, plus one tick.
@@ -63,30 +65,31 @@ func TestRunnerAliveRejectsARecycledPID(t *testing.T) {
 	}
 	stale := strconv.FormatUint(ticks+1, 10)
 
-	if runnerAlive(pid, stale) {
+	if runnerAlive(pid, stale, "vm-ours") {
 		t.Errorf("runnerAlive(%d, %q) = true; pid %d is alive but started at %q, so the "+
 			"manifest's runner is gone and its pid was reused", pid, stale, pid, real)
 	}
-	if !runnerAlive(pid, real) {
-		t.Errorf("runnerAlive(%d, %q) = false; that is this process's own start time", pid, real)
+	if !runnerAlive(pid, real, "vm-ours") {
+		t.Errorf("runnerAlive(%d, %q) = false; that is that process's own start time", pid, real)
 	}
 }
 
 // TestRunnerAliveFallsBackWithoutAStartTime: manifests written before the field
 // existed, and spawns whose start-time read lost the race, carry an empty value.
 // Reading those runners dead would push doStop past the graceful path and let
-// Reconcile spawn a second runner onto a live VM, so the empty case keeps the old
-// pid-only answer.
+// Reconcile spawn a second runner onto a live VM, so the empty case must still
+// answer from whatever evidence remains — the argv, then a bare /proc entry.
 func TestRunnerAliveFallsBackWithoutAStartTime(t *testing.T) {
-	if !runnerAlive(os.Getpid(), "") {
-		t.Errorf("runnerAlive(%d, \"\") = false; an empty start time must fall back to the "+
-			"pid-only check, not report a live runner dead", os.Getpid())
+	live := spawnRunnerLookalike(t, "--vm-id", "vm-ours")
+	if !runnerAlive(live, "", "vm-ours") {
+		t.Errorf("runnerAlive(%d, \"\") = false; an empty start time must not report a "+
+			"live runner dead", live)
 	}
-	if runnerAlive(reapedPID(t), "") {
+	if runnerAlive(reapedPID(t), "", "vm-ours") {
 		t.Error("runnerAlive on a reaped pid with no start time = true; /proc has no such entry")
 	}
 	for _, pid := range []int{0, -1} {
-		if runnerAlive(pid, "") || runnerAlive(pid, "12345") {
+		if runnerAlive(pid, "", "vm-ours") || runnerAlive(pid, "12345", "vm-ours") {
 			t.Errorf("runnerAlive(%d, ...) = true; there is no such runner", pid)
 		}
 	}
@@ -99,7 +102,7 @@ func TestRunnerAliveOnAReapedPID(t *testing.T) {
 	if start == "" {
 		t.Fatal("could not read the child's start time while it was alive")
 	}
-	if runnerAlive(pid, start) {
+	if runnerAlive(pid, start, "vm-ours") {
 		t.Errorf("runnerAlive(%d, %q) = true for a reaped process", pid, start)
 	}
 }

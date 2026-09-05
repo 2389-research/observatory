@@ -180,13 +180,14 @@ func verifyRuntimeLock(lockPath string, logger *slog.Logger) error {
 // LockPath must be the same path the jailer adapter stages from
 // (runtime_linux.go): /host/status publishes what a launch would stage, and it
 // can only be right about that by reading the file the launch reads.
-func managerConfig(cfg *config.Config, tpls map[string]runtime.Template, host runtime.HostResources) runtime.ManagerConfig {
+func managerConfig(cfg *config.Config, tpls map[string]runtime.Template, host runtime.HostResources, adopted map[string]bool) runtime.ManagerConfig {
 	return runtime.ManagerConfig{
 		Admission:  cfg.Admission,
 		VMDefaults: cfg.VMDefaults,
 		Templates:  tpls,
 		Host:       host,
 		LockPath:   cfg.Runtime.LockFile,
+		AdoptedVMs: adopted,
 	}
 }
 
@@ -325,7 +326,18 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready f
 		})
 	}
 
-	mgr, err := runtime.NewManager(st, rt, managerConfig(cfg, tpls, host))
+	// Reconcile fails every running VM it cannot account for, and it runs inside
+	// NewManager — so the adapter's verdicts have to be in hand before the manager
+	// is built, not applied to the rows afterwards.
+	adopted := map[string]bool{}
+	for _, f := range adapterFindings {
+		if f.Outcome == "adopted" {
+			adopted[f.VMID] = true
+			logger.Info("adopting vm across restart", "vm_id", f.VMID, "detail", f.Detail)
+		}
+	}
+
+	mgr, err := runtime.NewManager(st, rt, managerConfig(cfg, tpls, host, adopted))
 	if err != nil {
 		return fmt.Errorf("create lifecycle manager: %w", err)
 	}
@@ -343,7 +355,7 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready f
 				logger.Warn("NotifyVMMExit for adapter finding failed", "vm_id", f.VMID, "outcome", f.Outcome, "err", notifyErr)
 			}
 		}
-		// "adopted": VMM is alive and runner is running — no action.
+		// "adopted": handled above, before the manager was built.
 	}
 
 	// Start the spool importer goroutine when a spool root is configured.

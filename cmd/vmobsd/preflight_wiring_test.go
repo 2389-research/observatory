@@ -98,7 +98,7 @@ func TestManagerConfigStagesFromTheJailersLockFile(t *testing.T) {
 		Runtime: config.Runtime{LockFile: "/srv/vmobs/runtime.lock.json"},
 	}
 
-	got := managerConfig(cfg, nil, runtime.HostResources{})
+	got := managerConfig(cfg, nil, runtime.HostResources{}, nil)
 
 	if got.LockPath != cfg.Runtime.LockFile {
 		t.Errorf("ManagerConfig.LockPath = %q, want the jailer's %q", got.LockPath, cfg.Runtime.LockFile)
@@ -110,7 +110,7 @@ func TestManagerConfigStagesFromTheJailersLockFile(t *testing.T) {
 // error about a file the operator never asked for.
 func TestManagerConfigWithoutALockHasNoPath(t *testing.T) {
 	cfg := &config.Config{Storage: config.Storage{Database: "/x/events.sqlite"}}
-	if got := managerConfig(cfg, nil, runtime.HostResources{}); got.LockPath != "" {
+	if got := managerConfig(cfg, nil, runtime.HostResources{}, nil); got.LockPath != "" {
 		t.Errorf("ManagerConfig.LockPath = %q with no lock configured, want empty", got.LockPath)
 	}
 }

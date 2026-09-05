@@ -133,6 +133,20 @@ type ManagerConfig struct {
 	// launch, so a copy parsed once at startup describes a pin that may no longer
 	// be the one the next launch stages from.
 	LockPath string
+
+	// AdoptedVMs names the VMs a runtime-level scan found still running when this
+	// daemon started: their VMM alive, and a runner attached to it that names the
+	// VM in its own argv. Reconcile leaves those rows exactly as it found them.
+	//
+	// The scan is the runtime's to make and cannot be made from here — firecracker
+	// is started daemonized and reparented to init, so the only evidence is on the
+	// host — and it has to happen before the manager exists, because Reconcile runs
+	// inside NewManager. So the findings arrive as a decision already taken.
+	//
+	// Empty for a runtime that cannot observe a previous run's VMs, and Reconcile
+	// then keeps its old answer: a running VM nobody could account for is failed.
+	// Absent evidence is not evidence of health.
+	AdoptedVMs map[string]bool
 }
 
 // StagedImages returns the kernel and root image a launch would stage now, read
@@ -1269,8 +1283,8 @@ func (m *Manager) Delete(ctx context.Context, vmID string, force bool, expectedR
 }
 
 // Reconcile cleans up state left over from a previous controller run (§5.5).
-// Portable core: no real runtime exists here, so nothing can be adopted.
-// Operations in flight → failed; VMs in transitional states → failed/stopped/deleted.
+// Operations in flight → failed; VMs in transitional states → failed/stopped/deleted,
+// except the running and paused VMs cfg.AdoptedVMs names, which are left alone.
 // Runs: pending/running/concluding runs whose VM is no longer live are concluded
 // inconclusive with an interrupted reason (AT-093). Terminal runs missing reports
 // have report generation re-enqueued (R7).
@@ -1317,7 +1331,20 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 				ReleaseCompute: true,
 			})
 		case "running", "paused":
-			// VMM disappeared — §5.5: mark with explicit reason; adoption is L0.
+			// Adopted: the runtime's startup scan found this VM's VMM alive with a
+			// runner attached to it. Firecracker is started daemonized and
+			// reparented to init (internal/privd/vmops.go), so surviving a
+			// controller restart is the normal case, not the exception — and
+			// failing the row records a fleet outage that did not happen, on a VM
+			// an operator's next move would be to delete.
+			//
+			// Adoption is the absence of a write. Transitioning to "running" from
+			// "running" is not a valid edge (§5.2) and would bump a revision every
+			// operator pin depends on; the row is already correct.
+			if m.cfg.AdoptedVMs[vm.VMID] {
+				continue
+			}
+			// VMM disappeared — §5.5: mark with explicit reason.
 			reason := "vmm_disappeared_on_restart"
 			_, _ = m.st.TransitionVM(ctx, store.TransitionInput{
 				VMID:           vm.VMID,

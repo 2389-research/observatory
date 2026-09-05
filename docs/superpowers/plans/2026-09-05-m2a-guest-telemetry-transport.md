@@ -297,9 +297,74 @@ ships today. Belongs to the P4 runs-and-reports plan.
 
 ### Task 6: Reconcile adopts a healthy runner (kata `ffxv`, adoption half)
 
-- [ ] On daemon restart, a VM whose runner is alive and whose channel is healthy is adopted rather than treated as lost. See the `failed-vm-unreapable` gotcha for what currently happens instead.
-- [ ] Identify the runner by the VM id in its argv, never by `/proc/<pid>/root` — see the `firecracker-jailer-pivot-root` gotcha.
-- [ ] Tests: a live healthy runner is adopted across a daemon restart; a dead runner is not; a runner whose argv names a different VM is not.
+- [x] On daemon restart, a VM whose runner is alive and whose channel is healthy is adopted rather than treated as lost. See the `failed-vm-unreapable` gotcha for what currently happens instead.
+- [x] Identify the runner by the VM id in its argv, never by `/proc/<pid>/root` — see the `firecracker-jailer-pivot-root` gotcha.
+- [x] Tests: a live healthy runner is adopted across a daemon restart; a dead runner is not; a runner whose argv names a different VM is not.
+
+**Ruling: adoption arrives as `ManagerConfig.AdoptedVMs`, not as a new `Runtime`
+method.** `Manager.Reconcile` runs inside `NewManager`, and the adapter's startup
+scan already runs before it in `cmd/vmobsd/main.go` — so the verdicts have to be in
+hand before the manager exists, not applied to the rows afterwards. Asking the
+runtime a second time from inside `Reconcile` would also re-enter `reconcileOne`,
+which respawns a missing runner as a side effect: either two runners on one VM, or
+a race against one that has not yet written `attached`. The findings arrive as a
+decision already taken. Cost if wrong: a periodic reconcile, if we ever want one,
+needs a real interface method rather than a startup snapshot.
+
+**Ruling: adoption is the absence of a write.** No transition, no revision bump, no
+`ReleaseCompute`. `running → running` is not a valid §5.2 edge; a revision bump
+would invalidate every operator's `If-Match` pin across a restart it should not
+have noticed; and releasing the reservation would let admission hand the same
+memory to a second VM while the first is still using it. The row is already
+correct — the bug was writing over it. Cost if wrong: a row that drifted while the
+daemon was down keeps its stale field until something else corrects it.
+
+**Ruling: adoption reaches `running` and `paused` only.** `provisioning` and
+`starting` never reached a running VMM; `stopping` carries its own comment saying
+its behaviour waits on real adoption and must not change here; `deleting` has a
+resume path of its own. A finding says a runner is alive, which is not an argument
+that an in-flight delete should stop. Cost if wrong: a VM caught mid-stop across a
+restart still takes the old path, one restart later than it might.
+
+**Ruling: "channel is healthy" is not an adoption precondition.** §138 keeps
+lifecycle and telemetry as two dimensions on purpose, and Task 5 made
+`telemetry_health` derivable for exactly that reason. A running VM whose guestd
+has died is `degraded` — that is the state working correctly, not evidence the VM
+is lost. Gating adoption on it would fail a live VM for being quiet and turn a
+telemetry outage into a fleet outage. Adoption asks the lifecycle question only:
+VMM alive, runner attached, runner naming this VM. Cost if wrong: a VM whose
+runner is attached but whose guest channel is wedged is adopted and shows
+`degraded` until an operator acts — which is what the field is for.
+
+**Ruling: the argv check is three-valued, and lives inside `runnerAlive`.** A
+cmdline naming another VM — or naming none — vetoes a pid+starttime match. A
+cmdline naming this VM supplies the identity an empty `RunnerStart` lacks. An
+unreadable cmdline is no evidence at all and must not turn a live runner dead: a
+zombie has a `/proc` entry and an empty cmdline, and reading it as "not ours"
+would push `doStop` straight past the graceful path. Both `--vm-id x` and
+`--vm-id=x` count, because Go's flag package takes either and refusing the joined
+form would let `Reconcile` spawn a second runner onto a live VM. One function, one
+meaning: `runnerAlive` answers "is this VM's runner running", and it gives the same
+answer to `doStop` as to adoption. Cost if wrong: a runner spawned by some future
+path that does not pass `--vm-id` reads as dead and gets respawned.
+
+**Ruling: absent findings mean failed, not adopted.** A runtime that cannot observe
+a previous run's VMs supplies no findings, and `Reconcile` keeps its old answer.
+Absence of evidence is not evidence of health. Cost if wrong: a runtime that grows
+real VMs without a scan fails them on restart, loudly, which is the failure we want
+of the two.
+
+**Fixed in path: two test fixtures were measuring zombies.** `sleep 300 --vm-id x`
+looks like a runner and is not — GNU `sleep` rejects the flag and exits at once,
+and the unreaped zombie it leaves has a live `/proc/<pid>/stat` with an empty
+cmdline. That is precisely the shape that reads as "alive, identity unknown", so
+the adoption test was passing the branch it existed to fail, and the identity tests
+were winning a race against process teardown. The fixtures now block in `sh -c`,
+which passes its trailing words through as positional parameters instead of parsing
+them, and each one asserts it produced the process state it claims: a readable argv
+for a lookalike, `state == Z` for the zombie. `writeLiveRunnerManifest` in
+`stop_ctl_linux_test.go` staged `os.Getpid()` as its runner for the same reason and
+now stages a runner-shaped process — the test binary names no VM.
 
 # Phase C — evidence
 

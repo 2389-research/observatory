@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -212,12 +211,17 @@ func stopOnlyAdapter(t *testing.T) *Adapter {
 	}
 }
 
-// writeLiveRunnerManifest writes a manifest whose runner PID is this test
-// process, so runnerAlive says yes and doStop takes the graceful branch. VMMPID
-// stays 0 so the forced fallback sends no signals.
+// writeLiveRunnerManifest writes a manifest whose runner PID is a live process
+// naming this VM in its argv, so runnerAlive says yes and doStop takes the
+// graceful branch. VMMPID stays 0 so the forced fallback sends no signals.
+//
+// The pid has to be runner-shaped, not merely alive: runnerAlive reads the argv
+// and refuses a pid running anything else. This test process used to stand in
+// here, and it names no VM at all.
 func writeLiveRunnerManifest(t *testing.T, stateDir, vmID string) {
 	t.Helper()
-	if err := writeManifest(stateDir, Manifest{VMID: vmID, RunnerPID: os.Getpid()}); err != nil {
+	m := Manifest{VMID: vmID, RunnerPID: spawnRunnerLookalike(t, "--vm-id", vmID)}
+	if err := writeManifest(stateDir, m); err != nil {
 		t.Fatalf("write manifest: %v", err)
 	}
 }
