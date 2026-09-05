@@ -24,11 +24,11 @@ import (
 // why. Dropping it leaves an operator with a forced stop and no reason at all.
 func TestDoStopWarnsOnCtlTransportFailure(t *testing.T) {
 	restore := dialCtlFn
-	dialCtlFn = func(_ string, req adapterCtlRequest, _ time.Duration) (adapterCtlReply, error) {
+	dialCtlFn = func(_ string, req runner.CtlRequest, _ time.Duration) (runner.CtlReply, error) {
 		if req.Cmd == "shutdown_guest" {
-			return adapterCtlReply{}, errors.New("dial runner ctl: connection refused")
+			return runner.CtlReply{}, errors.New("dial runner ctl: connection refused")
 		}
-		return adapterCtlReply{OK: true}, nil
+		return runner.CtlReply{OK: true}, nil
 	}
 	t.Cleanup(func() { dialCtlFn = restore })
 
@@ -64,11 +64,11 @@ func TestDoStopWarnsRunnerRefusalReason(t *testing.T) {
 	const reason = "shutdown_ack timeout"
 
 	restore := dialCtlFn
-	dialCtlFn = func(_ string, req adapterCtlRequest, _ time.Duration) (adapterCtlReply, error) {
+	dialCtlFn = func(_ string, req runner.CtlRequest, _ time.Duration) (runner.CtlReply, error) {
 		if req.Cmd == "shutdown_guest" {
-			return adapterCtlReply{OK: false, Error: reason}, nil
+			return runner.CtlReply{OK: false, Error: reason}, nil
 		}
-		return adapterCtlReply{OK: true}, nil
+		return runner.CtlReply{OK: true}, nil
 	}
 	t.Cleanup(func() { dialCtlFn = restore })
 
@@ -100,13 +100,13 @@ func TestDoStopWarnsRunnerRefusalReason(t *testing.T) {
 // different fixes — a broken socket is a host problem, a refusal is the guest's
 // answer — so one shared message would be worth little more than none.
 func TestDoStopWarningsDistinguishTransportFromRefusal(t *testing.T) {
-	warn := func(vmID string, reply adapterCtlReply, ctlErr error) string {
+	warn := func(vmID string, reply runner.CtlReply, ctlErr error) string {
 		restore := dialCtlFn
-		dialCtlFn = func(_ string, req adapterCtlRequest, _ time.Duration) (adapterCtlReply, error) {
+		dialCtlFn = func(_ string, req runner.CtlRequest, _ time.Duration) (runner.CtlReply, error) {
 			if req.Cmd == "shutdown_guest" {
 				return reply, ctlErr
 			}
-			return adapterCtlReply{OK: true}, nil
+			return runner.CtlReply{OK: true}, nil
 		}
 		defer func() { dialCtlFn = restore }()
 
@@ -120,8 +120,8 @@ func TestDoStopWarningsDistinguishTransportFromRefusal(t *testing.T) {
 		return stopWarnLine(out, vmID)
 	}
 
-	transport := warn("vm-a", adapterCtlReply{}, errors.New("boom"))
-	refusal := warn("vm-b", adapterCtlReply{OK: false, Error: "boom"}, nil)
+	transport := warn("vm-a", runner.CtlReply{}, errors.New("boom"))
+	refusal := warn("vm-b", runner.CtlReply{OK: false, Error: "boom"}, nil)
 
 	if transport == "" || refusal == "" {
 		t.Fatalf("missing warning: transport=%q refusal=%q", transport, refusal)
@@ -140,8 +140,8 @@ func TestDoStopWarningsDistinguishTransportFromRefusal(t *testing.T) {
 // Losing it collapses both into the same silent forced stop.
 func TestDoStopWarnsOnGracefulPollTimeout(t *testing.T) {
 	restore := dialCtlFn
-	dialCtlFn = func(_ string, _ adapterCtlRequest, _ time.Duration) (adapterCtlReply, error) {
-		return adapterCtlReply{OK: true}, nil
+	dialCtlFn = func(_ string, _ runner.CtlRequest, _ time.Duration) (runner.CtlReply, error) {
+		return runner.CtlReply{OK: true}, nil
 	}
 	t.Cleanup(func() { dialCtlFn = restore })
 
@@ -213,8 +213,8 @@ func pollWindowFromWarning(t *testing.T, warn string) time.Duration {
 // every healthy stop would bury the one case this branch exists to surface.
 func TestDoStopSilentOnSuccessfulGracefulPoll(t *testing.T) {
 	restore := dialCtlFn
-	dialCtlFn = func(_ string, _ adapterCtlRequest, _ time.Duration) (adapterCtlReply, error) {
-		return adapterCtlReply{OK: true}, nil
+	dialCtlFn = func(_ string, _ runner.CtlRequest, _ time.Duration) (runner.CtlReply, error) {
+		return runner.CtlReply{OK: true}, nil
 	}
 	t.Cleanup(func() { dialCtlFn = restore })
 

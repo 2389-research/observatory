@@ -16,8 +16,9 @@ import (
 
 // CtlRequest is one command on the runner control socket. It is exported
 // because both ends of this wire live outside this file: the server below
-// decodes it, and CtlClient — used by the host's terminal registry — encodes
-// it. Two definitions of one wire is a protocol that drifts.
+// decodes it, and two encoders send it — CtlClient, used by the host's terminal
+// registry, and the jailer's dialCtl, which stops a guest before teardown. Two
+// definitions of one wire is a protocol that drifts.
 type CtlRequest struct {
 	Cmd    string `json:"cmd"`
 	GraceS int    `json:"grace_s,omitempty"`

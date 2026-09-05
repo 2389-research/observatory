@@ -34,19 +34,6 @@ import (
 // Per-VM locks would be more granular, but the current design has one shared
 // launchMu; extending its scope to Stop/Release is the simplest correct thing.
 
-// adapterCtlRequest / adapterCtlReply mirror runner.CtlRequest and
-// runner.CtlReply. The shape is replicated here rather than imported so the
-// jailer does not depend on the runner package; the two must stay in step.
-type adapterCtlRequest struct {
-	Cmd    string `json:"cmd"`
-	GraceS int    `json:"grace_s,omitempty"`
-}
-
-type adapterCtlReply struct {
-	OK    bool   `json:"ok"`
-	Error string `json:"error,omitempty"`
-}
-
 // finalizeCtlDeadline is the socket deadline for the finalize ctl command. The
 // runner answers finalize as soon as its channel loop notices finalizeCh, with
 // no guest round trip in the way, so no grace period applies to it.
@@ -80,23 +67,23 @@ var dialCtlFn = dialCtl
 // One command per connection (runner ctl protocol). deadline bounds the whole
 // exchange after the dial: the caller chooses it from what its own command can
 // legitimately take to answer.
-func dialCtl(sockPath string, req adapterCtlRequest, deadline time.Duration) (adapterCtlReply, error) {
+func dialCtl(sockPath string, req runner.CtlRequest, deadline time.Duration) (runner.CtlReply, error) {
 	conn, err := net.DialTimeout("unix", sockPath, 5*time.Second)
 	if err != nil {
-		return adapterCtlReply{}, fmt.Errorf("dial runner ctl %s: %w", sockPath, err)
+		return runner.CtlReply{}, fmt.Errorf("dial runner ctl %s: %w", sockPath, err)
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(deadline))
 
 	enc := json.NewEncoder(conn)
 	if err := enc.Encode(req); err != nil {
-		return adapterCtlReply{}, fmt.Errorf("encode ctl cmd: %w", err)
+		return runner.CtlReply{}, fmt.Errorf("encode ctl cmd: %w", err)
 	}
 
-	var reply adapterCtlReply
+	var reply runner.CtlReply
 	dec := json.NewDecoder(conn)
 	if err := dec.Decode(&reply); err != nil {
-		return adapterCtlReply{}, fmt.Errorf("decode ctl reply: %w", err)
+		return runner.CtlReply{}, fmt.Errorf("decode ctl reply: %w", err)
 	}
 	return reply, nil
 }
@@ -106,7 +93,7 @@ func dialCtl(sockPath string, req adapterCtlRequest, deadline time.Duration) (ad
 // shutdown message, and a write error means the channel was already broken --
 // so it is passed through untouched rather than summarised into a verdict this
 // layer has no standing to make.
-func ctlRefusalReason(reply adapterCtlReply) string {
+func ctlRefusalReason(reply runner.CtlReply) string {
 	if reply.Error == "" {
 		return "no reason given"
 	}
@@ -231,7 +218,7 @@ func (a *Adapter) doStop(ctx context.Context, vmID string, grace time.Duration, 
 		if graceS <= 0 {
 			graceS = 1
 		}
-		reply, ctlErr := dialCtlFn(ctlSock, adapterCtlRequest{Cmd: "shutdown_guest", GraceS: graceS}, ctlDeadline(grace))
+		reply, ctlErr := dialCtlFn(ctlSock, runner.CtlRequest{Cmd: "shutdown_guest", GraceS: graceS}, ctlDeadline(grace))
 		switch {
 		case ctlErr != nil:
 			// The request never got an answer: the runner is gone, the socket is
@@ -294,7 +281,7 @@ func (a *Adapter) doStop(ctx context.Context, vmID string, grace time.Duration, 
 	}
 
 	// Always send finalize to the runner (tolerate dead/missing runner socket).
-	_, _ = dialCtlFn(ctlSock, adapterCtlRequest{Cmd: "finalize"}, finalizeCtlDeadline)
+	_, _ = dialCtlFn(ctlSock, runner.CtlRequest{Cmd: "finalize"}, finalizeCtlDeadline)
 
 	// Release the jail chroot dir (privd removes <JailBase>/firecracker/<id>).
 	// Keep network + slot + manifest: a stopped VM can be restarted.

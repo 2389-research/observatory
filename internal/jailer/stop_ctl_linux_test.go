@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/2389-research/observatory-v2/internal/guest/proto"
 	"github.com/2389-research/observatory-v2/internal/privd"
 	"github.com/2389-research/observatory-v2/internal/runner"
 )
@@ -44,7 +45,7 @@ func TestDialCtlHonoursDeadline(t *testing.T) {
 	sock := silentCtlServer(t)
 
 	start := time.Now()
-	_, err := dialCtl(sock, adapterCtlRequest{Cmd: "shutdown_guest", GraceS: 1}, 200*time.Millisecond)
+	_, err := dialCtl(sock, runner.CtlRequest{Cmd: "shutdown_guest", GraceS: 1}, 200*time.Millisecond)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -66,9 +67,9 @@ func TestDoStopCtlDeadlinePerCommand(t *testing.T) {
 	}
 	var calls []ctlCall
 	restore := dialCtlFn
-	dialCtlFn = func(_ string, req adapterCtlRequest, deadline time.Duration) (adapterCtlReply, error) {
+	dialCtlFn = func(_ string, req runner.CtlRequest, deadline time.Duration) (runner.CtlReply, error) {
 		calls = append(calls, ctlCall{cmd: req.Cmd, deadline: deadline})
-		return adapterCtlReply{OK: false, Error: "recorded by test"}, nil
+		return runner.CtlReply{OK: false, Error: "recorded by test"}, nil
 	}
 	t.Cleanup(func() { dialCtlFn = restore })
 
@@ -96,6 +97,78 @@ func TestDoStopCtlDeadlinePerCommand(t *testing.T) {
 	}
 }
 
+// TestDialCtlSpeaksTheRunnersWire: the jailer's ctl client and the runner's ctl
+// server are one protocol, and the only way to say so is to run them against
+// each other. Every other test here hands dialCtl a socket this file decodes
+// itself, which proves the client agrees with the test — the jailer used to
+// carry its own copy of the request and reply structs, and a copy tested
+// against a copy is how a wire drifts without anyone noticing (issue 0yh5).
+// The terminal command is the case that matters: its arguments and its answer
+// travel in nested blocks that were added to the runner's shape alone, so a
+// second definition could neither send nor read them.
+func TestDialCtlSpeaksTheRunnersWire(t *testing.T) {
+	var gotGrace int
+	var gotCreate runner.TerminalCtlRequest
+	sock := filepath.Join(t.TempDir(), "runner.sock")
+	srv, err := runner.ListenCtl(t.Context(), sock, runner.CtlHandlers{
+		Shutdown: func(graceS int) error { gotGrace = graceS; return nil },
+		TerminalCreate: func(_ context.Context, req runner.TerminalCtlRequest) (runner.TerminalCtlReply, error) {
+			gotCreate = req
+			return runner.TerminalCtlReply{SessionID: "term-1"}, nil
+		},
+		TerminalList: func(context.Context) (runner.TerminalCtlReply, error) {
+			return runner.TerminalCtlReply{Sessions: []proto.TerminalSession{{SessionID: "term-1"}}}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("ListenCtl: %v", err)
+	}
+	t.Cleanup(srv.Close)
+
+	reply, err := dialCtl(sock, runner.CtlRequest{Cmd: "shutdown_guest", GraceS: 7}, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dialCtl shutdown_guest: %v", err)
+	}
+	if !reply.OK {
+		t.Errorf("shutdown_guest reply not OK: %q", reply.Error)
+	}
+	if gotGrace != 7 {
+		t.Errorf("runner saw grace %d, want 7", gotGrace)
+	}
+
+	// The request half: a terminal block the server has to receive whole. A
+	// narrower request shape reaches the server with no block at all, and it
+	// answers "terminal-create needs a terminal block".
+	reply, err = dialCtl(sock, runner.CtlRequest{
+		Cmd:      "terminal-create",
+		Terminal: &runner.TerminalCtlRequest{User: "root", Rows: 40, Cols: 120},
+	}, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dialCtl terminal-create: %v", err)
+	}
+	if !reply.OK {
+		t.Fatalf("terminal-create reply not OK: %q", reply.Error)
+	}
+	if gotCreate.User != "root" || gotCreate.Rows != 40 || gotCreate.Cols != 120 {
+		t.Errorf("runner saw terminal block %+v, want user root at 40x120", gotCreate)
+	}
+
+	// The reply half: a block the server sends that has to survive the decode.
+	reply, err = dialCtl(sock, runner.CtlRequest{Cmd: "terminal-list"}, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dialCtl terminal-list: %v", err)
+	}
+	if !reply.OK {
+		t.Fatalf("terminal-list reply not OK: %q", reply.Error)
+	}
+	if reply.Terminal == nil {
+		t.Fatal("terminal-list reply lost its terminal block on the way back")
+	}
+	if len(reply.Terminal.Sessions) != 1 || reply.Terminal.Sessions[0].SessionID != "term-1" {
+		t.Errorf("terminal block = %+v, want one session term-1", reply.Terminal)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -117,7 +190,7 @@ func silentCtlServer(t *testing.T) string {
 				return
 			}
 			go func() {
-				var req adapterCtlRequest
+				var req runner.CtlRequest
 				_ = json.NewDecoder(conn).Decode(&req)
 				<-t.Context().Done()
 				_ = conn.Close()
