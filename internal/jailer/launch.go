@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/2389-research/observatory-v2/internal/durable"
 	"github.com/2389-research/observatory-v2/internal/guest"
 	"github.com/2389-research/observatory-v2/internal/guest/proto"
 	"github.com/2389-research/observatory-v2/internal/lock"
@@ -107,7 +108,7 @@ func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (*lock.Images
 		Stages: []string{},
 	}
 	vmStateDir := filepath.Join(a.cfg.StateDir, "vms", vmID)
-	if err := os.MkdirAll(vmStateDir, 0o700); err != nil {
+	if err := durable.MkdirAll(vmStateDir, 0o700); err != nil {
 		return nil, fmt.Errorf("launch %s failed at stage reserved: mkdir state dir: %w", vmID, err)
 	}
 	m.Stages = append(m.Stages, stageReserved)
@@ -117,7 +118,7 @@ func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (*lock.Images
 		// the dir holds the previous launch's manifest, which writeManifest left
 		// intact and which Release still needs to find the network it must free.
 		if os.IsNotExist(existingErr) {
-			_ = os.RemoveAll(vmStateDir)
+			_ = durable.RemoveAll(vmStateDir)
 		}
 		return nil, fmt.Errorf("launch %s failed at stage reserved: write manifest: %w", vmID, err)
 	}
@@ -546,14 +547,16 @@ func (a *Adapter) doRollback(vmID string) {
 	}
 
 	// Remove stage dir. doStage can fail after creating it and before
-	// stageStaged is recorded, so no stage guard: os.RemoveAll on a missing
-	// path is a no-op (same as doRelease).
+	// stageStaged is recorded, so no stage guard: removing a missing path is a
+	// no-op (same as doRelease).
 	stageDir := filepath.Join(a.cfg.StageRoot, vmID)
-	_ = os.RemoveAll(stageDir)
+	_ = durable.RemoveAll(stageDir)
 
-	// Remove VM state dir.
+	// Remove VM state dir. Rollback is best-effort by contract — the caller
+	// reports the stage failure that brought it here, not this one — so the
+	// barrier is taken and its answer discarded like the removal's own.
 	vmStateDir := filepath.Join(a.cfg.StateDir, "vms", vmID)
-	_ = os.RemoveAll(vmStateDir)
+	_ = durable.RemoveAll(vmStateDir)
 }
 
 // killRunnerByPID sends SIGTERM to the runner pid, waits 2s, then SIGKILL.

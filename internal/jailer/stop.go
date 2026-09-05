@@ -20,6 +20,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/2389-research/observatory-v2/internal/durable"
 	"github.com/2389-research/observatory-v2/internal/privd"
 	"github.com/2389-research/observatory-v2/internal/runner"
 )
@@ -529,17 +530,22 @@ func (a *Adapter) doRelease(ctx context.Context, vmID string) error {
 	netErr := ignoreNotFound(a.pc.ReleaseNetwork(releaseCtx, privd.ReleaseNetworkReq{VMID: vmID}))
 
 	// Remove stage dir (disk images + fc-config.json).
-	// os.RemoveAll on a missing path is a no-op — no stage guard needed.
+	// Removing a missing path is a no-op — no stage guard needed.
 	stageDir := filepath.Join(a.cfg.StageRoot, vmID)
-	if err := os.RemoveAll(stageDir); err != nil && !os.IsNotExist(err) {
+	if err := durable.RemoveAll(stageDir); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("jailer release %s: remove stage dir: %w", vmID, err)
 	}
 
 	// Remove <StateDir>/vms/<id>/ — includes manifest.json, token, runner-state.json, etc.
 	// This must be last so the manifest is still readable until all other cleanup is done.
-	// os.RemoveAll on a missing path is a no-op — no stage guard needed.
+	// Removing a missing path is a no-op — no stage guard needed.
+	//
+	// The removal is made durable before this returns nil, because nil is what
+	// lets the caller reclaim the slot, uid and cid the manifest named. A
+	// removal that a crash could undo would put those identities back in use
+	// under a VM that has already been told they are free.
 	vmStateDir := filepath.Join(a.cfg.StateDir, "vms", vmID)
-	if err := os.RemoveAll(vmStateDir); err != nil && !os.IsNotExist(err) {
+	if err := durable.RemoveAll(vmStateDir); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("jailer release %s: remove state dir: %w", vmID, err)
 	}
 

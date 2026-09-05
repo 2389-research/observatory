@@ -1,5 +1,5 @@
 // ABOUTME: Provisioning manifest: tracks staged resources so rollback targets exactly what was owned.
-// ABOUTME: Written as tempfile+rename before each external side effect; pure-portable logic.
+// ABOUTME: Published durably before each external side effect; pure-portable logic.
 package jailer
 
 import (
@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/2389-research/observatory-v2/internal/durable"
 )
 
 // ErrSlotsExhausted is returned by allocateSlot when no free slot < MaxSlots exists.
@@ -66,40 +68,26 @@ func manifestPath(stateDir, vmID string) string {
 	return filepath.Join(stateDir, "vms", vmID, "manifest.json")
 }
 
-// writeManifest atomically writes m to <stateDir>/vms/<m.VMID>/manifest.json.
-// Creates the containing directory if it does not exist.
+// writeManifest durably publishes m to <stateDir>/vms/<m.VMID>/manifest.json,
+// creating the containing directory if it does not exist.
+//
+// The manifest is the only record of what a launch has provisioned, and it is
+// written before each side effect precisely so a crash leaves rollback a target
+// list. That is worth nothing if the record can be lost with the crash, so both
+// the directory and the file are made durable and a failed barrier is reported
+// rather than swallowed. A caller that gets an error here has to treat the
+// launch as unsettled: the manifest on disk may name either stage set.
 func writeManifest(stateDir string, m Manifest) error {
 	path := manifestPath(stateDir, m.VMID)
 	data, err := json.Marshal(m)
 	if err != nil {
 		return fmt.Errorf("jailer: marshal manifest: %w", err)
 	}
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := durable.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("jailer: mkdir manifest dir: %w", err)
 	}
-	tmp, err := os.CreateTemp(dir, "manifest-*.tmp")
-	if err != nil {
-		return fmt.Errorf("jailer: create manifest temp: %w", err)
-	}
-	tmpPath := tmp.Name()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("jailer: write manifest temp: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("jailer: sync manifest temp: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("jailer: close manifest temp: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("jailer: rename manifest: %w", err)
+	if err := durable.WriteFile(path, 0o600, data); err != nil {
+		return fmt.Errorf("jailer: write manifest: %w", err)
 	}
 	return nil
 }

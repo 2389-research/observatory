@@ -245,3 +245,40 @@ func slotToTestVMID(slot int) string {
 	}
 	return "vm-slotN"
 }
+
+// TestSlotAllocationIgnoresAVMDirectoryWithNoManifest covers the one window
+// durable publication cannot close: writeManifest creates the VM state
+// directory and then publishes the manifest into it, so a crash between those
+// two steps leaves a directory with no record in it. That state is safe — at
+// that point the launch has provisioned nothing but the directory — and
+// allocateSlot has to read it as free rather than as a slot it cannot name.
+func TestSlotAllocationIgnoresAVMDirectoryWithNoManifest(t *testing.T) {
+	dir := t.TempDir()
+
+	occupied := Manifest{VMID: slotToTestVMID(0), Slot: 0, Stages: []string{"reserved"}}
+	if err := writeManifest(dir, occupied); err != nil {
+		t.Fatalf("writeManifest: %v", err)
+	}
+	// The crash window: directory created, manifest never published.
+	if err := os.MkdirAll(filepath.Join(dir, "vms", "vm-crashed"), 0o700); err != nil {
+		t.Fatalf("mkdir crashed vm dir: %v", err)
+	}
+
+	got, err := allocateSlot(dir, "vm-new", 4)
+	if err != nil {
+		t.Fatalf("allocateSlot: %v", err)
+	}
+	if got != 1 {
+		t.Errorf("allocateSlot = %d, want 1 (the empty directory must not reserve a slot)", got)
+	}
+
+	// The crashed VM itself is a stranger now: with no manifest there is no
+	// identity to match, so it allocates like any new VM.
+	retry, err := allocateSlot(dir, "vm-crashed", 4)
+	if err != nil {
+		t.Fatalf("allocateSlot (crashed vm retry): %v", err)
+	}
+	if retry != 1 {
+		t.Errorf("allocateSlot for the crashed vm = %d, want 1", retry)
+	}
+}
