@@ -90,6 +90,12 @@ committed at tests/integration/evidence/m1a-gate-aibox03.txt; the two runs' evid
 for UUIDs/timestamps/pid/temp-dir, is byte-identical. A §15.3 scan of all 33 evidence lines for
 token/secret/bearer/authorization/password/key= found nothing, both runs. AT-005 draws on a
 separate test binary and is noted at its own row.
+Re-run 2026-09-05 (kata b33f): the AT-011 and AT-018 subtests gained assertions on VMM liveness
+and reservation totals, so the gate was re-run to produce evidence for them — eight subtests,
+eight passes, zero skips, 102.6s, same host and same runtime lock. The committed evidence file is
+that run's; the rows below quote it where their text changed and run B's everywhere else, and the
+two are identical once UUIDs, timestamps, pids and temp-dir names are normalized. The §15.3 scan
+was repeated over the new file with the same result.
 Runtime lock at aa12929 (runtime.lock.json, unchanged since the 0881e69 rootfs re-pin): vmlinux
 b6067686…, rootfs c6a92bba…, firecracker 2fd01713…, jailer 1f3a0c1f…. The daemon verifies both
 binaries against the lock at startup (cmd/vmobsd/main.go:197) and every launch verifies both
@@ -250,8 +256,27 @@ AT-011: TESTED_PASS (partial — VM-lifecycle independence only).
     reason=graceful_stop; asserts vmB stays "running" both immediately after vmA's stop and after
     vmA's full delete; asserts vmB records no state-change event with host_received_at after
     vmA's stop time.
-  Evidence (run B): `vmA stopped graceful_stop=true; vmB state after vmA stop="running"; vmB
-    state after vmA delete="running"; ... vmB no state departure after stop=verified`.
+  Since 2026-09-05 (kata b33f) the subtest also asserts what vmA's own stop did to vmA, because
+    a row reading "stopped" is a claim and the facts behind it are separable: the VMM its
+    manifest names — pid and /proc start time together, so a recycled pid is a different process
+    — is gone from /proc, the host's reserved memory and vCPU fell by exactly what vmA charged,
+    and reserved disk did not move, because a stopped VM keeps the workspace it can be started
+    onto again. Liveness and totals are asserted together on purpose: a live VMM under a
+    released reservation oversubscribes the host, and a dead VMM whose reservation is still held
+    leaks capacity nothing will return, and each of those passes the other's check. The charge is
+    read from GET /vms/<id> and GET /host/status rather than from the create parameters, so a
+    host configured with a different per-VM overhead is measured against the number it publishes;
+    a zero charge fails the subtest instead of making the arithmetic vacuous. The liveness read
+    parses /proc in the test rather than calling privd.PIDAlive, which is what the stop path's
+    own proof gate calls — asking the checked code to check itself would make this evidence agree
+    by construction. It runs against the live VM first as a positive control, so a /proc field
+    read at the wrong offset cannot pass the post-stop assertion by answering "not alive" about
+    every process on the host.
+  Evidence (2026-09-05 run): `vmA stopped graceful_stop=true; vmA vmm pid 3279008 starttime
+    40835013 gone from /proc=verified; host reserved 1024 MiB 2 vcpu 8320 MiB disk -> 512 MiB
+    1 vcpu 8320 MiB disk (released 512 MiB 1 vcpu, vmA charged 512 MiB 1 vcpu; disk unchanged,
+    a stop keeps it); vmB state after vmA stop="running"; vmB state after vmA delete="running";
+    aStopTime=2026-09-05T20:41:34Z; vmB no state departure after stop=verified`.
   The row's text also names terminal and network-worker continuity; M1a has neither subsystem
   built (terminal is L1b), so this row proves VM-lifecycle independence only: a sibling's own
   recorded state is untouched by a VM's stop or delete. The gate asserts vmB's state and the
@@ -271,21 +296,37 @@ AT-018: TESTED_PASS (partial — six host-side counters, delta-zero against an i
     create/stop/delete cycles plus 1 force-delete cycle (DELETE ?force=true with no stop first —
     the only path that had leaked a chroot in an earlier run), recaptures within 60s, and hard-
     asserts all six deltas at zero.
+  Since 2026-09-05 (kata b33f) the force-delete cycle also asserts what that one delete did: the
+    VMM its manifest named — pid and /proc start time together — is gone from /proc, and the
+    host's reserved memory, vCPU and disk all fell by exactly what the VM charged. A delete
+    releases all three pools, unlike the stop in AT-011, which keeps the disk. The force path is
+    where this matters most: DELETE ?force=true drives ForceStop, which kills a running VMM, so
+    it is where a stop reported from a claim rather than an observation does its damage. Neither
+    fact is visible to the six counters — the firecracker process count is an aggregate that
+    cannot say which process left, and a reservation is a row in the store, not a thing on the
+    host. The same positive control as AT-011 runs first, and a zero charge fails the subtest.
   Evidence (run B): `baseline: netns=1 veth=1 jail=1 fc_procs=1 state_entries=1 stage_entries=1`
     / `after 5 graceful cycles + 1 force-delete: netns=1 veth=1 jail=1 fc_procs=1
     state_entries=1 stage_entries=1` / `delta: netns=+0 veth=+0 jail=+0 fc_procs=+0 state=+0
-    stage=+0`.
+    stage=+0`. Force-delete line (2026-09-05 run): `force-delete
+    vm=3a4ff779-99be-405b-b025-db56835bb7ee: vmm pid 3280286 starttime 40843740 gone from
+    /proc=verified; host reserved 1024 MiB 2 vcpu 8320 MiB disk -> 512 MiB 1 vcpu 4160 MiB disk
+    (released 512 MiB 1 vcpu 4160 MiB disk, vm charged 512 MiB 1 vcpu 4160 MiB disk)`.
   The row's text names cgroups and reservation counts among what to compare, against the
-  documented idle baseline; four things it asks for this subtest does not measure. (a) The
-  baseline is not the documented idle one: captureBaseline (m1a_gate_test.go:1118) runs inside
-  the subtest at :1843 with one live VM left by an earlier subtest — every counter reads 1 in
-  the evidence — and the assertion is delta-zero against that, not against an idle host. (b)
-  Reservation counts are never read: none of the six counters queries GET /host/status, which
-  reports reserved_memory_mib, reserved_vcpu and reserved_disk_mib (internal/api/vms.go:509-515),
-  so a leaked reservation would pass. (c) privd's network ledger (internal/privd/ledger.go, one
-  file per VM) is not counted — the record 7934423 had left immortal. (d) The baseline struct
-  carries no cgroup counter — jail/state/stage entry counts catch a leaked chroot or socket, but
-  nothing here separately counts cgroups. All four gaps are real and unclaimed.
+  documented idle baseline; four things it asks for this subtest does not measure, and the
+  second of them is now measured in part. (a) The baseline is not the documented idle one:
+  captureBaseline (m1a_gate_test.go:1118) runs inside the subtest with one live VM left by an
+  earlier subtest — every counter reads 1 in the evidence — and the assertion is delta-zero
+  against that, not against an idle host. (b) Reservation counts: none of the six counters
+  queries GET /host/status, so the six-counter delta still cannot see a leaked reservation. As of
+  2026-09-05 the force-delete cycle reads reserved_memory_mib, reserved_vcpu and reserved_disk_mib
+  (internal/api/vms.go:509-515) before and after its own delete and asserts all three came back;
+  the five graceful cycles do not, and no cycle compares totals against an idle baseline, so a
+  reservation leaked by the graceful path would still pass. (c) privd's network ledger
+  (internal/privd/ledger.go, one file per VM) is not counted — the record 7934423 had left
+  immortal. (d) The baseline struct carries no cgroup counter — jail/state/stage entry counts
+  catch a leaked chroot or socket, but nothing here separately counts cgroups. All four gaps are
+  real and unclaimed.
 
 -->
 

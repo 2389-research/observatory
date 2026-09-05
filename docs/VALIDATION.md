@@ -1,5 +1,36 @@
 # Specification Package Validation
 
+## Revision 19 (2026-09-05) — AT-011 and AT-018 now assert VMM death and reservation totals
+
+Amends the "L1 M1a status notes (2026-09-02)" block in `docs/ACCEPTANCE.md`: the AT-011 and
+AT-018 rows, and a paragraph in the block's header recording the re-run that produced the
+evidence they now quote. No requirement text changed; the rows say more about the same subtests.
+
+Kata `b33f` asked for end-to-end fault cases "proving process liveness and reservation totals
+together. Sending a signal is not the assertion." Both rows had passed on neither. AT-011 read
+the stop event's reason and the sibling VM's state; AT-018 counted six host-side observables, of
+which the firecracker process count is an aggregate that cannot name which process left. Each
+subtest now reads the VMM identity out of the manifest before the stop — pid and `/proc` start
+time together, so a recycled pid does not answer for a dead one — and asserts it is gone from
+`/proc` afterwards, alongside the reservation the release was supposed to return: memory and
+vCPU for AT-011's graceful stop, which keeps its disk, and all three pools for AT-018's
+force-delete, which does not.
+
+Three things the rows state rather than assume. The liveness read parses `/proc` in the test
+instead of calling `privd.PIDAlive`, which is what the stop path's own proof gate calls — the
+gate is the code under test, so asking it to check itself would make the evidence agree by
+construction. A positive control runs against the live VM first, because "not alive" is the
+passing answer and a field read at the wrong offset would give it about every process on the
+host. And a zero charge fails the subtest instead of making the release arithmetic vacuous.
+
+AT-018's gap (b) is narrowed, not closed, and now says so: the six-counter delta still never
+queries `/host/status`, the five graceful cycles still assert nothing about totals, and no cycle
+compares against an idle baseline. One delete out of six is measured.
+
+Evidence: `tests/integration/evidence/m1a-gate-aibox03.txt`, replaced with the 2026-09-05 run —
+eight subtests, eight passes, zero skips, 102.6s on aibox03, same host and runtime lock as the
+2026-09-02 runs. The §15.3 scan over the new file returns nothing.
+
 ## Revision 18 (2026-09-05) — M2a live-gate evidence: AT-074 and AT-075 recorded, both partial
 
 Adds one dated HTML comment block to `docs/ACCEPTANCE.md` — "L2 M2a status notes (2026-09-05)" —

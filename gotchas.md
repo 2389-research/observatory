@@ -31,6 +31,7 @@ Distilled working knowledge for agents and collaborators in this repo. Append en
 - **Token secrets exist in exactly two places: the mint response and the operator's memory.** `CreateToken` returns the raw secret once; only its SHA-256 is stored. Logs, events, and list responses carry IDs only. Never log, echo, or include the `secret` field in any response other than the mint 201.
 - **`require_authentication: false` is loopback-only dev mode.** Config validation rejects it with any non-loopback `server.mode`. The smoke runs with `require_authentication: true`; the example config's `false` is the dev default, not a production option.
 - **`scripts/linux` rsyncs via SSH then runs a command remotely.** Usage: `scripts/linux '<shell command>'`. It excludes `.git` and `.superpowers` from the transfer. The `--filter='P images/dist/'` rule protects build artifacts in gitignored dirs from `--delete` — macOS openrsync ignores `:- .gitignore` for deletion protection. Setting `VMOBS_LINUX_HOST` or `VMOBS_LINUX_DIR` overrides the defaults.
+- **Anything a remote run writes inside the tree dies at the next `scripts/linux` call.** The rsync is one-way with `--delete`, and it runs *before* every command, so the local copy wins. A gate that writes `tests/integration/evidence/m1a-gate-aibox03.txt` remotely has it silently replaced by the stale local file the next time you ssh in to read it — and the md5s then match, which reads like the run wrote nothing. Copy artifacts to `/tmp` in the same `scripts/linux` invocation that produces them, then fetch from there.
 - **Sudo on aibox03 requires a password.** Agents never sudo. The only NOPASSWD grant is `/usr/local/sbin/vmobs-root-helper`, installed by `scripts/aibox03/setup.sh` (which Doctor Biz must run by hand with password sudo). Any step that needs root on aibox03 before setup.sh has run is a Doctor Biz handoff.
 - **`mkfs.ext4 -d <dir>` builds ext4 filesystems rootless.** No mounts, no root required. Used for both rootfs and config disk assembly in the image pipeline and the fixture. The `-d` flag populates the filesystem from a directory tree at creation time.
 - **Fixture gate: `//go:build linux` + `VMOBS_FIXTURE=1` env var.** `tests/integration/boot_test.go` and `tests/integration/fixture/fixture.go` are linux-only; the integration test additionally requires `VMOBS_FIXTURE=1` to run. Unset → skip with a printed reason naming `scripts/aibox03/setup.sh`. Never claim the gate passed without running it.
@@ -240,3 +241,31 @@ sites, and the situation engine raises it as a `lifecycle_failed` attention item
 with a force-delete suggestion. It is a statement, not a transition: no revision
 is spent, because nothing about the VM changed — the controller merely failed
 again to change it.
+
+## Test harnesses that read like product bugs
+
+**A killed child that nobody reaps keeps its `/proc` entry, and its start
+time.** The stop path's proof gate asks `privd.PIDAlive(pid, starttime)`
+whether the VMM is gone; a stand-in process a test kills without a matching
+`cmd.Wait()` becomes a zombie, `/proc/<pid>/stat` still answers with the same
+field 22, and the gate correctly reports it alive. Four proof tests failed that
+way and read exactly like the bug they exist to catch. In production the VMM is
+daemonized under privd and reparented to init, which reaps it — so a helper
+that spawns a stand-in owes it a reaper goroutine, and the cleanup has to wait
+on that goroutine before the test's temp dir goes away.
+
+**`sun_path` is 108 bytes and `t.TempDir()` spends them on the test's name.**
+The jailer launch harness builds `<tmp>/root/v.sock` under a directory whose
+name embeds the full test function name, so a descriptive name like
+`TestStopEscalatesToKillWhenTheVMMSurvivesSIGTERM` produced a 117-byte path and
+`bind: invalid argument` — a failure that says nothing about sockets. Any test
+in `internal/jailer` that reaches the runner's `--uds` flag has a name-length
+budget; spend it and say so in the test's doc comment, or the next rename
+re-breaks it.
+
+**`runtime.NewManager` reconciles before it returns.** A test that seeds a
+"running" VM row and *then* builds the manager gets that row failed as
+`vmm_disappeared_on_restart` before the first assertion runs — startup
+Reconcile finds a row no adoption finding accounts for and is right to fail it.
+Build the manager first, then create rows, unless the reconcile is the thing
+under test.
