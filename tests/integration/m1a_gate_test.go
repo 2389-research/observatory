@@ -1813,6 +1813,28 @@ performance_targets:
 		// of the run. vmB is deliberately not disposed here.
 		t.Cleanup(func() { daemon.disposeVM(t, vmAID) })
 
+		// vmA's VMM identity and the host's reserved totals, both read before the
+		// stop: afterwards the pid is meant to be gone and the totals are meant to
+		// have moved, so neither can be established from the after picture alone.
+		mA, err := readM1aManifest(daemon.stateDir, vmAID)
+		if err != nil {
+			t.Fatalf("AT-011: read vmA manifest: %v", err)
+		}
+		if mA.VMMPID <= 0 || mA.VMMStart == "" {
+			t.Fatalf("AT-011: vmA's manifest names no VMM identity (pid=%d starttime=%q); "+
+				"a stop cannot be proven against it", mA.VMMPID, mA.VMMStart)
+		}
+		// The positive control for the check after the stop. vmA is running, so its
+		// VMM must read as alive right now; without this, a /proc field read from
+		// the wrong offset would answer "not alive" about every process on the host
+		// and the post-stop assertion would pass on a parse bug.
+		if !vmmStillAlive(t, mA.VMMPID, mA.VMMStart) {
+			t.Fatalf("AT-011: vmA is running, but its VMM (pid %d, starttime %s) does not read as alive; "+
+				"nothing this check says about the stop can be trusted", mA.VMMPID, mA.VMMStart)
+		}
+		aCharge := daemon.chargedTotals(t, vmAID)
+		before := daemon.reservedTotals(t)
+
 		// Stop A gracefully.
 		daemon.stopVM(t, vmAID)
 
@@ -1843,6 +1865,31 @@ performance_targets:
 		// Record the stop completion time AFTER waitVMState confirms stopped.
 		// Everything after this is "after A's stop."
 		aStopTime := time.Now()
+
+		// A "stopped" row is a claim; these two are the facts behind it, asserted
+		// together because either alone can hold while the stop is wrong. A VMM
+		// still running under a released reservation oversubscribes the host, and
+		// a dead VMM whose reservation is still held leaks capacity that nothing
+		// will return. The runner's phase — which the stop path used to trust on
+		// its own — proves neither.
+		if vmmStillAlive(t, mA.VMMPID, mA.VMMStart) {
+			t.Errorf("AT-011: vmA reads stopped, but its VMM (pid %d, starttime %s) is still alive in /proc",
+				mA.VMMPID, mA.VMMStart)
+		}
+		after := daemon.reservedTotals(t)
+		freed := before.sub(after)
+		if freed.memMiB != aCharge.memMiB || freed.vcpu != aCharge.vcpu {
+			t.Errorf("AT-011: vmA's stop released %.0f MiB and %.0f vcpu, want %.0f MiB and %.0f vcpu "+
+				"(host reserved before=%s, after=%s)",
+				freed.memMiB, freed.vcpu, aCharge.memMiB, aCharge.vcpu, before, after)
+		}
+		// A stopped VM keeps its disk: its workspace is still on the host and the
+		// VM can be started again onto it. Releasing that here would hand the
+		// space to another VM's launch while this one still owns the bytes.
+		if freed.diskMiB != 0 {
+			t.Errorf("AT-011: vmA's stop moved reserved disk by %.0f MiB; a stop must keep the disk "+
+				"(host reserved before=%s, after=%s)", freed.diskMiB, before, after)
+		}
 
 		// (a) B must still be running immediately after A's stop completed.
 		vmB := daemon.apiGet(t, "/vms/"+vmBID)
@@ -1891,8 +1938,12 @@ performance_targets:
 		}
 
 		evidenceSubtest(t, &evidence, "4_at011_graceful_stop", fmt.Sprintf(
-			"vmA stopped graceful_stop=%v; vmB state after vmA stop=%q; vmB state after vmA delete=%q; aStopTime=%s; vmB no state departure after stop=verified",
-			gracefulFound, bState, bStateAfter, aStopTime.UTC().Format(time.RFC3339),
+			"vmA stopped graceful_stop=%v; vmA vmm pid %d starttime %s gone from /proc=verified; "+
+				"host reserved %s -> %s (released %.0f MiB %.0f vcpu, vmA charged %.0f MiB %.0f vcpu; disk unchanged, a stop keeps it); "+
+				"vmB state after vmA stop=%q; vmB state after vmA delete=%q; aStopTime=%s; vmB no state departure after stop=verified",
+			gracefulFound, mA.VMMPID, mA.VMMStart,
+			before, after, freed.memMiB, freed.vcpu, aCharge.memMiB, aCharge.vcpu,
+			bState, bStateAfter, aStopTime.UTC().Format(time.RFC3339),
 		))
 	})
 
@@ -2077,12 +2128,35 @@ performance_targets:
 		// live gate run 4 leaked: only DELETE ?force=true drives ForceStop, where the
 		// release raced the SIGKILL. Skip the stop entirely so the VM is killed while
 		// running, exactly as run 4 did.
+		//
+		// What the force path proved lives outside the block so the evidence file
+		// can carry it: the counts below are aggregates and name no process.
+		var forceEvidence string
 		{
 			id := daemon.createVM(t, "at018-force-delete")
 
 			runCtx, runCancel := context.WithTimeout(context.Background(), 3*time.Minute)
 			daemon.waitVMState(runCtx, t, id, "running")
 			runCancel()
+
+			// The force path kills a running VMM, so it is where a stop reported
+			// from a claim rather than an observation does its damage. Read the
+			// VMM's identity and the host's reserved compute now: the delete takes
+			// the state dir with it, and the totals are what has to move.
+			mF, err := readM1aManifest(daemon.stateDir, id)
+			if err != nil {
+				t.Fatalf("AT-018 force-delete: read manifest: %v", err)
+			}
+			if mF.VMMPID <= 0 || mF.VMMStart == "" {
+				t.Fatalf("AT-018 force-delete: manifest names no VMM identity (pid=%d starttime=%q)",
+					mF.VMMPID, mF.VMMStart)
+			}
+			if !vmmStillAlive(t, mF.VMMPID, mF.VMMStart) {
+				t.Fatalf("AT-018 force-delete: vm is running, but its VMM (pid %d, starttime %s) does not read "+
+					"as alive; nothing this check says about the delete can be trusted", mF.VMMPID, mF.VMMStart)
+			}
+			charge := daemon.chargedTotals(t, id)
+			before := daemon.reservedTotals(t)
 
 			status, body := daemon.apiDelete(t, "/vms/"+id+"?force=true")
 			if status != http.StatusOK {
@@ -2092,6 +2166,28 @@ performance_targets:
 			delCtx, delCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			daemon.waitVMState(delCtx, t, id, "deleted")
 			delCancel()
+
+			// Same pair AT-011 asserts on the graceful path, here on the forced one:
+			// the killed VMM is gone from /proc, and the compute it held came back.
+			// The aggregate firecracker-process count below cannot say which process
+			// left, and says nothing at all about the reservation.
+			if vmmStillAlive(t, mF.VMMPID, mF.VMMStart) {
+				t.Errorf("AT-018 force-delete: vm reads deleted, but its VMM (pid %d, starttime %s) is still alive in /proc",
+					mF.VMMPID, mF.VMMStart)
+			}
+			after := daemon.reservedTotals(t)
+			// A delete releases all three pools, disk included — unlike the stop
+			// in AT-011, nothing is coming back to this VM's workspace. The six
+			// counters below would not notice a reservation left behind: they
+			// count what is on the host, and a reservation is a row in the store.
+			if freed := before.sub(after); freed != charge {
+				t.Errorf("AT-018 force-delete: released %s, want %s (host reserved before=%s, after=%s)",
+					freed, charge, before, after)
+			}
+			forceEvidence = fmt.Sprintf(
+				"force-delete vm=%s: vmm pid %d starttime %s gone from /proc=verified; "+
+					"host reserved %s -> %s (released %s, vm charged %s)",
+				id, mF.VMMPID, mF.VMMStart, before, after, before.sub(after), charge)
 
 			cyclePollDeadline := time.Now().Add(30 * time.Second)
 			for stateDirEntries(t, daemon.stateDir) != baseline.StateDirEntries {
@@ -2146,7 +2242,8 @@ performance_targets:
 		evidenceSubtest(t, &evidence, "7_at018_resource_leaks", fmt.Sprintf(
 			"baseline: netns=%d veth=%d jail=%d fc_procs=%d state_entries=%d stage_entries=%d\n"+
 				"after 5 graceful cycles + 1 force-delete: netns=%d veth=%d jail=%d fc_procs=%d state_entries=%d stage_entries=%d\n"+
-				"delta: netns=%+d veth=%+d jail=%+d fc_procs=%+d state=%+d stage=%+d",
+				"delta: netns=%+d veth=%+d jail=%+d fc_procs=%+d state=%+d stage=%+d\n"+
+				"%s",
 			baseline.NetnsCount, baseline.VethCount, baseline.JailEntries,
 			baseline.FcProcCount, baseline.StateDirEntries, baseline.StageDirEntries,
 			after.NetnsCount, after.VethCount, after.JailEntries,
@@ -2157,6 +2254,7 @@ performance_targets:
 			after.FcProcCount-baseline.FcProcCount,
 			after.StateDirEntries-baseline.StateDirEntries,
 			after.StageDirEntries-baseline.StageDirEntries,
+			forceEvidence,
 		))
 	})
 
@@ -2311,6 +2409,117 @@ type m1aManifest struct {
 	VMMStart    string `json:"vmm_starttime,omitempty"`
 	RunnerPID   int    `json:"runner_pid,omitempty"`
 	RunnerStart string `json:"runner_starttime,omitempty"`
+}
+
+// vmmStillAlive reports whether pid is still the process the manifest recorded:
+// /proc/<pid>/stat exists and its start time (field 22) still matches. A recycled
+// pid carries a different start time and is a different process, so it does not
+// count as alive.
+//
+// This parses /proc here instead of calling privd.PIDAlive, which is what the stop
+// path's own proof gate calls. AT-011 is the end-to-end evidence that a stopped
+// VM's process is gone; asking the checked code to check itself would make that
+// evidence agree by construction.
+func vmmStillAlive(t *testing.T, pid int, wantStart string) bool {
+	t.Helper()
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	if err != nil {
+		// An unreadable /proc entry is not proof of death. Fail rather than let a
+		// caller record a pass this function did not earn.
+		t.Fatalf("read /proc/%d/stat: %v", pid, err)
+	}
+	// Field 2 is the comm, parenthesised and free to contain spaces and parens, so
+	// the fields after the last ')' start at field 3 and start time is the 20th.
+	line := string(data)
+	commEnd := strings.LastIndex(line, ")")
+	if commEnd < 0 {
+		t.Fatalf("/proc/%d/stat has no comm field: %q", pid, line)
+	}
+	fields := strings.Fields(line[commEnd+1:])
+	if len(fields) < 20 {
+		t.Fatalf("/proc/%d/stat has %d fields after the comm, want at least 20: %q", pid, len(fields), line)
+	}
+	return fields[19] == wantStart
+}
+
+// hostTotals is a reservation picture: memory, vCPU and disk together. The
+// three move on different events — a stop releases compute and keeps the disk,
+// a delete releases all three — so a test that reads one of them can watch the
+// wrong pool and see nothing. All three arrive as JSON numbers, hence float64;
+// the values here are far inside the range a float64 holds exactly, so they
+// compare exactly.
+type hostTotals struct {
+	memMiB  float64
+	vcpu    float64
+	diskMiB float64
+}
+
+func (h hostTotals) String() string {
+	return fmt.Sprintf("%.0f MiB %.0f vcpu %.0f MiB disk", h.memMiB, h.vcpu, h.diskMiB)
+}
+
+// sub returns what moved between two pictures, as freed amounts: positive means
+// the pool got that much back.
+func (h hostTotals) sub(o hostTotals) hostTotals {
+	return hostTotals{memMiB: h.memMiB - o.memMiB, vcpu: h.vcpu - o.vcpu, diskMiB: h.diskMiB - o.diskMiB}
+}
+
+// reservedTotals reads the host's own account of what is charged against its
+// pools right now, out of GET /host/status.
+func (d *m1aDaemon) reservedTotals(t *testing.T) hostTotals {
+	t.Helper()
+	status := d.apiGet(t, "/host/status")
+	capacity, ok := status["capacity"].(map[string]any)
+	if !ok {
+		t.Fatalf("GET /host/status has no capacity block: %v", status)
+	}
+	mem, memOK := capacity["reserved_memory_mib"].(float64)
+	cpu, cpuOK := capacity["reserved_vcpu"].(float64)
+	disk, diskOK := capacity["reserved_disk_mib"].(float64)
+	if !memOK || !cpuOK || !diskOK {
+		t.Fatalf("GET /host/status capacity lacks reserved_memory_mib/reserved_vcpu/reserved_disk_mib: %v", capacity)
+	}
+	return hostTotals{memMiB: mem, vcpu: cpu, diskMiB: disk}
+}
+
+// chargedTotals returns what vmID's reservation charges the host: its memory
+// plus the per-VM host overhead the host says it adds, its vCPU count, and its
+// root and workspace disks summed the way store.CreateVM sums them. Every part
+// comes from the API rather than from this test's create parameters, so a host
+// configured with a different overhead is measured against the number it
+// publishes instead of one this file assumed.
+func (d *m1aDaemon) chargedTotals(t *testing.T, vmID string) hostTotals {
+	t.Helper()
+	vm := d.apiGet(t, "/vms/"+vmID)
+	res, ok := vm["resources"].(map[string]any)
+	if !ok {
+		t.Fatalf("GET /vms/%s has no resources block: %v", vmID, vm)
+	}
+	mem, memOK := res["memory_mib"].(float64)
+	cpu, cpuOK := res["vcpu_count"].(float64)
+	rootDisk, rootOK := res["root_disk_mib"].(float64)
+	wsDisk, wsOK := res["workspace_disk_mib"].(float64)
+	if !memOK || !cpuOK || !rootOK || !wsOK {
+		t.Fatalf("GET /vms/%s resources lacks memory_mib/vcpu_count/root_disk_mib/workspace_disk_mib: %v", vmID, res)
+	}
+	adm, ok := d.apiGet(t, "/host/status")["admission"].(map[string]any)
+	if !ok {
+		t.Fatalf("GET /host/status has no admission block")
+	}
+	overhead, ok := adm["reserve_per_vm_host_overhead_mib"].(float64)
+	if !ok {
+		t.Fatalf("GET /host/status admission lacks reserve_per_vm_host_overhead_mib: %v", adm)
+	}
+	charge := hostTotals{memMiB: mem + overhead, vcpu: cpu, diskMiB: rootDisk + wsDisk}
+	// A VM that charges nothing would make every "the release gave back what it
+	// held" assertion true by arithmetic. Refuse rather than pass on a zero.
+	if charge.memMiB <= 0 || charge.vcpu <= 0 || charge.diskMiB <= 0 {
+		t.Fatalf("vm %s charges %s; a zero charge makes a release assertion vacuous", vmID, charge)
+	}
+	return charge
 }
 
 // lockedRootImageSHA is the root image digest this daemon's lock pins — what
