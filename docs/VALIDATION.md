@@ -1,5 +1,37 @@
 # Specification Package Validation
 
+## Revision 18 (2026-09-05) — M2a live-gate evidence: AT-074 and AT-075 recorded, both partial
+
+Adds one dated HTML comment block to `docs/ACCEPTANCE.md` — "L2 M2a status notes (2026-09-05)" —
+recording what the M2a telemetry gate observed on aibox03: six subtests, six passes, 223.62s,
+one VM for the whole run, evidence committed at `tests/integration/evidence/m2a-gate-aibox03.txt`.
+Gate commit `1b05136`.
+
+Two criteria are claimed and both are marked partial in the block itself. AT-074 covers one
+privilege profile (the host has one) and no egress enforcement or strict mode, neither of which
+M2a ships. AT-075 covers the controller half live; the runner half and "never signal a PID-reused
+unrelated process" are proven at the `internal/jailer` unit seam, and the cgroup half of
+"identity/cgroup evidence" is not implemented at all — identity here is argv plus pid plus
+`/proc/<pid>/stat` field 22.
+
+Two things the run did not settle are recorded as not settled rather than forced. A live ring
+overflow is `INCONCLUSIVE`: 1024 items, drained on host acknowledgement, one producer at one push
+per 10s is ~2.8 hours, and a guestd built to push faster would be a test-only agent shipped into
+the product. The wire path is exercised on every heartbeat and the accounting is unit-covered;
+only the live observation of a non-zero `dropped` is unproven. And the M2a plan's phrase
+"degraded then unavailable" is corrected in the block: `deriveTelemetryHealth` returns `degraded`
+for a stale heartbeat, and `unavailable` needs a non-running VM, an empty current boot, or no
+heartbeat at all — SPEC §952 asks for either, and the gate walks both paths separately.
+
+### Results
+
+- 46 package checks passed (`uv run docs/validation/check.py`, exit 0).
+- All revision-17 results hold. The edit adds one HTML comment block and changes nothing outside
+  it: no acceptance ID added, removed or renumbered, no matrix row changed, no fenced code block
+  opened or closed, `check.py` untouched.
+- The AT-074 and AT-075 matrix rows are unchanged. Their status lives in the comment block, the
+  same place M0, M1a and M1b record theirs.
+
 ## Revision 17 (2026-09-04) — the capacity leak closed, and the acceptance record kept honest
 
 Run after kata `r799` was fixed: the `stopped -> starting` transition now re-acquires the memory and

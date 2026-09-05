@@ -370,9 +370,40 @@ now stages a runner-shaped process — the test binary names no VM.
 
 ### Task 7: The M2a gate on aibox03
 
-- [ ] A live gate: boot a VM, observe heartbeats arriving, kill guestd and watch `telemetry_health` go `degraded` then `unavailable` (§952), restart it and watch a new stream identity appear, force a ring overflow and confirm the drop count is non-zero and reported, restart the daemon and confirm adoption.
-- [ ] Record results in `docs/ACCEPTANCE.md` against real AT IDs. `inconclusive` where the run does not settle it. Never `TESTED_PASS` without an executed run and committed evidence.
-- [ ] Gate needs ~21 GB free — see the `m1a-gate-disk-floor` gotcha; short disk mimics a regression.
+- [x] A live gate: boot a VM, observe heartbeats arriving, kill guestd and watch `telemetry_health` go `degraded` then `unavailable` (§952), restart it and watch a new stream identity appear, force a ring overflow and confirm the drop count is non-zero and reported, restart the daemon and confirm adoption.
+- [x] Record results in `docs/ACCEPTANCE.md` against real AT IDs. `inconclusive` where the run does not settle it. Never `TESTED_PASS` without an executed run and committed evidence.
+- [x] Gate needs ~21 GB free — see the `m1a-gate-disk-floor` gotcha; short disk mimics a regression.
+
+`tests/integration/m2a_gate_test.go`, six subtests, PASS in 223.62s on aibox03 at commit `1b05136`,
+recorded 2026-09-05T18:47:45Z. Evidence at `tests/integration/evidence/m2a-gate-aibox03.txt`;
+acceptance notes in the "L2 M2a status notes (2026-09-05)" block of `docs/ACCEPTANCE.md`;
+`docs/VALIDATION.md` revision 18.
+
+Three rulings, all recorded in the acceptance block and rendered into `gotchas.md`:
+
+**Ruling: the ring-overflow criterion is `inconclusive`, not attempted** — 1024 items drained on
+host acknowledgement with the heartbeat as the ring's sole producer is ~2.8 hours to fill, and a
+guestd built to push faster would be a test-only agent shipped into the product. Cost if wrong: a
+live drop count stays unobserved until M2b registers a real sensor. The wire path (`capacity`,
+`queued`, `dropped` on every heartbeat) is exercised and the accounting is unit-covered, so what
+is unproven is the observation, not the mechanism.
+
+**Ruling: this task's "degraded then unavailable" is the plan overstating** — `unavailable` is not
+reachable by killing guestd on a running VM; `deriveTelemetryHealth` returns `degraded` for a
+stale heartbeat and reserves `unavailable` for a non-running VM, an empty current boot, or no
+heartbeat at all. §952 asks for either, so the gate proves `degraded` from a dead agent and
+`unavailable` from a stopped VM. Cost if wrong: none to the product — the plan text is what was
+imprecise.
+
+**Ruling: AT-075 restarts the one controller rather than racing two** — the first draft booted a
+third VM under a throwaway daemon on a private state dir while the primary was still up, and never
+reached the restart: the launch failed at stage `attached` with "runner exited before attaching:
+exit status 1", and `doRollback` removed the VM state dir with `runner.log` inside it. The exact
+fatal step was not isolated; recovering that log needs a product change outside M2a. What is
+certain is that `allocateSlot` scans only its own state dir, so two live controllers both hand out
+slot 0, and slot drives the jail uid and the guest CID. Cost if wrong: a real two-controller defect
+stays unfound — filed as a follow-up rather than fixed here, since production runs one controller
+and AT-075 names one.
 
 ## Explicitly out of scope
 

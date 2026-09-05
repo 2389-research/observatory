@@ -520,6 +520,99 @@ AT-030: TESTED_PASS.
 
 -->
 
+<!-- L2 M2a status notes (2026-09-05)
+
+M2a live gate: aibox03 bare-metal, Ubuntu 24.04 kernel 6.8, Firecracker v1.16.1, guest kernel
+6.1.186. One PASS run of TestM2aGate (tests/integration/m2a_gate_test.go), invoked as
+`scripts/linux 'env -u GOROOT VMOBS_FIXTURE=1 go test ./tests/integration/ -run TestM2aGate -v
+-count=1 -timeout 25m'`, recorded 2026-09-05T18:47:45Z, 223.62s, six subtests, six passes, zero
+skips. Evidence committed at tests/integration/evidence/m2a-gate-aibox03.txt. Gate commit 1b05136.
+
+One VM for the whole run, deliberately: every subtest below is a fact about the same live guest,
+and the controller restart under AT-075 is a restart of the controller that had been watching it.
+The gate runs with require_authentication: true against a real vmobsd on the real jailer runtime,
+and never as root — every privileged operation goes through the installed vmobs-privd.
+
+Runtime lock unchanged from the M1b note apart from the root image, which M2a re-pinned when the
+rootfs was rebuilt with the telemetry-capable guestd: vmlinux b6067686…, firecracker 2fd01713…,
+jailer 1f3a0c1f…, rootfs 0d970896….
+
+Two criteria are recorded PARTIAL, and the reasons are in the rows. One measurement in the plan
+was recorded INCONCLUSIVE rather than forced: a live ring overflow. The ring holds 1024 items,
+items leave it on host acknowledgement, and in M2a the heartbeat is its only producer
+(internal/guest/telemetry/health.go's Beat is the sole Push call site; no sensor exists until
+M2b), so filling it takes about 2.8 hours with the host deliberately not acknowledging. The wire
+path is exercised on every heartbeat — capacity, queued and dropped all ride the ring block — and
+the drop accounting is unit-covered by internal/guest/telemetry/ring_test.go
+(TestRingDropsOldestAndCounts, TestRingDropCountDoesNotResetOnDrain). Only the live observation
+of a non-zero dropped is unproven, and no row claims it.
+
+The plan text this gate executes said telemetry_health would go "degraded then unavailable" when
+guestd is killed. That is the plan overstating, not the implementation underdelivering:
+deriveTelemetryHealth (internal/situation/telemetry_health.go) returns degraded for a stale
+heartbeat, and unavailable requires a non-running lifecycle state, a running VM with an empty
+current boot, or no heartbeat at all for the boot. SPEC §952 asks for degraded OR unavailable.
+The gate walks both — degraded from a dead agent on a live VM, unavailable from a stopped VM —
+and says so where each is recorded.
+
+AT-074: TESTED_PASS (partial — one privilege profile; no egress enforcement and no strict mode
+  in M2a).
+  Test: m2a_gate_test.go:at074_guestd_stopped_degrades. Stops guestd inside a live guest and
+    watches the host's two health dimensions separately. The stop, the 150s wait and the restart
+    are handed to a transient systemd unit before the terminal dies, because guestd owns the PTY
+    the terminal relay serves — see the gotchas.md entry.
+  Evidence: `host record of the outage: guest.channel_lost reason=read: read control frame: read
+    frame header: EOF after 10s`; `telemetry_health healthy -> degraded after 20s (due at 3 x the
+    agent's 10s interval)`; `observed_state at that moment: "running" (§138: the two dimensions
+    did not fold together)`; `agent restarted on schedule; telemetry_health -> healthy after
+    130s`. The other half of §952 is m2a_gate_test.go:stopped_vm_is_unavailable —
+    `observed_state="stopped" telemetry_health="unavailable"`, with `8 heartbeats across 3 stream
+    identities remain queryable after the stop`.
+  Partial in three named ways. Only the unprivileged profile exists on this host, so "both
+    privilege profiles" is one profile. M2a ships no egress enforcement to maintain and no
+    strict mode to pause or stop within a detection bound; those belong to the network milestone
+    and this row must not be read as covering them. The host-side record of the outage
+    (guest.channel_lost, host_observed) is asserted, but nothing consumes it to change lifecycle
+    state — by design, and the running/degraded pair above is that design working.
+
+AT-075: TESTED_PASS (partial — the controller half is live; the runner half is unit-covered).
+  Test: m2a_gate_test.go:at075_adoption_across_controller_restart. SIGKILLs the controller that
+    owns a running VM — no teardown, so nothing about the outcome was arranged by the dying
+    process — and starts a successor over the same state dir. A killed daemon does not take its
+    VMs with it: exec.CommandContext cancel kills one pid, not the group, and runners are spawned
+    setsid with no parent-death watchdog, so the VMM and the runner both survive into the
+    successor's reconcile.
+  Evidence: `observed_state: "running" -> "running"`; `revision: 3 -> 3 (unchanged: adoption
+    writes no transition)`; `vmm pid 3213676 start "40153658" -> pid 3213676 start "40153658"`;
+    `runner pid 3213681 start "40153668" -> pid 3213681 start "40153668"`; the telemetry stream
+    identities are byte-identical across the restart with 8 heartbeats after it. The successor
+    then stopped and deleted the VM it adopted (stopped_vm_is_unavailable), which is what makes
+    the adoption more than cosmetic.
+  Identity, not liveness, is what the assertions check. Both processes are compared by pid AND
+    /proc/<pid>/stat field 22 together, so a recycled pid cannot pass; the runner comparison is
+    load-bearing in its own right, because reconcileOne also answers "adopted" after respawning a
+    dead runner beside a live VMM, and a test that accepted either outcome would not be measuring
+    §320's claim that a healthy attached runner is adopted as it stands.
+  Partial: the runner-kill half of the criterion is not exercised live. It is unit-covered in
+    internal/jailer — reconcile_adoption_linux_test.go (a live healthy runner is adopted, a dead
+    one is not) and runner_argv_linux_test.go (a pid whose argv names another VM is refused, a
+    zombie's empty argv is no evidence either way, a recycled pid is refused on its start time).
+    "Never signal a PID-reused unrelated process" is therefore proven at the unit seam and not on
+    this host. The cgroup half of "identity/cgroup evidence" is not implemented at all: identity
+    here is argv plus pid plus start time.
+
+An earlier draft of AT-075 booted a second VM under a throwaway daemon on a private state dir
+while the primary controller was still up. It never reached the restart — the launch failed at
+stage attached with "runner exited before attaching: exit status 1" — and the exact fatal step
+was not isolated, because doRollback removes the VM state dir and runner.log with it. Recovering
+that log needs a product change outside M2a's scope. What is certain is that the setup put two
+live controllers on one host, which production never does: allocateSlot (internal/jailer/
+manifest.go) scans only its own state dir, so both handed out slot 0, and slot is what
+uid = JailUIDBase + slot and cid = CIDBase + slot are derived from. The scenario AT-075 names
+needs one controller, which is what the committed test does.
+
+-->
+
 | AT-005 | R-01, R-10 | Inject a failure after every provisioning side effect. Cleanup removes only owned resources and releases reservations or reports a retryable cleanup backlog. |
 | AT-006 | R-01, R-10 | Retry the same create request across a timeout. Exactly the original VM/operation is returned; a changed payload with the same key conflicts. |
 | AT-007 | R-01, R-05 | Verify user jobs cannot start before guestd readiness, workspace seeding, baseline creation and required sensor checks. |

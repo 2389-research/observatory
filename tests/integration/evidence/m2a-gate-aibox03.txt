@@ -1,0 +1,50 @@
+# M2a gate evidence
+# hostname: aibox03
+# date: 2026-09-05T18:47:45Z
+# pid: 3213373
+# paths.runtime: /srv/vmobs
+# paths.state: /tmp/TestM2aGate2124622477/001/state
+# vm: cfd59661-a1e7-4c86-9e97-ed8add46183d
+
+## Subtest: telemetry_arrives
+vm=cfd59661-a1e7-4c86-9e97-ed8add46183d boot_id=6c6c4f66-e48d-49b6-834d-3686a2d05630 (manifest boot_id matches: true)
+kind=guest.sensor_health provenance="guest_reported" sensor="guestd"
+stream identities on this boot: 1 ([a7952d8a-9808-58bf-b8d9-5d3416f2e81b]); source_seq: [1 2]
+ring: capacity=1024 queued=0 dropped="0"
+agent: heartbeat_interval_ns="10000000000" sensors=0 (M2a registers none)
+GET /vms/cfd59661-a1e7-4c86-9e97-ed8add46183d: telemetry_health="healthy" observed_state="running"
+
+## Subtest: at074_guestd_stopped_degrades
+guest command: systemd-run --collect /bin/sh -c 'sleep 5; systemctl stop guestd; sleep 150; systemctl start guestd'
+host record of the outage: guest.channel_lost reason=read: read control frame: read frame header: EOF after 10s
+telemetry_health healthy -> degraded after 20s (due at 3 x the agent's 10s interval)
+observed_state at that moment: "running" (§138: the two dimensions did not fold together)
+agent restarted on schedule; telemetry_health -> healthy after 130s, observed_state "running"
+unavailable is NOT reachable this way and the gate does not claim it: deriveTelemetryHealth returns degraded for a stale heartbeat, and unavailable needs a non-running VM, an empty current boot, or no heartbeat at all for the boot. §952 asks for degraded OR unavailable; stopped_vm_is_unavailable below walks the other one.
+
+## Subtest: guestd_restart_new_stream
+guest command: systemd-run --collect /bin/sh -c 'sleep 3; systemctl restart guestd'
+stream identities before: 2 [a7952d8a-9808-58bf-b8d9-5d3416f2e81b adfa0478-1510-5779-a2b4-9feed09bb2a1]
+stream identities after:  3 [a7952d8a-9808-58bf-b8d9-5d3416f2e81b adfa0478-1510-5779-a2b4-9feed09bb2a1 f5344893-01e4-5e2b-bb01-ea5fa626c9ae]
+new stream f5344893-01e4-5e2b-bb01-ea5fa626c9ae first source_seq="1" (a new agent epoch restarts the guest-owned sequence)
+distinct boot_ids across all heartbeats: 1 (a guestd restart is not a VM boot)
+telemetry_health -> healthy after 0s, observed_state "running"
+
+## Subtest: ring_report_is_on_the_wire
+newest heartbeat ring: capacity=1024 queued=0 dropped="0" (all three fields present on the wire)
+INCONCLUSIVE — a non-zero drop count was not observed live, and this gate does not claim one.
+The ring holds 1024 items and drops the oldest only when full. Items leave it on host acknowledgement, and in M2a the heartbeat is its only producer (health.go's Beat is the sole Push call site; no sensor exists until M2b). At one push per 10s, filling it takes about 2.8 hours with the host deliberately not acknowledging — longer than any gate should run, and a guestd built to push faster would be a test-only agent shipped into the product.
+What is proven instead: the drop count's wire path is exercised on every heartbeat above, and the drop accounting itself is covered by internal/guest/telemetry/ring_test.go (TestRingDropsOldestAndCounts, TestRingDropCountDoesNotResetOnDrain). Only the live observation of a non-zero value is unproven.
+
+## Subtest: at075_adoption_across_controller_restart
+vm=cfd59661-a1e7-4c86-9e97-ed8add46183d primary controller SIGKILLed (no teardown), successor started over the same state dir
+observed_state: "running" -> "running"
+revision: 3 -> 3 (unchanged: adoption writes no transition)
+vmm pid 3213676 start "40153658" -> pid 3213676 start "40153658" (same process, identity checked by both)
+runner pid 3213681 start "40153668" -> pid 3213681 start "40153668" (unchanged: the attached-runner branch ran, not a respawn)
+telemetry stream identities across the restart: [a7952d8a-9808-58bf-b8d9-5d3416f2e81b adfa0478-1510-5779-a2b4-9feed09bb2a1 f5344893-01e4-5e2b-bb01-ea5fa626c9ae] -> [a7952d8a-9808-58bf-b8d9-5d3416f2e81b adfa0478-1510-5779-a2b4-9feed09bb2a1 f5344893-01e4-5e2b-bb01-ea5fa626c9ae] (8 heartbeats after)
+PARTIAL — the runner-kill half of AT-075 is not exercised here; it is unit-covered in internal/jailer (reconcile_adoption_linux_test.go, runner_argv_linux_test.go).
+
+## Subtest: stopped_vm_is_unavailable
+vm=cfd59661-a1e7-4c86-9e97-ed8add46183d observed_state="stopped" telemetry_health="unavailable"
+8 heartbeats across 3 stream identities remain queryable after the stop

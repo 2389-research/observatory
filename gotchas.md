@@ -99,3 +99,80 @@ the launch that staged it (see the boot-images entry) — never from either copy
 Preflight still verifies binaries against the startup parse (kata `f8f2`), so on
 a host repinned without a restart the `preflight` and `images` blocks in one
 `/host/status` response describe two different versions of the same file.
+
+## Killing guestd, and what the host says about it
+
+**Stopping guestd takes the terminal with it, so the only way back is a timer
+the guest sets before it dies.** `guestd.service` owns the PTY the terminal
+relay serves, and systemd's default `KillMode=control-group` kills the shell
+along with the agent; a new terminal cannot be created while the agent that
+would serve it is down. `systemd-run --collect /bin/sh -c 'sleep 5; systemctl
+stop guestd; sleep 150; systemctl start guestd'` hands the whole cycle to
+systemd before the terminal dies. The revive delay is not padding:
+`deriveTelemetryHealth` calls a heartbeat stale after 3 × the 10s interval the
+guest declares, so `degraded` is due ~35s after the stop, and an agent back at
+60s can refresh the heartbeat before the poll observes the transition — a red
+gate reporting the opposite of what happened. Also: `systemctl is-active`
+answers the bare words `active` / `inactive`, so a substring test for
+`"active"` passes on `"inactive"` — tag the answer
+(`| sed 's/^/guestd-state=/'`) to make the two disjoint.
+
+**A dead guestd on a running VM is `degraded`, never `unavailable`.**
+`internal/situation/telemetry_health.go` reaches `unavailable` three ways only
+— a non-running lifecycle state, a running VM with an empty `CurrentBootID`, or
+no heartbeat at all for the current boot — and a stale heartbeat is `degraded`.
+SPEC §952 asks for "degraded/unavailable", so both are in the contract and the
+implementation picks the right one; what overstates is any plan text reading
+"degraded *then* unavailable". Prove `unavailable` from a stopped VM instead.
+Nothing consumes `guest.channel_lost` to change lifecycle state, which is the
+§138 separation working: the VM stays `running` while its telemetry goes
+`degraded`, and both can be asserted in the same breath.
+
+**A live ring overflow is not reachable in a gate.** `telemetryRingCapacity` is
+1024, items leave the ring only on host acknowledgement, and in M2a the
+heartbeat is the ring's *only* producer
+(`internal/guest/telemetry/health.go:165` is the sole `Push` call site; no
+sensor exists until M2b). At one push per 10s that is ~2.8 hours with the host
+deliberately not acknowledging. A guestd built to push faster would be a
+test-only agent shipped into the product, so the honest verdict is
+`inconclusive`: the `ring` block (`capacity`, `queued`, `dropped`) rides every
+heartbeat, so the wire path is exercised, and the drop accounting is
+unit-covered by `TestRingDropsOldestAndCounts` and
+`TestRingDropCountDoesNotResetOnDrain` — only the live observation of a
+non-zero `dropped` is unproven.
+
+## Reproducing a controller restart
+
+**A killed daemon does not take its VMs with it.** `d.cancel()` runs Go's
+default `exec.CommandContext` cancel — `Process.Kill()` on the single pid, not
+the group — and runners are spawned `SysProcAttr{Setsid: true}` with no
+parent-death watchdog in `cmd/vmobs-runner/main.go`. So a SIGKILLed controller
+leaves a live VMM and a live runner, which is exactly the state §320 adoption
+exists for, and a test can reproduce it in-process. Two consequences for the
+harness: the dead handle's VM list points at a dead socket, so it has to be
+moved to the surviving daemon (`adoptVMsFrom`) or teardown logs a refused
+connection and leaks the VM; and adoption of a *healthy* runner is only proven
+by asserting the runner pid is unchanged, since `reconcileOne` also answers
+`adopted` after respawning a dead runner beside a live VMM.
+
+**The successor needs its own daemon *binary* dir.** `startDaemon` copies
+`vmobs-runner` beside the daemon binary with `O_TRUNC`, and the whole point of
+the test is that the dead controller's runner is still executing that file —
+Linux answers `ETXTBSY` when you open a running executable for writing, so a
+shared directory fails the second `startDaemon` outright. Each `buildBinary`
+call answers a fresh temp dir, which is all it takes. The *state* dir is what
+must be shared: the manifests, the spool and the database are what the second
+process inherits, and §320 reconciles from them. `auth.InitStore` refuses a
+store that already exists, so `startDaemon` tolerates `ErrAlreadyInitialized`
+when it is handed an existing state dir — the login right after proves the
+inherited credentials are the ones it was given.
+
+**Do not run two controllers at once to fake a restart.** `allocateSlot`
+(`internal/jailer/manifest.go`) scans only its own `<stateDir>/vms`, so two
+daemons with separate state dirs both hand out slot 0 — and slot is what
+`uid = JailUIDBase + slot` and `cid = CIDBase + slot` are derived from
+(`internal/jailer/launch.go`). A gate built that way failed its second VM at
+stage `attached` with "runner exited before attaching: exit status 1"; the
+exact fatal step was never isolated, because `doRollback` removes the VM state
+dir and `runner.log` with it. Restart the one controller over its own state dir
+instead — that is the scenario AT-075 names anyway.
