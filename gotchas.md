@@ -176,3 +176,40 @@ stage `attached` with "runner exited before attaching: exit status 1"; the
 exact fatal step was never isolated, because `doRollback` removes the VM state
 dir and `runner.log` with it. Restart the one controller over its own state dir
 instead — that is the scenario AT-075 names anyway.
+
+**The privd ledger's fsyncs are no-ops where it actually runs.** The deployed
+ledger directory is `/run/vmobs/privd`, a tmpfs — M1a decision D8 makes that
+deliberate, since VMs never survive a host reboot, so a record that clears at
+reboot is the correct one and §5.5 cold reconcile reads the resulting empty
+ledger. fsync on tmpfs returns success without doing anything, so the barriers
+in `internal/privd/ledger.go` cost nothing and prove nothing about power loss
+on the deployed path; they buy correctness only if `--ledger-dir` is ever
+pointed at a real filesystem. The ownership record that *does* have real
+power-loss durability is the jailer manifest at
+`<paths.state>/vms/<id>/manifest.json` — `paths.state` is `/var/lib/vmobs`,
+real disk, and `doRollback` reads that manifest for its target list. Before
+adding or defending a barrier here, check which filesystem the path lands on:
+`paths.runtime` (/srv/vmobs), `/run` (tmpfs), or `paths.state`.
+
+**A process-crash test proves atomic publication, never durability.** The page
+cache outlives the process, so `TestLedgerSurvivesAProcessCrash` — which kills
+a child mid-write five times and reads back a complete entry each round —
+passes identically with every fsync removed. Only power loss, a kernel panic,
+or a fault-injecting block layer collects on what fsync promises. Name such a
+test for what it proves and say the rest out loud. What a unit suite *can*
+prove: a **0300 directory** permits `CreateTemp` and `Rename` (write+execute)
+and denies `os.Open` for read, which is exactly what `SyncDir` needs, so it
+induces a directory-sync failure on demand — root bypasses the mode bits, so
+those tests skip as root. `internal/durable/file_test.go` mutation-proves six
+of its seven barriers that way; the seventh, the regular-file `Sync()`, has no
+failing test and the suite says so rather than implying coverage. Cost: a file
+`Sync()` on darwin is ~4.7 ms (Go uses `F_FULLFSYNC`), which roughly doubled
+the privd and jailer suite times locally; Linux ext4 is cheaper.
+
+**The manifest has one crash window publication cannot close.** `writeManifest`
+creates `<stateDir>/vms/<id>/` and then publishes `manifest.json` into it, so a
+crash between the two leaves a directory with no record. That state is safe —
+the launch has provisioned nothing else at that point — and `allocateSlot`
+already reads an unreadable manifest as a free slot. Keep it that way: making
+a manifest read error fatal there turns a harmless empty directory into a
+daemon that cannot allocate.
