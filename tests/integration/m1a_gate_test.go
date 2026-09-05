@@ -176,6 +176,22 @@ func (d *m1aDaemon) trackVMID(vmID string) {
 	d.createdVMs = append(d.createdVMs, vmID)
 }
 
+// adoptVMsFrom moves prev's tracked VMs onto this daemon, so teardown asks the
+// process that is still answering. A gate that kills one controller and starts
+// another leaves the first handle's list pointing at a dead socket: its cleanup
+// would log a refused connection and the VM would survive the run — a real leak,
+// since privd releases a VM only when a daemon asks it to.
+func (d *m1aDaemon) adoptVMsFrom(prev *m1aDaemon) {
+	prev.vmMu.Lock()
+	ids := prev.createdVMs
+	prev.createdVMs = nil
+	prev.vmMu.Unlock()
+
+	d.vmMu.Lock()
+	defer d.vmMu.Unlock()
+	d.createdVMs = append(d.createdVMs, ids...)
+}
+
 // daemonOptions collects the knobs a caller may turn on the daemon startDaemon
 // launches. Every zero value reproduces the M1a gate's daemon exactly, so a call
 // site that passes no options gets the config it always had.
@@ -185,6 +201,8 @@ type daemonOptions struct {
 	// client logs in once the daemon answers.
 	operator string
 	password string
+	// stateDir, when set, is Paths.State instead of a fresh temp dir.
+	stateDir string
 }
 
 // daemonOption tunes daemonOptions.
@@ -199,6 +217,20 @@ func withRequiredAuth(username, password string) daemonOption {
 	return func(o *daemonOptions) {
 		o.operator = username
 		o.password = password
+	}
+}
+
+// withStateDir points the daemon at a Paths.State that already exists instead of
+// a fresh one under t.TempDir(). Two daemons over one state dir is the whole of
+// a controller restart: the manifests, the spool and the database are what the
+// second process inherits, and §320 adoption is decided from them.
+//
+// Not combinable with withRequiredAuth as it stands — auth.InitStore would be
+// asked to initialize a store the first daemon already built. No caller needs
+// both, and the gate that reproduces a restart needs no operator identity.
+func withStateDir(dir string) daemonOption {
+	return func(o *daemonOptions) {
+		o.stateDir = dir
 	}
 }
 
@@ -249,7 +281,10 @@ func startDaemon(t *testing.T, repoRoot, daemonBin, runnerBin, label string, opt
 	// diverging from the production layout. m1aSkipChecks already verified both exist
 	// before this function runs, so there is no second Stat here.
 
-	stateDir := filepath.Join(t.TempDir(), "state")
+	stateDir := o.stateDir
+	if stateDir == "" {
+		stateDir = filepath.Join(t.TempDir(), "state")
+	}
 
 	templatesDir := filepath.Join(stateDir, "templates")
 	for _, d := range []string{
@@ -2261,6 +2296,13 @@ type m1aManifest struct {
 	GID    int    `json:"gid"`
 	CID    uint32 `json:"cid"`
 	CIDR   string `json:"cidr"`
+	// The two process identities a restarting controller reconciles from: a pid
+	// alone cannot tell a live process from a recycled one, so each carries the
+	// /proc start time read just after its spawn (SPEC §9.1).
+	VMMPID      int    `json:"vmm_pid,omitempty"`
+	VMMStart    string `json:"vmm_starttime,omitempty"`
+	RunnerPID   int    `json:"runner_pid,omitempty"`
+	RunnerStart string `json:"runner_starttime,omitempty"`
 }
 
 // lockedRootImageSHA is the root image digest this daemon's lock pins — what
