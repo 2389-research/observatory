@@ -73,6 +73,55 @@ func (e *UnavailableError) Error() string {
 	return fmt.Sprintf("runtime unavailable: %s", e.Reason)
 }
 
+// ErrStopNotProven is what Stop and ForceStop return when the VMM they were
+// asked to end could not be observed to die.
+//
+// It exists because every other signal in a stop is a claim rather than an
+// observation. A SignalVM call that returns nil says privd accepted the request,
+// not that the kernel reaped anything -- SIGKILL cannot reap a task in
+// uninterruptible sleep, and a ledger entry privd has lost signals nothing at
+// all. The runner's terminal phase is a claim too: two of the three places that
+// write "finalized" never look at the VMM (internal/runner/runner.go).
+//
+// Callers must not settle a VM on this error. "stopped" with ReleaseCompute
+// hands the VM's memory and vCPU back to admission, which then hands them to
+// another VM while this one is still running on them. Leaving the row at
+// "stopping" costs a retry; releasing the compute of a live microVM costs the
+// host.
+type ErrStopNotProven struct {
+	VMID   string
+	Reason string
+}
+
+func (e *ErrStopNotProven) Error() string {
+	return fmt.Sprintf("stop of %s not proven: %s", e.VMID, e.Reason)
+}
+
+// ErrCleanupPending is what Stop and ForceStop return when the VMM is proven
+// gone and a host resource the stop owns could not be reclaimed.
+//
+// The two halves of a stop settle on different evidence and so deserve
+// different answers. Compute is freed by the process ending, and that has been
+// observed here: the row belongs at "stopped" with its reservation released, or
+// admission holds memory nothing is using until the next restart. Disk and the
+// privileged ledger entry are freed by a call that failed, and that failure is
+// real and has to be recorded -- it used to go to stderr and nowhere else, so
+// the leak was invisible to every surface an operator reads.
+//
+// Callers on the stop path treat it as success carrying a debt: settle the VM
+// and record the cleanup failure beside it. Callers on the delete path must
+// not: a "deleted" row promises every resource is gone, which is a higher bar
+// than a stopped one has to clear.
+type ErrCleanupPending struct {
+	VMID     string
+	Resource string
+	Reason   string
+}
+
+func (e *ErrCleanupPending) Error() string {
+	return fmt.Sprintf("%s stopped, but its %s could not be reclaimed: %s", e.VMID, e.Resource, e.Reason)
+}
+
 // unavailableRuntime implements Runtime by refusing all operations. Every
 // method returns *UnavailableError so callers can errors.As-check the reason.
 type unavailableRuntime struct {

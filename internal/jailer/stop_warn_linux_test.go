@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/2389-research/observatory-v2/internal/runner"
+	"github.com/2389-research/observatory-v2/internal/runtime"
 )
 
 // TestDoStopWarnsOnCtlTransportFailure: when the ctl exchange itself fails the
@@ -39,9 +40,7 @@ func TestDoStopWarnsOnCtlTransportFailure(t *testing.T) {
 	out := captureStderr(t, func() {
 		var err error
 		forced, err = a.doStop(t.Context(), "vm-transport", 30*time.Second, false)
-		if err != nil {
-			t.Errorf("doStop: %v", err)
-		}
+		requireOnlyCleanupDebt(t, err)
 	})
 
 	if !forced {
@@ -79,9 +78,7 @@ func TestDoStopWarnsRunnerRefusalReason(t *testing.T) {
 	out := captureStderr(t, func() {
 		var err error
 		forced, err = a.doStop(t.Context(), "vm-refused", 30*time.Second, false)
-		if err != nil {
-			t.Errorf("doStop: %v", err)
-		}
+		requireOnlyCleanupDebt(t, err)
 	})
 
 	if !forced {
@@ -113,9 +110,8 @@ func TestDoStopWarningsDistinguishTransportFromRefusal(t *testing.T) {
 		a := stopOnlyAdapter(t)
 		writeLiveRunnerManifest(t, a.cfg.StateDir, vmID)
 		out := captureStderr(t, func() {
-			if _, err := a.doStop(t.Context(), vmID, 30*time.Second, false); err != nil {
-				t.Errorf("doStop %s: %v", vmID, err)
-			}
+			_, err := a.doStop(t.Context(), vmID, 30*time.Second, false)
+			requireOnlyCleanupDebt(t, err)
 		})
 		return stopWarnLine(out, vmID)
 	}
@@ -158,9 +154,7 @@ func TestDoStopWarnsOnGracefulPollTimeout(t *testing.T) {
 	out := captureStderr(t, func() {
 		var err error
 		forced, err = a.doStop(ctx, "vm-hung", 30*time.Second, false)
-		if err != nil {
-			t.Errorf("doStop: %v", err)
-		}
+		requireOnlyCleanupDebt(t, err)
 	})
 
 	if !forced {
@@ -229,9 +223,7 @@ func TestDoStopSilentOnSuccessfulGracefulPoll(t *testing.T) {
 	out := captureStderr(t, func() {
 		var err error
 		forced, err = a.doStop(t.Context(), "vm-clean", 30*time.Second, false)
-		if err != nil {
-			t.Errorf("doStop: %v", err)
-		}
+		requireOnlyCleanupDebt(t, err)
 	})
 
 	if forced {
@@ -242,20 +234,33 @@ func TestDoStopSilentOnSuccessfulGracefulPoll(t *testing.T) {
 	}
 }
 
-// stopWarnLine returns the first jailer stop warning mentioning vmID, minus the
-// release-chroot warning every one of these tests provokes by design (the
-// adapter has no privd behind it).
+// stopWarnLine returns the first jailer stop warning mentioning vmID.
 func stopWarnLine(stderr, vmID string) string {
 	for _, line := range strings.Split(stderr, "\n") {
 		if !strings.HasPrefix(line, "jailer: stop: warn:") || !strings.Contains(line, vmID) {
 			continue
 		}
-		if strings.Contains(line, "release jail chroot") {
-			continue
-		}
 		return line
 	}
 	return ""
+}
+
+// requireOnlyCleanupDebt accepts the one error the adapters in this file return
+// by construction and fails on every other.
+//
+// stopOnlyAdapter has no privd server behind it, so the chroot release at the
+// end of a successful stop always fails -- and a stop that ended its VMM and
+// could not reclaim the chroot answers ErrCleanupPending. These tests are about
+// what doStop says on stderr before it gets there, so that one error is the
+// expected shape of a run that reached the end. Treating it as a pass keeps the
+// warning assertions honest without teaching them to ignore real failures: an
+// ErrStopNotProven, or a manifest that would not read, still fails the test.
+func requireOnlyCleanupDebt(t *testing.T, err error) {
+	t.Helper()
+	var pending *runtime.ErrCleanupPending
+	if err != nil && !errors.As(err, &pending) {
+		t.Errorf("doStop: %v", err)
+	}
 }
 
 // captureStderr redirects os.Stderr through a pipe for the duration of fn. The

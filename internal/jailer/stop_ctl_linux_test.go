@@ -76,9 +76,8 @@ func TestDoStopCtlDeadlinePerCommand(t *testing.T) {
 	a := stopOnlyAdapter(t)
 	writeLiveRunnerManifest(t, a.cfg.StateDir, "vm-deadline")
 
-	if _, err := a.doStop(t.Context(), "vm-deadline", grace, false); err != nil {
-		t.Fatalf("doStop: %v", err)
-	}
+	_, err := a.doStop(t.Context(), "vm-deadline", grace, false)
+	requireOnlyCleanupDebt(t, err)
 
 	byCmd := map[string]time.Duration{}
 	for _, c := range calls {
@@ -200,8 +199,8 @@ func silentCtlServer(t *testing.T) string {
 }
 
 // stopOnlyAdapter builds an Adapter with just the fields doStop reads. It has
-// no privd server behind it: releaseVMWhenDead fails and doStop logs and
-// carries on, which is the behaviour under test everywhere else too.
+// no privd server behind it, so a stop that gets as far as reclaiming the jail
+// chroot ends in ErrCleanupPending -- see requireOnlyCleanupDebt.
 func stopOnlyAdapter(t *testing.T) *Adapter {
 	t.Helper()
 	dir := t.TempDir()
@@ -226,8 +225,8 @@ func writeLiveRunnerManifest(t *testing.T, stateDir, vmID string) {
 	}
 }
 
-// unreachablePrivd is a privdClient with no server behind it. doStop's only
-// call into it is ReleaseVM, which it logs and discards by design.
+// unreachablePrivd is a privdClient with no server behind it: every verb fails,
+// which is how these tests reach doStop's failure branches.
 type unreachablePrivd struct{}
 
 func (*unreachablePrivd) AllocateNetwork(context.Context, privd.AllocateNetworkReq) error {

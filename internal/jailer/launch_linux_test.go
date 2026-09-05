@@ -81,6 +81,12 @@ type testRecordingBackend struct {
 	// before this field existed.
 	jailBase string
 
+	// ignoredSignals names the signal kinds this backend accepts and then does
+	// nothing about, which is how a test builds a VMM that survives SIGTERM.
+	// Empty means every signal kills the stand-in process. Set it before the
+	// stop under test; SignalVM reads it on the privd server's goroutine.
+	ignoredSignals map[string]bool
+
 	// sleepProcs tracks spawned sleep processes so tests can kill them.
 	sleepProcs []*sleepProc
 }
@@ -146,6 +152,9 @@ func (b *testRecordingBackend) AbortStartVM(entry privd.VMEntry) error {
 
 func (b *testRecordingBackend) SignalVM(entry privd.VMEntry, kind string) error {
 	b.signalCalls = append(b.signalCalls, fmt.Sprintf("%s/%s", entry.VMID, kind))
+	if b.ignoredSignals[kind] {
+		return nil
+	}
 	if entry.PID > 0 {
 		if p, err := os.FindProcess(entry.PID); err == nil {
 			_ = p.Kill()

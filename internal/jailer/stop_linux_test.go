@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -200,10 +201,8 @@ func TestStopGraceful(t *testing.T) {
 	}
 
 	// No signal_vm should have been called (guest powered off gracefully).
-	for _, call := range backend.signalCalls {
-		if call[:len(vmID)] == vmID {
-			t.Errorf("unexpected signal_vm call: %s", call)
-		}
+	if kinds := signalsFor(backend, vmID); len(kinds) != 0 {
+		t.Errorf("unexpected signal_vm calls: %v", kinds)
 	}
 
 	// Slot+network+manifest must be KEPT (stopped VM can restart).
@@ -212,7 +211,15 @@ func TestStopGraceful(t *testing.T) {
 	}
 }
 
-// TestStopForcedOnIgnoredShutdown: guestd that never acks → forced=true, term then kill.
+// TestStopForcedOnIgnoredShutdown: guestd that never acks → forced=true, and a
+// SIGTERM the VMM actually dies from ends the stop there.
+//
+// The SIGKILL used to go out unconditionally, five seconds after the SIGTERM,
+// on the reasoning that a second signal costs nothing. It does: the pid is
+// reaped by then, so the only thing that signal can reach is whatever the
+// kernel handed the number to next. privd re-checks the identity before
+// signalling, so nothing was ever hurt — but a stop cannot both know the VMM is
+// gone and go on signalling it, and every escalated stop paid the five seconds.
 func TestStopForcedOnIgnoredShutdown(t *testing.T) {
 	adapter, backend, stateDir, _, jailBase := makeStopHarness(t)
 
@@ -233,25 +240,58 @@ func TestStopForcedOnIgnoredShutdown(t *testing.T) {
 		t.Error("Stop: forced=false, want true (guest ignored shutdown)")
 	}
 
-	// Backend must have seen term then kill on this vmID.
-	var gotTerm, gotKill bool
+	kinds := signalsFor(backend, vmID)
+	if len(kinds) != 1 || kinds[0] != "term" {
+		t.Errorf("signals = %v, want [term] only: this backend's VMM dies from the "+
+			"SIGTERM, and a VMM observed gone gets no second signal", kinds)
+	}
+}
+
+// TestStopEscalatesWhenTermIgnored is the other side of the same gate.
+// Firecracker exits on SIGTERM, but a VMM wedged in the kernel does not, and
+// that is the case the escalation exists for: the SIGTERM is not evidence, the
+// process leaving /proc is.
+//
+// The name is short on purpose. This harness puts a vsock socket under
+// t.TempDir(), which contains the test's name, and a unix socket path is capped
+// at 108 bytes -- a longer name fails the launch with "bind: invalid argument"
+// long before anything here is exercised.
+func TestStopEscalatesWhenTermIgnored(t *testing.T) {
+	adapter, backend, stateDir, _, jailBase := makeStopHarness(t)
+	// The backend accepts the SIGTERM and does nothing about it, so the
+	// stand-in VMM is still there when the proof gate looks.
+	backend.ignoredSignals = map[string]bool{"term": true}
+
+	vmID := launchTestVM(t, adapter, stateDir, jailBase, func() {})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	forced, err := adapter.Stop(ctx, vmID, 1*time.Second)
+	if err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if !forced {
+		t.Error("Stop: forced=false, want true")
+	}
+
+	kinds := signalsFor(backend, vmID)
+	if len(kinds) != 2 || kinds[0] != "term" || kinds[1] != "kill" {
+		t.Errorf("signals = %v, want [term kill]: a VMM that survived the SIGTERM "+
+			"must be escalated, not reported stopped", kinds)
+	}
+}
+
+// signalsFor returns the signal kinds the backend recorded for vmID, in order.
+func signalsFor(backend *testRecordingBackend, vmID string) []string {
+	var kinds []string
 	for _, call := range backend.signalCalls {
-		if len(call) >= len(vmID) && call[:len(vmID)] == vmID {
-			suffix := call[len(vmID)+1:]
-			if suffix == "term" {
-				gotTerm = true
-			}
-			if suffix == "kill" {
-				gotKill = true
-			}
+		id, kind, ok := strings.Cut(call, "/")
+		if ok && id == vmID {
+			kinds = append(kinds, kind)
 		}
 	}
-	if !gotTerm {
-		t.Errorf("expected signal_vm term, backend signals: %v", backend.signalCalls)
-	}
-	if !gotKill {
-		t.Errorf("expected signal_vm kill, backend signals: %v", backend.signalCalls)
-	}
+	return kinds
 }
 
 // TestForceStopSendsKill: ForceStop → kill signal, no graceful attempt.
@@ -269,24 +309,8 @@ func TestForceStopSendsKill(t *testing.T) {
 	}
 
 	// Must have seen a kill signal and must NOT have seen a term signal.
-	gotKill := false
-	gotTerm := false
-	for _, call := range backend.signalCalls {
-		if len(call) >= len(vmID) && call[:len(vmID)] == vmID {
-			suffix := call[len(vmID)+1:]
-			if suffix == "kill" {
-				gotKill = true
-			}
-			if suffix == "term" {
-				gotTerm = true
-			}
-		}
-	}
-	if !gotKill {
-		t.Errorf("expected signal_vm kill for ForceStop, backend signals: %v", backend.signalCalls)
-	}
-	if gotTerm {
-		t.Errorf("ForceStop must not send SIGTERM, backend signals: %v", backend.signalCalls)
+	if kinds := signalsFor(backend, vmID); len(kinds) != 1 || kinds[0] != "kill" {
+		t.Errorf("signals = %v, want [kill]: ForceStop skips the graceful path entirely", kinds)
 	}
 }
 
@@ -383,8 +407,15 @@ func TestForceStopReleaseErrNoRetry(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := adapter.ForceStop(ctx, vmID); err != nil {
-		t.Fatalf("ForceStop: %v", err)
+	// The VMM is proven gone and its chroot is not: that is a stop with a debt,
+	// not a failed stop, and the two have to be told apart by the caller.
+	err := adapter.ForceStop(ctx, vmID)
+	var pending *runtime.ErrCleanupPending
+	if !errors.As(err, &pending) {
+		t.Fatalf("ForceStop = %v, want *runtime.ErrCleanupPending", err)
+	}
+	if !strings.Contains(pending.Reason, "permission denied") {
+		t.Errorf("reason = %q, want privd's own refusal", pending.Reason)
 	}
 
 	if refuser.calls != 1 {

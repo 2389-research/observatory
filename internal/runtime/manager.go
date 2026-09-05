@@ -818,6 +818,11 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 		newState string
 		reason   string
 		releaseC bool
+		// debt is the cleanup a stop finished without: the VMM is proven gone
+		// and a host resource it owned is not. It travels to the tail rather
+		// than being recorded here, because it is only worth recording once the
+		// transition it describes has actually landed.
+		debt *ErrCleanupPending
 	)
 
 	// An action states its intent on the first transition it makes, not only on
@@ -961,7 +966,12 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 			tailRevision = nil // pin spent on running/paused→stopping
 		}
 		forced, err := m.rt.Stop(ctx, vmID, grace)
-		if err != nil {
+		// A stop that left cleanup behind is still a stop: the runtime proved
+		// the VMM gone before it said so, which is what the compute release
+		// below rests on. Failing the action instead would park the VM at
+		// "stopping" and hold its memory against admission over a jail
+		// directory nobody is using.
+		if debt = cleanupDebt(err); err != nil && debt == nil {
 			return m.failAction(ctx, vmID, opID, action, &ErrRuntimeOpFailed{VMID: vmID, Op: "stop", Err: err})
 		}
 		if forced {
@@ -991,7 +1001,8 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 			}
 			tailRevision = nil // pin spent on running/paused→stopping
 		}
-		if err := m.rt.ForceStop(ctx, vmID); err != nil {
+		err := m.rt.ForceStop(ctx, vmID)
+		if debt = cleanupDebt(err); err != nil && debt == nil {
 			return m.failAction(ctx, vmID, opID, action, &ErrRuntimeOpFailed{VMID: vmID, Op: "force_stop", Err: err})
 		}
 		newState, reason, releaseC = "stopped", "forced_stop", true
@@ -1020,6 +1031,14 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 	if err != nil {
 		return m.failAction(tailCtx, vmID, opID, action, err)
 	}
+	// The VM is settled; now say what the stop could not clean up. Recorded
+	// after the transition and not before it, so the record never describes a
+	// state the row did not reach. SPEC 5.3 asks for cleanup failures to be
+	// recorded, not only retried -- and the retry here is the next delete, which
+	// runs Release unconditionally.
+	if debt != nil {
+		_ = m.st.RecordCleanupFailure(tailCtx, vmID, newState, debt.Error())
+	}
 	// VM lifecycle hooks: conclude active runs on terminal transitions.
 	switch newState {
 	case "stopped":
@@ -1028,6 +1047,22 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 		m.onVMRunning(tailCtx, vmID)
 	}
 	return m.succeedAction(tailCtx, vmID, opID, action, updVM)
+}
+
+// cleanupDebt reports the pending cleanup an otherwise successful runtime call
+// carried, and nil for every other error.
+//
+// The two answers a stop can give have to be told apart at every call site
+// because they rest on different evidence: the VMM was observed to end, or it
+// was not. Only the second is a failed stop. Merging them either strands the
+// compute of a dead VM behind a jail directory, or settles a row on a VM that
+// is still running.
+func cleanupDebt(err error) *ErrCleanupPending {
+	var pending *ErrCleanupPending
+	if errors.As(err, &pending) {
+		return pending
+	}
+	return nil
 }
 
 // failAction records a failed action on the operation row and reads the VM back.
@@ -1431,12 +1466,21 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 				continue
 			}
 			if m.cfg.AdoptedVMs[vm.VMID] {
-				if err := m.rt.ForceStop(ctx, vm.VMID); err != nil {
-					var ue *UnavailableError
-					if !errors.As(err, &ue) {
-						_ = m.st.RecordCleanupFailure(ctx, vm.VMID, "stopping", err.Error())
-						continue
-					}
+				err := m.rt.ForceStop(ctx, vm.VMID)
+				var ue *UnavailableError
+				switch debt := cleanupDebt(err); {
+				case err == nil, errors.As(err, &ue):
+					// Stopped, or nothing on this host can look. Settle below.
+				case debt != nil:
+					// The VMM is proven gone and something it owned on disk is
+					// not. The row settles all the same, because holding it
+					// would keep a dead VM's memory reserved against admission
+					// until somebody deleted it. The debt is recorded against
+					// the state the row actually reaches.
+					_ = m.st.RecordCleanupFailure(ctx, vm.VMID, "stopped", debt.Error())
+				default:
+					_ = m.st.RecordCleanupFailure(ctx, vm.VMID, "stopping", err.Error())
+					continue
 				}
 			}
 			_, _ = m.st.TransitionVM(ctx, store.TransitionInput{

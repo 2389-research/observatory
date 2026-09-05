@@ -23,6 +23,7 @@ import (
 	"github.com/2389-research/observatory-v2/internal/durable"
 	"github.com/2389-research/observatory-v2/internal/privd"
 	"github.com/2389-research/observatory-v2/internal/runner"
+	"github.com/2389-research/observatory-v2/internal/runtime"
 )
 
 // Concurrency discipline: Stop and Release both hold launchMu while performing
@@ -168,6 +169,82 @@ func runnerAlive(pid int, starttime, vmID string) bool {
 	}
 }
 
+// pidAliveFn is the /proc liveness check the proof gate runs. Production always
+// uses privd.PIDAlive; it is a variable so a test can drive the gate without a
+// process it has to keep alive on the host.
+var pidAliveFn = privd.PIDAlive
+
+// vmmDeathPollInterval is how often the proof gate re-reads /proc. Signals are
+// asynchronous, so a process that is going to die from one normally does so in
+// milliseconds.
+const vmmDeathPollInterval = 50 * time.Millisecond
+
+// vmmProofWindow bounds how long doStop waits for a signalled VMM to be reaped
+// before reporting the stop unproven. It is the same 10s budget the signal and
+// release calls get, for the same reason: doStop holds launchMu, so every launch,
+// stop and release on the host queues behind whatever it is waiting for.
+const vmmProofWindow = 10 * time.Second
+
+// vmmTermWindow is how long a SIGTERM gets to land before the stop escalates to
+// SIGKILL. Firecracker exits on SIGTERM, so this normally ends in milliseconds.
+const vmmTermWindow = 5 * time.Second
+
+// vmmProvenGone reports whether the VMM this manifest names is gone, and says
+// what it observed either way.
+//
+// Only proof returns true. That is the asymmetry the whole stop path rests on:
+// calling a live VMM dead releases its memory to admission and invites a second
+// VM onto it, while calling a dead one alive costs a retry.
+//
+// A pid with no recorded start time is the trap this function exists to close.
+// privd.PIDAlive compares /proc/<pid>/stat field 22 against the recorded value,
+// and an empty recorded value matches nothing -- so it answers false for a
+// perfectly healthy VMM. Reading that as death would be proof extracted from an
+// absence of evidence. The pid's absence from /proc is still proof, because
+// nothing at all is running there; its presence is not, because there is no
+// identity to check what is running there against.
+func vmmProvenGone(m Manifest) (bool, string) {
+	switch {
+	case m.VMMPID <= 0:
+		return true, "manifest records no vmm pid, so there is no process to end"
+	case m.VMMStart == "":
+		if _, err := os.Stat(fmt.Sprintf("/proc/%d", m.VMMPID)); os.IsNotExist(err) {
+			return true, fmt.Sprintf("no process at pid %d (manifest records no vmm start time)", m.VMMPID)
+		}
+		return false, fmt.Sprintf("pid %d exists and the manifest records no vmm start time to identify it by", m.VMMPID)
+	case pidAliveFn(m.VMMPID, m.VMMStart):
+		return false, fmt.Sprintf("vmm pid %d start time %s is alive", m.VMMPID, m.VMMStart)
+	default:
+		return true, fmt.Sprintf("vmm pid %d start time %s is gone", m.VMMPID, m.VMMStart)
+	}
+}
+
+// awaitVMMGone polls vmmProvenGone until it proves the VMM gone, the window
+// closes, or ctx ends. It returns the last thing it observed, which is the
+// reason a stop that never got its proof reports.
+func awaitVMMGone(ctx context.Context, m Manifest, window time.Duration) (bool, string) {
+	gone, detail := vmmProvenGone(m)
+	if gone {
+		return true, detail
+	}
+	deadline := time.NewTimer(window)
+	defer deadline.Stop()
+	ticker := time.NewTicker(vmmDeathPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return false, detail
+		case <-deadline.C:
+			return false, detail
+		case <-ticker.C:
+			if gone, detail = vmmProvenGone(m); gone {
+				return true, detail
+			}
+		}
+	}
+}
+
 // runnerNamesVM asks the process at pid which VM it is running, and says when it
 // has no answer rather than guessing one.
 //
@@ -220,9 +297,14 @@ func readRunnerStart(pid int) string {
 //  1. Read manifest + runner state.
 //  2. If runner is alive and in attached phase: send shutdown_guest via ctl;
 //     poll for vmm_exited/finalized within grace period → forced=false.
-//  3. On timeout or ctl failure: SIGTERM, 5s, SIGKILL → forced=true.
-//  4. Always: ctl finalize (tolerate dead runner), ReleaseVM (chroot removed).
-//  5. KEEP slot + network + manifest (stopped VM can restart; Launch reuses them).
+//  3. On timeout, ctl failure, or a terminal phase over a VMM /proc still shows
+//     alive: SIGTERM, wait for it to land, SIGKILL if it did not → forced=true.
+//  4. Prove the VMM is gone. Without that proof the stop returns
+//     *runtime.ErrStopNotProven and steps 5-6 do not run at all.
+//  5. ctl finalize (tolerate dead runner), ReleaseVM (chroot removed). A failed
+//     release returns *runtime.ErrCleanupPending: the VM stopped, the chroot did
+//     not go with it.
+//  6. KEEP slot + network + manifest (stopped VM can restart; Launch reuses them).
 func (a *Adapter) Stop(ctx context.Context, vmID string, grace time.Duration) (bool, error) {
 	// Serialise with Launch on the same vmID (see concurrency discipline above).
 	a.launchMu.Lock()
@@ -310,21 +392,75 @@ func (a *Adapter) doStop(ctx context.Context, vmID string, grace time.Duration, 
 		// If ctl failed or grace expired: fall through to forced path.
 	}
 
+	// The runner's phase is its claim about the VMM; the manifest's pid is the
+	// fact. They part company on a path that really happens: onFinalize answers
+	// the finalize ctl command without looking at anything, and cleanExit writes
+	// "finalized" on any runner error exit (internal/runner/runner.go), so a
+	// guest that breaks the channel just after acking the shutdown reaches a
+	// terminal phase with its VMM untouched. Reading the phase as a completed
+	// stop sent no signal at all and released the chroot of a running microVM.
+	if graceful {
+		if gone, detail := vmmProvenGone(m); !gone {
+			graceful = false
+			fmt.Fprintf(os.Stderr,
+				"jailer: stop: warn: runner reported a terminal phase for %s but %s; escalating to a forced stop\n",
+				vmID, detail)
+		}
+	}
+
+	var signalErrs []string
 	if !graceful {
 		forced = true
 		if m.VMMPID > 0 {
-			signalCtx, signalCancel := context.WithTimeout(ctx, 10*time.Second)
-			defer signalCancel()
-			// ForceStop goes straight to SIGKILL; graceful-timeout path sends SIGTERM first.
-			if !forceImmediate {
-				_ = a.pc.SignalVM(signalCtx, privd.SignalVMReq{VMID: vmID, Kind: "term"})
-				select {
-				case <-time.After(5 * time.Second):
-				case <-ctx.Done():
+			// ForceStop goes straight to SIGKILL; the graceful-timeout path sends
+			// SIGTERM first. Both results are kept: privd refusing a signal is the
+			// whole explanation of why nothing died, and discarding it left an
+			// operator with an unproven stop and no reason for it.
+			//
+			// Each call gets its own budget rather than sharing one across the
+			// pair, because the wait between them can spend nearly all of a
+			// shared allotment and leave the SIGKILL with the remainder.
+			signal := func(kind string) {
+				sigCtx, cancel := context.WithTimeout(ctx, vmmProofWindow)
+				defer cancel()
+				if err := a.pc.SignalVM(sigCtx, privd.SignalVMReq{VMID: vmID, Kind: kind}); err != nil {
+					signalErrs = append(signalErrs, fmt.Sprintf("%s: %v", kind, err))
 				}
 			}
-			_ = a.pc.SignalVM(signalCtx, privd.SignalVMReq{VMID: vmID, Kind: "kill"})
+			gone := false
+			if !forceImmediate {
+				signal("term")
+				// Wait for the SIGTERM to land instead of for a fixed five seconds.
+				// Firecracker exits on SIGTERM, so this normally ends in
+				// milliseconds -- and a VMM observed gone gets no SIGKILL, because
+				// the only thing a signal to a reaped pid can reach is whatever the
+				// kernel handed that pid to next.
+				gone, _ = awaitVMMGone(ctx, m, vmmTermWindow)
+			}
+			if !gone {
+				signal("kill")
+			}
 		}
+	}
+
+	// The proof gate. Everything above it is a request; this is the only place
+	// doStop learns whether the VM ended, and nothing downstream may read
+	// "stopped" without it. The wait is real work rather than a formality:
+	// signals are asynchronous, and SIGKILL cannot reap a task in
+	// uninterruptible sleep at all.
+	//
+	// Returning here skips both the finalize and the release on purpose. The
+	// runner still has a VMM to supervise, and privd refuses to remove the
+	// chroot of a live process anyway (internal/privd/server.go) -- so the
+	// retry loop below would spend the whole release deadline collecting the
+	// same refusal.
+	gone, detail := awaitVMMGone(ctx, m, vmmProofWindow)
+	if !gone {
+		reason := detail
+		if len(signalErrs) > 0 {
+			reason += " (" + strings.Join(signalErrs, "; ") + ")"
+		}
+		return forced, &runtime.ErrStopNotProven{VMID: vmID, Reason: reason}
 	}
 
 	// Always send finalize to the runner (tolerate dead/missing runner socket).
@@ -333,32 +469,28 @@ func (a *Adapter) doStop(ctx context.Context, vmID string, grace time.Duration, 
 	// Release the jail chroot dir (privd removes <JailBase>/firecracker/<id>).
 	// Keep network + slot + manifest: a stopped VM can be restarted.
 	//
-	// The error is logged and then discarded on purpose, and what the discard
-	// costs is worth stating plainly: doStop does not know the VM is dead. The
-	// graceful poll above is the only path that observes the VMM exit. On the
-	// forced path SignalVM's errors are dropped and forced is set unconditionally,
-	// and SIGKILL cannot reap a task in uninterruptible sleep -- privd then answers
-	// invalid_state "vm process is still alive" for the whole retry window. So this
-	// stop may not have stopped anything, and doAction still writes "stopped" with
-	// ReleaseCompute, handing the VM's RAM back to admission while the process runs.
+	// A failure here is not a failed stop, and it is not a silent one either.
+	// The VMM is proven gone, so the compute is genuinely free and the row
+	// belongs at "stopped": returning a plain error would route the operation
+	// into failAction, park the VM at "stopping" and hold its memory against
+	// admission over a jail directory. The debt is real all the same --
+	// <JailBase>/firecracker/<vmID> and a pinned privd ledger entry survive, and
+	// allocateSlot goes on counting the manifest against MaxSlots. This is what
+	// used to go to stderr and nowhere else, leaving the leak invisible to every
+	// surface an operator reads.
 	//
-	// It is recorded that way because the alternative is worse. Any error returned
-	// here reaches Manager.doAction, which routes it into failAction: the operation
-	// is recorded failed and the VM row is left in "stopping". Every release
-	// failure that says nothing about the VM's liveness -- privd unreachable,
-	// exec_failed on the jail dir -- would then produce a wrong verdict on a VM
-	// that really did stop. A false "failed" on a dead VM is worse than a leak on a
-	// live one, so the verdict stands and the error goes to stderr instead, where
-	// the daemon log and savePostmortem will carry it. What is left behind when it
-	// fires: <JailBase>/firecracker/<vmID>, a pinned privd ledger entry, and
-	// possibly a running VM behind a "stopped" row. Settling those needs a cleanup
-	// backlog, which is M1b work.
+	// ErrCleanupPending carries both facts together: the stop succeeded, and
+	// this is what it left behind. The stop path settles the VM and records the
+	// debt beside it; the delete path takes it as a failure, because a "deleted"
+	// row promises more than a stopped one has to.
 	releaseCtx, releaseCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer releaseCancel()
 	if err := a.releaseVMWhenDead(releaseCtx, vmID); err != nil {
-		fmt.Fprintf(os.Stderr,
-			"jailer: stop: warn: release jail chroot for %s: %v; chroot and privd ledger entry retained, and the VM may still be running\n",
-			vmID, err)
+		return forced, &runtime.ErrCleanupPending{
+			VMID:     vmID,
+			Resource: "jail chroot",
+			Reason:   err.Error(),
+		}
 	}
 
 	return forced, nil
