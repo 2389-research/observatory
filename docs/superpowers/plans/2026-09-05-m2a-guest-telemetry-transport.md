@@ -69,7 +69,8 @@ The payoff for (3) is idempotence across a reconnect. The store already dedups o
 **New**
 - `internal/guest/proto/telemetry.go` — telemetry frame types and the port constant.
 - `internal/guest/telemetry/ring.go` — the guest's bounded ring with an explicit drop counter.
-- `internal/guest/telemetry/sensors.go` — the sensor registry the heartbeat renders; empty in M2a.
+- `internal/guest/telemetry/health.go` — the sensor registry and the heartbeat producer; the registry is empty in M2a.
+- `internal/guest/telemetry.go` — the guest's third listener: handshake, drain loop, ack reader, heartbeat ticker.
 - `internal/runner/telemetry.go` — the host half: dialer, instance-id assignment, seq validation, stamping, spool.
 - `internal/situation/telemetry_health.go` — `telemetry_health` derivation from heartbeat age and sensor states.
 
@@ -92,11 +93,14 @@ Port **10001**. guestd listens, runner dials, same as 10000 and 10002.
 
 ```text
 runner -> guest   hello       { protocol_version, vm_id, boot_id, source_instance, auth_proof }
-guest  -> runner  hello_ack   { accepted, reason, telemetry_instance_id, resume_after_seq }
+guest  -> runner  hello_ack   { accepted, reason, telemetry_instance_id }
 ```
 
 - `telemetry_instance_id` is echoed by the guest but **chosen by the runner** and carried in `Hello`; the guest stores it and stamps nothing with it. If the echo disagrees with what the runner sent, the runner closes the connection and reports `telemetry.integrity_failure`.
-- `resume_after_seq` is the guest's report of the highest seq it believes the host accepted, a decimal string. Advisory only — the runner does not trust it and the store's dedup is the real defence.
+
+**Acknowledgements.** After the handshake the host sends `telemetry.ack` — `{ "through_seq": "41" }` — the only frame travelling host to guest on this port. It is cumulative: acking 41 releases 1 through 41 from the guest's ring. The runner sends it after the spool append returns, because the spool is the host's durable boundary.
+
+The guest forgets an event when it is acknowledged, never when a write to the socket returned. A write that returned proves the bytes reached a kernel buffer, which is no evidence the host kept them; releasing there loses every in-flight event on a broken connection and counts nothing. So a reconnect re-sends everything unacknowledged and the store's dedup absorbs the duplicates, while a host that stops acking makes the bounded ring drop — and count — instead.
 
 **Push frames.** One direction, guest to host, riding the existing `FrameControl` path (`proto.WriteControl` / `proto.ReadControl`) with kind `telemetry.push`. Not a second framing: `ReadFrame` already validates a hostile length *before* allocating, which is exactly what a port fed by an untrusted guest needs, and the 1 MiB ceiling it enforces is one the same guest already reaches on port 10000. The telemetry layer caps the decoded payload at 64 KiB on top of that.
 
@@ -112,8 +116,8 @@ guest  -> runner  hello_ack   { accepted, reason, telemetry_instance_id, resume_
 
 ```json
 {
-  "agent":   { "version": "...", "started_at": "...", "uptime_ns": "..." },
-  "ring":    { "capacity": 4096, "queued": 0, "dropped": "0" },
+  "agent":   { "version": "...", "started_at": "...", "uptime_ns": "...", "heartbeat_interval_ns": "..." },
+  "ring":    { "capacity": 1024, "queued": 0, "dropped": "0" },
   "sensors": []
 }
 ```
@@ -138,11 +142,15 @@ Each sensor entry, once M2b/M2c add one:
 
 ### Task 2: The guest's bounded ring, sensor registry, and third listener
 
-- [ ] `internal/guest/telemetry/ring.go`: fixed-capacity ring, drop-oldest, `dropped` as a decimal-string counter that never resets while the agent lives.
-- [ ] `internal/guest/telemetry/sensors.go`: a registry rendering the `sensors` array. Empty in M2a — no task may register a placeholder.
-- [ ] guestd emits a heartbeat on a fixed interval into the ring, and drains the ring to the connection when one is open.
-- [ ] `cmd/vmobs-guestd/main.go`: `--telemetry-port` (default 10001), a third `vsock.Listen`, `ServeTelemetry` started the way `ServeStreams` already is — a failure to listen degrades that port only and never takes down control.
-- [ ] Tests: a full ring drops oldest and counts; the counter is a decimal string past 2^53; a heartbeat with no sensors renders `"sensors": []` not `null`; a closed connection leaves the ring filling rather than blocking the heartbeat.
+- [x] `internal/guest/telemetry/ring.go`: fixed-capacity ring, drop-oldest, `dropped` as a decimal-string counter that never resets while the agent lives. Capacity 1024 — a heartbeat is a few hundred bytes, so a full ring stays under a megabyte in a small guest, and it holds hours of heartbeats across a host outage. A sensor firehose gets its own number, measured rather than guessed.
+- [x] `internal/guest/telemetry/health.go`: the sensor registry rendering the `sensors` array, and the `Reporter` that turns registry plus ring stats into a heartbeat. Empty in M2a — no task registers a placeholder.
+- [x] `internal/guest/telemetry.go`: `ServeTelemetry`, the drain loop, the ack reader, and `RunHeartbeat`.
+- [x] `cmd/vmobs-guestd/main.go`: `--telemetry-port` (default 10001), a third `vsock.Listen`, `ServeTelemetry` started the way `ServeStreams` already is — a failure to listen degrades that port only and never takes down control, and the heartbeat runs either way.
+- [x] Tests: a full ring drops oldest and counts; the counter is a decimal string past 2^53; a heartbeat with no sensors renders `"sensors": []` not `null`; a closed connection leaves the ring filling rather than blocking the heartbeat; a wrong token is refused on 10001; the ack echoes the host's assigned id; an unacknowledged event comes back on the next connection under the same seq; an acknowledged one does not.
+- **Ruling: the ack releases the item, not the write.** The plan said "the sender writes what it peeks and pops once the write returned". That is wrong in a way that matters: a successful write means the bytes are in a kernel buffer, so a connection that dies in flight loses events and counts nothing — the silent loss §507 forbids, in the transport whose whole job is carrying evidence. The guest now holds what it sent, rewinds on reconnect, and drops only at the bound where the drop is counted. Cost if wrong: one extra frame kind, a reader goroutine, and duplicates on every reconnect that the store's dedup already absorbs.
+- **Ruling: the guest reports its heartbeat interval.** A staleness threshold hardcoded on the host silently becomes wrong the day the guest's interval changes, and the two live in different binaries with different release cadences. `agent.heartbeat_interval_ns` rides every beat and Task 5 derives from it. Cost if wrong: one more field a guest could lie about, which is bounded by Task 5 clamping it.
+- **Ruling: `agent.version` reports the protocol version.** Nothing stamps a build id into `vmobs-guestd` — no ldflags, no build info — so `vmobs-guestd/proto-1` is the only version fact the binary actually knows. Cost if wrong: the field is uninformative until a build stamp exists, which beats inventing one.
+- Eight mutation proofs, all killed with verified clean reverts: drop-newest instead of drop-oldest; the drop counter removed; release-on-write instead of release-on-ack; an exact-match ack instead of a cumulative one; a `Rewind` that does not rewind; the telemetry port skipping authentication; the guest naming the stream instead of echoing the host; `sensors` rendered as `null` when empty.
 
 ### Task 3: The runner's telemetry loop — assign, validate, stamp, spool
 
