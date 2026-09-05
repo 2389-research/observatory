@@ -587,6 +587,16 @@ func (s *Server) resourceOwner(w http.ResponseWriter, r *http.Request, fetchedOw
 
 // --- handlers ---
 
+// wireHostImages is /host/status's images block. Either the entries or the
+// error is set, never both and never neither: the block exists only when there
+// is a lock to describe, and describing one it could not read as an absence
+// would be the same block a host with no lock at all serves.
+type wireHostImages struct {
+	GuestKernel *lock.GuestKernelEntry `json:"guest_kernel,omitempty"`
+	RootImage   *lock.RootImageEntry   `json:"root_image,omitempty"`
+	Error       string                 `json:"error,omitempty"`
+}
+
 func (s *Server) handleHostStatus(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -679,17 +689,23 @@ func (s *Server) handleHostStatus(w http.ResponseWriter, r *http.Request) {
 		"stop_grace_seconds":    def.StopGraceSeconds,
 	}
 
-	// Images: the kernel and root image this host stages, straight from
-	// runtime.lock.json. These are the digests doStage verifies the staged bytes
-	// against on every launch (internal/jailer/launch.go), so this is the running
-	// system describing itself from the source it executes (R-17), not a second
-	// declaration of it — the template manifest used to carry image paths nothing
-	// read, and they were retired for exactly that reason. Host scope: it is what
-	// a launch would stage now, not a record of what any particular VM booted.
+	// Images: the kernel and root image this host stages, read from
+	// runtime.lock.json when this request arrives. These are the digests doStage
+	// verifies the staged bytes against on every launch
+	// (internal/jailer/launch.go), so this is the running system describing
+	// itself from the source it executes (R-17), not a second declaration of it —
+	// the template manifest used to carry image paths nothing read, and they were
+	// retired for exactly that reason. Host scope: what a launch would stage now,
+	// not a record of what any particular VM booted; that answer is on the VM row.
 	// Omitted entirely when no lock is configured, for the same reason preflight
 	// is: an empty block claims "nothing is pinned", which is a different fact.
-	if lk := s.manager.RuntimeLock(); lk != nil {
-		resp["images"] = lk.Images()
+	// A lock that is configured but unreadable is a third fact and says so.
+	staged, stagedErr := s.manager.StagedImages()
+	switch {
+	case stagedErr != nil:
+		resp["images"] = wireHostImages{Error: stagedErr.Error()}
+	case staged != nil:
+		resp["images"] = wireHostImages{GuestKernel: &staged.GuestKernel, RootImage: &staged.RootImage}
 	}
 
 	// Preflight block: present only when the hook is wired. Never an empty fake block.

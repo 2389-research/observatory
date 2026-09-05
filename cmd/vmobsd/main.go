@@ -177,16 +177,16 @@ func verifyRuntimeLock(lockPath string, logger *slog.Logger) error {
 }
 
 // managerConfig builds the lifecycle manager's config from the daemon config.
-// Lock must be the same lock preflight was handed: the doctor reports on the
-// pins and /host/status publishes the images they name, and a host where those
-// two disagree is describing a system nobody is running.
-func managerConfig(cfg *config.Config, tpls map[string]runtime.Template, host runtime.HostResources, pfLock *lock.Lock) runtime.ManagerConfig {
+// LockPath must be the same path the jailer adapter stages from
+// (runtime_linux.go): /host/status publishes what a launch would stage, and it
+// can only be right about that by reading the file the launch reads.
+func managerConfig(cfg *config.Config, tpls map[string]runtime.Template, host runtime.HostResources) runtime.ManagerConfig {
 	return runtime.ManagerConfig{
 		Admission:  cfg.Admission,
 		VMDefaults: cfg.VMDefaults,
 		Templates:  tpls,
 		Host:       host,
-		Lock:       pfLock,
+		LockPath:   cfg.Runtime.LockFile,
 	}
 }
 
@@ -325,7 +325,7 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready f
 		})
 	}
 
-	mgr, err := runtime.NewManager(st, rt, managerConfig(cfg, tpls, host, pfLock))
+	mgr, err := runtime.NewManager(st, rt, managerConfig(cfg, tpls, host))
 	if err != nil {
 		return fmt.Errorf("create lifecycle manager: %w", err)
 	}

@@ -128,18 +128,34 @@ type ManagerConfig struct {
 	Templates  map[string]Template
 	Host       HostResources
 
-	// Lock is the parsed runtime.lock.json, or nil when this daemon has none.
-	// The manager does not act on it — the jailer loads the lock itself at stage
-	// time — it holds it so the API can publish what this host stages without
-	// re-reading the file behind the runtime's back.
-	Lock *lock.Lock
+	// LockPath is the path to runtime.lock.json, or "" when this daemon has none.
+	// A path and not a parsed lock: the jailer re-reads this same file on every
+	// launch, so a copy parsed once at startup describes a pin that may no longer
+	// be the one the next launch stages from.
+	LockPath string
 }
 
-// RuntimeLock returns the pinned runtime artifacts, or nil when no lock is
-// configured. Nil is an answer: a daemon with no lock cannot say what it would
-// boot, and /host/status omits the block rather than serving an empty one.
-func (m *Manager) RuntimeLock() *lock.Lock {
-	return m.cfg.Lock
+// StagedImages returns the kernel and root image a launch would stage now, read
+// from runtime.lock.json at call time. Three answers, all distinct: (nil, nil)
+// when no lock is configured, (nil, err) when one is configured and unreadable,
+// and the entries otherwise.
+//
+// Read now rather than held from startup because the jailer's doStage calls
+// lock.Load on every launch (internal/jailer/launch.go). Whoever edits the file
+// changes what the next launch stages without restarting anything, so the file
+// is the answer and a startup copy of it is only a record of an earlier one.
+// This reads the pins; it does not verify the artifacts against them — that
+// hashes a multi-gigabyte root image, and preflight owns the question.
+func (m *Manager) StagedImages() (*lock.Images, error) {
+	if m.cfg.LockPath == "" {
+		return nil, nil
+	}
+	lk, err := lock.Load(m.cfg.LockPath)
+	if err != nil {
+		return nil, err
+	}
+	img := lk.Images()
+	return &img, nil
 }
 
 // Manager is the single lifecycle authority. It owns a bounded worker pool for

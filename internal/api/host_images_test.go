@@ -1,9 +1,11 @@
-// ABOUTME: GET /host/status publishes the kernel and root image this host stages, read
-// ABOUTME: from runtime.lock.json — the pins doStage verifies every launch against.
+// ABOUTME: GET /host/status publishes the kernel and root image this host would stage,
+// ABOUTME: read from runtime.lock.json per request — the file doStage reads every launch.
 package api_test
 
 import (
 	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/2389-research/observatory-v2/internal/lock"
@@ -101,6 +103,88 @@ func TestHostStatusOmitsImagesWithoutALock(t *testing.T) {
 	if _, present := status["images"]; present {
 		t.Errorf("host/status serves an images block with no lock behind it: %v", status["images"])
 	}
+}
+
+// TestHostStatusFollowsARepinnedLock is what this block promises. The jailer's
+// doStage calls lock.Load on every launch, so editing runtime.lock.json changes
+// what the next launch stages without restarting anything. A daemon answering
+// from a copy parsed at startup would keep describing the old pins — true of
+// nothing, since no VM has booted them and none will.
+func TestHostStatusFollowsARepinnedLock(t *testing.T) {
+	lockPath := filepath.Join(t.TempDir(), "runtime.lock.json")
+	writeLockFile(t, lockPath, testImageLock())
+	srv, _, _ := newTemplateServerLockAt(t, lockPath)
+
+	var before map[string]any
+	getJSON(t, srv.URL+"/api/v1/host/status", http.StatusOK, &before)
+	if got := rootSHAOf(t, before); got != testImageLock().RootImage.SHA256 {
+		t.Fatalf("host/status root sha = %q, want the pinned %q", got, testImageLock().RootImage.SHA256)
+	}
+
+	// The operator repins. The daemon keeps serving; the next launch will stage
+	// these bytes, so this is now the answer.
+	repinned := testImageLock()
+	repinned.RootImage.SHA256 = "5555555555555555555555555555555555555555555555555555555555555555"
+	repinned.GuestKernel.Version = "6.1.140"
+	writeLockFile(t, lockPath, repinned)
+
+	var after map[string]any
+	getJSON(t, srv.URL+"/api/v1/host/status", http.StatusOK, &after)
+	if got := rootSHAOf(t, after); got != repinned.RootImage.SHA256 {
+		t.Errorf("host/status root sha = %q after a repin, want the repinned %q", got, repinned.RootImage.SHA256)
+	}
+	images, _ := after["images"].(map[string]any)
+	kernel, _ := images["guest_kernel"].(map[string]any)
+	if got, _ := kernel["version"].(string); got != repinned.GuestKernel.Version {
+		t.Errorf("host/status kernel version = %q after a repin, want %q", got, repinned.GuestKernel.Version)
+	}
+}
+
+// TestHostStatusReportsALockItCannotRead: reading the file per request means the
+// read can fail after the daemon started. Omitting the block would answer with
+// the one a host that has no lock at all serves, and this host does have one —
+// it is pinned to something nobody can read, which is a launch that is going to
+// fail, not a host that never pinned anything.
+func TestHostStatusReportsALockItCannotRead(t *testing.T) {
+	lockPath := filepath.Join(t.TempDir(), "runtime.lock.json")
+	writeLockFile(t, lockPath, testImageLock())
+	srv, _, _ := newTemplateServerLockAt(t, lockPath)
+
+	if err := os.WriteFile(lockPath, []byte("{ this is not json"), 0o644); err != nil {
+		t.Fatalf("corrupt lock file: %v", err)
+	}
+
+	var status map[string]any
+	getJSON(t, srv.URL+"/api/v1/host/status", http.StatusOK, &status)
+
+	images, ok := status["images"].(map[string]any)
+	if !ok {
+		t.Fatalf("host/status dropped the images block for an unreadable lock, which is what no lock looks like; keys = %v", keysOf(status))
+	}
+	if msg, _ := images["error"].(string); msg == "" {
+		t.Errorf("images block carries no error for an unreadable lock: %v", images)
+	}
+	if _, present := images["guest_kernel"]; present {
+		t.Errorf("images block names a kernel it could not read: %v", images)
+	}
+	if _, present := images["root_image"]; present {
+		t.Errorf("images block names a root image it could not read: %v", images)
+	}
+}
+
+// rootSHAOf digs images.root_image.sha256 out of a /host/status body.
+func rootSHAOf(t *testing.T, status map[string]any) string {
+	t.Helper()
+	images, ok := status["images"].(map[string]any)
+	if !ok {
+		t.Fatalf("host/status has no images block; keys = %v", keysOf(status))
+	}
+	root, ok := images["root_image"].(map[string]any)
+	if !ok {
+		t.Fatalf("images has no root_image block; keys = %v", keysOf(images))
+	}
+	sha, _ := root["sha256"].(string)
+	return sha
 }
 
 func keysOf(m map[string]any) []string {
