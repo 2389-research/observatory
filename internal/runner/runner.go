@@ -175,8 +175,25 @@ func (r *runner) run(ctx context.Context) error {
 	vmmGone := make(chan struct{})
 	go r.watchVMM(ctx, vmmGone)
 
+	// Telemetry runs beside the supervision loop on its own connection and its
+	// own schedule. It stops when the supervision loop returns, so a runner
+	// that has finished never leaves a reader on a dead guest.
+	telemetryCtx, stopTelemetry := context.WithCancel(ctx)
+	defer stopTelemetry()
+	telemetryDone := make(chan struct{})
+	go func() {
+		defer close(telemetryDone)
+		r.telemetryLoop(telemetryCtx)
+	}()
+
 	// Run the supervision loop.
 	runErr := r.supervisionLoop(ctx, vmmGone)
+
+	// Stop telemetry and wait for it before closing the spool: the end marker
+	// must be the last thing written, and an Append racing Close would put a
+	// record after it.
+	stopTelemetry()
+	<-telemetryDone
 
 	// Close spool cleanly (writes end marker).
 	if closeErr := sw.Close(); closeErr != nil {

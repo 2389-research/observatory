@@ -3,6 +3,8 @@
 package telemetry
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"strconv"
 	"sync"
@@ -59,6 +61,7 @@ type Ring struct {
 	seq     uint64
 	dropped uint64
 	created time.Time
+	epoch   string
 	// notify carries one pending wakeup for a waiting sender. Buffered at one
 	// and written without blocking: a sender that is already awake needs no
 	// second nudge, and a Push must never wait on a reader.
@@ -76,8 +79,32 @@ func NewRing(capacity int) *Ring {
 		cap:     capacity,
 		items:   make([]Item, 0, capacity),
 		created: time.Now(),
+		epoch:   newEpoch(),
 		notify:  make(chan struct{}, 1),
 	}
+}
+
+// Epoch names this ring's sequence space. Seq counts from one inside it, so a
+// restarted agent must not be mistaken for the one it replaced: the host folds
+// the epoch into the stream identity it assigns, and a fresh epoch gets a fresh
+// stream rather than a pile of collisions against the old one's sequences.
+//
+// Opaque to the guest and to the host alike — the host derives an identity from
+// it and never publishes it.
+func (r *Ring) Epoch() string { return r.epoch }
+
+// newEpoch returns a random 32-hex-character token. Random rather than derived
+// from the clock: a guest whose clock resets at boot would otherwise hand out
+// the same epoch twice.
+func newEpoch() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// crypto/rand does not fail on any platform this runs on; if it ever
+		// does, a clock-derived epoch is still better than an empty one, which
+		// the host would refuse outright.
+		return strconv.FormatInt(time.Now().UnixNano(), 16)
+	}
+	return hex.EncodeToString(b[:])
 }
 
 // Push queues one event, assigning it the next sequence. When the ring is full

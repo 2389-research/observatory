@@ -46,7 +46,11 @@ var registry = []KindInfo{
 		Family:        "telemetry",
 		SchemaVersion: 1,
 		Provenance:    HostObserved,
-		Semantics:     "A producer resent a (source_instance_id, source_seq) key with different payload bytes: protocol-integrity failure, recorded, not silently updated.",
+		Semantics:     "Trusted ingress refused something a producer sent, and recorded the refusal rather than silently accepting or silently dropping it. data.failure names which: seq_payload_conflict (a key resent with different payload bytes), stream_scope_rebind (a stream reassigned to another scope), guest_provenance_claim (a guest reported a host_observed kind), unexpected_frame or malformed_push (a frame the channel's contract refuses).",
+		Caveats: []string{
+			"the refused event is not stored; this record is the only trace of it",
+			"one failure per refusal, not per producer: a producer repeating the same violation produces one of these each time",
+		},
 	},
 	{
 		Kind:          "telemetry.unregistered_kind",

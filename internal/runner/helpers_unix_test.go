@@ -1,7 +1,7 @@
-// ABOUTME: Linux-only test helpers for the runner package.
-// ABOUTME: umask is a syscall not available on non-linux platforms.
+// ABOUTME: Unix test helpers for the runner package.
+// ABOUTME: umask is a syscall the unix platforms share and Windows does not have.
 
-//go:build linux
+//go:build unix
 
 package runner_test
 

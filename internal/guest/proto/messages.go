@@ -169,6 +169,14 @@ type HelloAck struct {
 	// is counting inside the stream the host named. A confirmation, not a
 	// negotiation — a disagreement ends the connection.
 	TelemetryInstanceID string `json:"telemetry_instance_id,omitempty"`
+
+	// TelemetryEpoch names the guest's sequence space on the telemetry port: an
+	// opaque token the guest generates once per agent lifetime. The host folds
+	// it into the stream identity it derives, so a restarted guestd counting
+	// from one again gets a new stream instead of colliding with every sequence
+	// the old one already spooled. The guest contributes the token and the host
+	// alone decides what identity comes out of it.
+	TelemetryEpoch string `json:"telemetry_epoch,omitempty"`
 }
 
 // CapabilityManifest is the guest's response to get_capabilities. Schema is

@@ -95,14 +95,15 @@ func (a *Agent) handleTelemetry(ctx context.Context, conn net.Conn) {
 	// The host names the stream; the guest echoes the name back so the runner
 	// can see whose identity these sequences are counted in. A confirmation,
 	// not a negotiation.
+	ring := a.telemetry.Ring()
 	if err := a.writeControl(conn, proto.KindHelloAck, proto.HelloAck{
 		Accepted:            true,
 		TelemetryInstanceID: hello.SourceInstance,
+		TelemetryEpoch:      ring.Epoch(),
 	}); err != nil {
 		return
 	}
 
-	ring := a.telemetry.Ring()
 	ring.Rewind()
 
 	// Acks arrive on their own schedule, so they get their own reader. It ends

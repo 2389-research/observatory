@@ -223,13 +223,6 @@ func (l *connectOKListener) Accept() (net.Conn, error) {
 	return conn, nil
 }
 
-// listen0600 creates a unix socket with mode 0600.
-func listen0600(path string) (net.Listener, error) {
-	old := umask(0o177)
-	defer umask(old)
-	return net.Listen("unix", path)
-}
-
 // waitForPhase polls stateFile until phase matches or timeout.
 func waitForPhase(t *testing.T, stateFile, phase string, timeout time.Duration) bool {
 	t.Helper()

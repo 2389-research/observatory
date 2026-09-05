@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"syscall"
 
 	"github.com/2389-research/observatory-v2/internal/events"
@@ -42,7 +43,13 @@ type segmentHeader struct {
 }
 
 // Writer appends event envelopes to durable spool segments.
+// A Writer is safe for concurrent use. More than one producer appends to a
+// VM's spool — the supervision loop and the telemetry loop, at least — and a
+// record is a length, a checksum and a body that must reach the file as one
+// piece, so the writer serialises its own writes rather than asking every
+// caller to remember to.
 type Writer struct {
+	mu       sync.Mutex
 	dir      string
 	cfg      WriterCfg
 	maxSpool int64 // resolved MaxSpoolBytes (never zero)
@@ -94,6 +101,9 @@ func OpenWriter(dir string, cfg WriterCfg) (*Writer, error) {
 // If a previous Append poisoned the writer (see Writer.poison), it returns
 // the poison error immediately without attempting any write.
 func (w *Writer) Append(env *events.Envelope) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
 	// Poison check: return the sticky error immediately, no write attempt.
 	if w.poison != nil {
 		return w.poison
@@ -154,6 +164,14 @@ func (w *Writer) Append(env *events.Envelope) error {
 // The end marker means "cleanly closed, tail trustworthy" — a poisoned segment
 // is neither, so omitting it lets recovery treat it as crashed and verify it.
 func (w *Writer) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.closeLocked()
+}
+
+// closeLocked is Close's body. rotate calls it while already holding the lock;
+// Close takes the lock and calls it.
+func (w *Writer) closeLocked() error {
 	if w.f == nil {
 		return nil
 	}
@@ -227,7 +245,7 @@ func (w *Writer) openSegment() error {
 
 // rotate closes the current segment cleanly and opens the next one.
 func (w *Writer) rotate() error {
-	if err := w.Close(); err != nil {
+	if err := w.closeLocked(); err != nil {
 		return fmt.Errorf("spool: rotate close: %w", err)
 	}
 	w.segIdx++
