@@ -1214,8 +1214,8 @@ func (m *Manager) Delete(ctx context.Context, vmID string, force bool, expectedR
 	// rollbacks write "failed" and then discard the error from their best-effort
 	// ForceStop (failLaunch's call sites), doStop's forced path writes "stopped"
 	// while dropping its SignalVM errors, and Reconcile settles a "stopping" row
-	// without observing anything. Each of those can leave a live VMM behind a
-	// terminal row, and privd answers release_vm with invalid_state "vm process is
+	// it has no finding for without observing anything. Each of those can leave a
+	// live VMM behind a terminal row, and privd answers release_vm with invalid_state "vm process is
 	// still alive; signal first" (internal/privd/server.go). The delete then fails
 	// and the row parks at "deleting" with nothing to unstick it but the root
 	// helper — observed on aibox03 2026-09-04, issue ffxv.
@@ -1354,18 +1354,43 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 				ReleaseCompute: true,
 			})
 		case "stopping":
-			// Settle the row at stopped without observing anything. The reason
-			// this comment used to give — "we're not running, so the VMM is
-			// gone" — was false: firecracker is started --daemonize'd and
-			// reparented to init (internal/privd/vmops.go:129), so it outlives
-			// the controller. What actually stands behind the transition is the
-			// same adoption gap as "running"/"paused" above: this portable core
-			// has no runtime to ask, and NewManager runs it before the jailer
-			// adapter's own findings are consulted (cmd/vmobsd/main.go). So a
-			// stop interrupted mid-flight is recorded as completed and its
-			// compute released, and a VMM that survived keeps running behind a
-			// "stopped" row. Ledgered in PLAN.md's deviations log; the behaviour
-			// waits on real adoption (M2+) and must not change here.
+			// A stop the controller began and did not finish. The runtime's
+			// findings tell the two cases apart, and until M2a there were no
+			// findings to tell them apart with.
+			//
+			// Adopted: the VMM is alive with a runner attached to it, so this
+			// stop was interrupted, not completed. Firecracker is started
+			// --daemonize'd and reparented to init (internal/privd/vmops.go),
+			// which is exactly why the row cannot be settled on the
+			// controller's absence — the old comment here said as much and
+			// settled it anyway, because the portable core had nothing to ask.
+			// Recording "stopped" released the compute of a running microVM and
+			// admission handed the same memory out twice, on a VM whose stop
+			// never happened. So the stop is finished the way the "deleting"
+			// branch finishes a delete: force-stop first, settle on the answer,
+			// and leave the row alone when the answer is no. Tolerance mirrors
+			// that branch exactly — an absent runtime must not wedge the row,
+			// and any other failure leaves it at "stopping" for the next
+			// restart. The retained row is the record of the failure, which is
+			// why nothing is logged (this package logs nowhere) and why
+			// Reconcile does not fail: a stop that will not complete must not
+			// stop the daemon from starting.
+			//
+			// Not adopted: nothing looked, or the runtime cannot look. Absent
+			// evidence is not evidence of health — but it is not evidence of a
+			// live VMM either, and there is no host verb worth calling on a VM
+			// nobody can see. The row settles at "stopped" with its compute
+			// released. That is the deviation this branch has always carried,
+			// now narrowed to the case where it is the only answer available.
+			// Ledgered in PLAN.md's deviations log.
+			if m.cfg.AdoptedVMs[vm.VMID] {
+				if err := m.rt.ForceStop(ctx, vm.VMID); err != nil {
+					var ue *UnavailableError
+					if !errors.As(err, &ue) {
+						continue
+					}
+				}
+			}
 			_, _ = m.st.TransitionVM(ctx, store.TransitionInput{
 				VMID:           vm.VMID,
 				To:             "stopped",

@@ -192,3 +192,116 @@ func TestReconcileWithoutFindingsFailsEverythingRunning(t *testing.T) {
 		}
 	}
 }
+
+// stoppingVM walks a VM to "stopping" — a stop the controller began and did not
+// finish, which is the row every crash mid-stop leaves behind.
+func stoppingVM(t *testing.T, st *store.Store, name string) string {
+	t.Helper()
+	vmID := liveVM(t, st, name, "running")
+	if _, err := st.TransitionVM(t.Context(), store.TransitionInput{
+		VMID:        vmID,
+		To:          "stopping",
+		Reason:      "test_setup",
+		OperationID: 0,
+	}); err != nil {
+		t.Fatalf("transition %s running→stopping: %v", name, err)
+	}
+	return vmID
+}
+
+// TestReconcileFinishesTheStopOfAnAdoptedVM is the deviation M2a's adoption
+// findings finally close. Reconcile settled every "stopping" row at "stopped"
+// and released its compute without observing anything, on the reasoning that a
+// controller that is not running means a VMM that is not running. Firecracker is
+// daemonized and reparented to init, so that reasoning was false: the row said
+// stopped while the microVM kept running, its memory was handed to admission a
+// second time, and the operator's stop never happened.
+//
+// The runtime now names the VMs it found alive. A "stopping" row among them is a
+// stop that was interrupted, not one that completed, so Reconcile finishes it
+// the way the "deleting" branch finishes a delete — force-stop first, settle the
+// row on the answer.
+func TestReconcileFinishesTheStopOfAnAdoptedVM(t *testing.T) {
+	st := openStoreForManager(t)
+	vmID := stoppingVM(t, st, "interrupted-stop")
+
+	rt := runtimetest.NewFake()
+	cfg := defaultCfg()
+	cfg.AdoptedVMs = map[string]bool{vmID: true}
+
+	mgr, err := runtime.NewManager(st, rt, cfg)
+	if err != nil {
+		t.Fatalf("NewManager (reconcile): %v", err)
+	}
+	defer mgr.Close()
+
+	var forced bool
+	for _, c := range rt.CallsFor(vmID) {
+		if c.Method == "ForceStop" {
+			forced = true
+		}
+	}
+	if !forced {
+		t.Errorf("calls for %s = %v; a stopping row the runtime found alive has to be "+
+			"stopped before its row says stopped", vmID, rt.CallsFor(vmID))
+	}
+	if got := stateOf(t, st, vmID).ObservedState; got != "stopped" {
+		t.Errorf("state = %q, want stopped once the force-stop succeeded", got)
+	}
+}
+
+// TestReconcileKeepsAStoppingRowWhoseVMWillNotDie is the other half: the record
+// of a stop that could not be completed is the row left at "stopping", the same
+// way a release that fails leaves a row at "deleting". Recording "stopped" would
+// release compute the live microVM is still using, and admission would hand the
+// same memory out twice.
+func TestReconcileKeepsAStoppingRowWhoseVMWillNotDie(t *testing.T) {
+	st := openStoreForManager(t)
+	vmID := stoppingVM(t, st, "unkillable-stop")
+
+	rt := runtimetest.NewFake()
+	rt.FailNext("ForceStop", vmID, fmt.Errorf("vmm will not die"))
+	cfg := defaultCfg()
+	cfg.AdoptedVMs = map[string]bool{vmID: true}
+
+	mgr, err := runtime.NewManager(st, rt, cfg)
+	if err != nil {
+		t.Fatalf("NewManager (reconcile): %v", err)
+	}
+	defer mgr.Close()
+
+	if got := stateOf(t, st, vmID).ObservedState; got != "stopping" {
+		t.Errorf("state = %q, want stopping: the force-stop failed, so the row is the record", got)
+	}
+	totals, err := st.ReservationTotals(t.Context())
+	if err != nil {
+		t.Fatalf("ReservationTotals: %v", err)
+	}
+	if totals.MemoryMiB == 0 || totals.VCPU == 0 {
+		t.Errorf("reservations = %+v; the microVM is still running and still holds them", totals)
+	}
+}
+
+// TestReconcileStillSettlesAStoppingRowTheRuntimeCannotSee keeps the existing
+// answer for the case that has not changed. No finding means no evidence, and a
+// portable core with no host to ask supplies none; settling the row is the
+// documented deviation, not a claim about the VMM. Nothing is force-stopped,
+// because there is nothing the runtime says is there to stop.
+func TestReconcileStillSettlesAStoppingRowTheRuntimeCannotSee(t *testing.T) {
+	st := openStoreForManager(t)
+	vmID := stoppingVM(t, st, "unobserved-stop")
+
+	rt := runtimetest.NewFake()
+	mgr, err := runtime.NewManager(st, rt, defaultCfg())
+	if err != nil {
+		t.Fatalf("NewManager (reconcile): %v", err)
+	}
+	defer mgr.Close()
+
+	if got := stateOf(t, st, vmID).ObservedState; got != "stopped" {
+		t.Errorf("state = %q, want stopped with no findings", got)
+	}
+	if calls := rt.CallsFor(vmID); len(calls) != 0 {
+		t.Errorf("calls for %s = %v; want none — no finding is no evidence to act on", vmID, calls)
+	}
+}
