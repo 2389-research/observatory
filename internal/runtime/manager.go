@@ -154,6 +154,14 @@ type Manager struct {
 	// reportGen is called after every run reaches a terminal phase. Task 7 wires
 	// the real generator. Nil means no-op (safe). Use SetReportGen to inject.
 	reportGen func(runID string)
+
+	// deleting names the VMs a Delete call is inside right now. The row's own
+	// "deleting" state cannot stand in for this: a delete that stalled leaves the
+	// row reading "deleting" too, and the two cases want opposite answers — an
+	// in-flight delete owns the VM and a second caller must not race it, while a
+	// stalled one has resources still on the host and must be resumed.
+	deletingMu sync.Mutex
+	deleting   map[string]bool
 }
 
 // NewManager creates a Manager and immediately runs Reconcile to clean up any
@@ -180,6 +188,7 @@ func NewManagerWithReportGen(st *store.Store, rt Runtime, cfg ManagerConfig, rep
 		ctx:       ctx,
 		cancel:    cancel,
 		reportGen: reportGen,
+		deleting:  map[string]bool{},
 	}
 	if err := m.Reconcile(ctx); err != nil {
 		cancel()
@@ -1015,18 +1024,50 @@ func (m *Manager) succeedAction(ctx context.Context, vmID string, opID int64, ph
 // caller's revision would fail every time, because the earlier transitions
 // already bumped it. The first transition also precedes rt.ForceStop, so a
 // refused pin costs the caller nothing.
+// beginDelete claims vmID for the calling Delete. It reports false when another
+// Delete call already holds it; it never blocks.
+func (m *Manager) beginDelete(vmID string) bool {
+	m.deletingMu.Lock()
+	defer m.deletingMu.Unlock()
+	if m.deleting[vmID] {
+		return false
+	}
+	m.deleting[vmID] = true
+	return true
+}
+
+// endDelete releases the claim beginDelete took.
+func (m *Manager) endDelete(vmID string) {
+	m.deletingMu.Lock()
+	delete(m.deleting, vmID)
+	m.deletingMu.Unlock()
+}
+
 func (m *Manager) Delete(ctx context.Context, vmID string, force bool, expectedRevision *int64) (*store.VM, error) {
 	vm, err := m.st.GetVM(ctx, vmID)
 	if err != nil {
 		return nil, err
 	}
-	pin := expectedRevision
-	switch vm.ObservedState {
-	case "deleted":
-		return vm, nil // already done
-	case "deleting":
-		return vm, nil // in progress
+	if vm.ObservedState == "deleted" {
+		return vm, nil // already done, and its resources went with it
 	}
+	// A VM another Delete call is working on is that call's to finish. A row
+	// reading "deleting" with no such call behind it is a stalled delete, and
+	// this one resumes it: the transition below is skipped, the signal and the
+	// release are not. Delete used to return early for that state as well, which
+	// answered every retry with success while the netns, the jail chroot and
+	// privd's ledger entry stayed on the host — Reconcile, which runs at startup
+	// only, was the sole retry there was (issue vexd).
+	if !m.beginDelete(vmID) {
+		return vm, nil // in progress, by another call
+	}
+	defer m.endDelete(vmID)
+
+	// A resume consumes no revision pin, and cannot: the only edge out of
+	// "deleting" is "deleted", and only TransitionVM bumps a row's revision
+	// (internal/store/vms.go). So a caller's stale pin on a "deleting" row means
+	// the row reached "deleted", which the early return above already answers.
+	pin := expectedRevision
 
 	// From this call on the operator wants the VM gone, and every state it passes
 	// through on the way — stopping, stopped, deleting — is honest drift toward

@@ -843,6 +843,42 @@ func TestDeleteVMReleaseFailureTeaches(t *testing.T) {
 	}
 }
 
+// TestDeleteVMReleaseFailureRetryActuallyRetries walks the remediation the
+// previous test only reads. `retryable: true` and a "delete again" remediation
+// were both being answered by an early return for the "deleting" state: every
+// retry replied 200 with the row untouched and the host resources still there,
+// and only a daemon restart moved it. The contract is only honest if the retry
+// the error names does the work.
+func TestDeleteVMReleaseFailureRetryActuallyRetries(t *testing.T) {
+	srv, _, fake := newTemplateServer(t)
+	vmID := createRunningVM(t, srv.URL, fake)
+	fake.FailNext("Release", vmID, errors.New("privd: invalid_state"))
+
+	var e api.Error
+	doRequest(t, http.MethodDelete, srv.URL+"/api/v1/vms/"+vmID+"?force=true",
+		nil, http.StatusInternalServerError, &e)
+	if !e.Retryable {
+		t.Fatal("a release failure claims to be retryable")
+	}
+	retry := ""
+	for _, rem := range e.Remediation {
+		if rem.Action == "delete" {
+			path, _ := rem.Params["path"].(string)
+			retry = strings.Replace(path, "{id}", vmID, 1)
+		}
+	}
+	if retry == "" {
+		t.Fatal("the release failure names no delete to retry")
+	}
+
+	var body map[string]any
+	doRequest(t, http.MethodDelete, srv.URL+retry, nil, http.StatusOK, &body)
+	vm, _ := body["vm"].(map[string]any)
+	if state, _ := vm["observed_state"].(string); state != "deleted" {
+		t.Errorf("observed_state after the retry the error asked for = %q, want deleted", state)
+	}
+}
+
 // TestActionRuntimeFailureTeaches: a guest that will not stop is a fault on the
 // machine, and the answer has to say so. The catch-all used to call it a
 // storage failure — with the store perfectly healthy and the VMM still alive —
