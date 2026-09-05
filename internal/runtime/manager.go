@@ -147,6 +147,19 @@ type ManagerConfig struct {
 	// then keeps its old answer: a running VM nobody could account for is failed.
 	// Absent evidence is not evidence of health.
 	AdoptedVMs map[string]bool
+
+	// AmbiguousVMs names the VMs the same scan looked at and could not classify,
+	// mapped to the runtime's own account of why -- an unreadable manifest, a
+	// runner whose recorded VMM identity disagrees with the manifest's. §5.5
+	// quarantines those at the runtime layer: it touches nothing. Reconcile does
+	// the same with their rows, because a quarantine that ends at the package
+	// boundary is not one.
+	//
+	// It is a different answer from an absent entry, and the difference is the
+	// whole point. Absent means nothing looked, which leaves Reconcile its
+	// documented deviation. Present means something looked and came back without
+	// a verdict, and a row settled on that reports an observation nobody made.
+	AmbiguousVMs map[string]string
 }
 
 // StagedImages returns the kernel and root image a launch would stage now, read
@@ -1348,7 +1361,20 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 			// Adoption is the absence of a write. Transitioning to "running" from
 			// "running" is not a valid edge (§5.2) and would bump a revision every
 			// operator pin depends on; the row is already correct.
+			//
+			// An ambiguous finding is the absence of a write too, for the opposite
+			// reason: the row may not be correct, and nothing here knows. Holding
+			// it costs an operator a stale row until they look; failing it spends
+			// the revision, records a fleet outage that may not have happened, and
+			// hands a possibly-live VM's memory back to admission.
 			if m.cfg.AdoptedVMs[vm.VMID] {
+				continue
+			}
+			// The scan looked and could not tell. "vmm_disappeared_on_restart"
+			// would be an observation nobody made, and it releases the compute of
+			// a VM that may well be running. Hold the row and record why.
+			if detail, ambiguous := m.cfg.AmbiguousVMs[vm.VMID]; ambiguous {
+				_ = m.st.RecordReconcileAmbiguity(ctx, vm.VMID, vm.ObservedState, detail)
 				continue
 			}
 			// VMM disappeared — §5.5: mark with explicit reason.
@@ -1385,13 +1411,25 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 			// starting. A store that cannot take the record is a bigger problem
 			// than the stop, and one that startup will hit again on its own.
 			//
-			// Not adopted: nothing looked, or the runtime cannot look. Absent
+			// Ambiguous: something looked and came back without a verdict. That
+			// is not the same as nothing looking, and it is the one case where
+			// there is a live VMM on the other side of the guess often enough to
+			// matter. The row is held where the last controller left it and the
+			// runtime's own account of what it could not tell is recorded beside
+			// it. Nothing is signalled: a stop aimed at a VM the scan could not
+			// identify is the signal this whole path refuses to send.
+			//
+			// Neither: nothing looked, or the runtime cannot look. Absent
 			// evidence is not evidence of health — but it is not evidence of a
 			// live VMM either, and there is no host verb worth calling on a VM
 			// nobody can see. The row settles at "stopped" with its compute
 			// released. That is the deviation this branch has always carried,
 			// now narrowed to the case where it is the only answer available.
 			// Ledgered in PLAN.md's deviations log.
+			if detail, ambiguous := m.cfg.AmbiguousVMs[vm.VMID]; ambiguous {
+				_ = m.st.RecordReconcileAmbiguity(ctx, vm.VMID, vm.ObservedState, detail)
+				continue
+			}
 			if m.cfg.AdoptedVMs[vm.VMID] {
 				if err := m.rt.ForceStop(ctx, vm.VMID); err != nil {
 					var ue *UnavailableError

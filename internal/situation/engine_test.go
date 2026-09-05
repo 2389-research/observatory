@@ -757,3 +757,50 @@ func TestEvaluateRaisesOnStalledCleanup(t *testing.T) {
 		t.Errorf("no attention raised for a stalled cleanup; items: %+v", items)
 	}
 }
+
+// TestEvaluateRaisesOnAnUnclassifiableVM: a row Reconcile deliberately left
+// alone looks exactly like one it never reached. The VM still holds its
+// reservations, its row still claims a state nothing has verified since the last
+// controller died, and the only thing that says so is this record. Without an
+// attention item the quarantine is silent, which is the failure mode it exists
+// to prevent.
+func TestEvaluateRaisesOnAnUnclassifiableVM(t *testing.T) {
+	s := openStore(t)
+	eng := engineOver(s, allTriggers())
+	ctx := t.Context()
+
+	vmID := testUUID(141)
+	makeTestVM(t, s, vmID)
+
+	detail := "runner vmm identity mismatch: runner=(4120,88231) manifest=(4120,73004)"
+	if err := s.RecordReconcileAmbiguity(ctx, vmID, "running", detail); err != nil {
+		t.Fatalf("RecordReconcileAmbiguity: %v", err)
+	}
+	if err := eng.Evaluate(ctx); err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+
+	items, err := s.ListAttention(ctx, store.AttentionQuery{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, it := range items {
+		if it.TriggerClass != "reconciliation_surprise" {
+			continue
+		}
+		found = true
+		if !strings.Contains(it.Summary, vmID) || !strings.Contains(it.Summary, "identity mismatch") {
+			t.Errorf("summary %q must name the VM and carry the runtime's own account", it.Summary)
+		}
+		if it.SystemAction == "" {
+			t.Errorf("ambiguity item lacks a system action: %+v", it)
+		}
+		if len(it.SuggestedActions) == 0 {
+			t.Errorf("ambiguity item suggests no action: %+v", it)
+		}
+	}
+	if !found {
+		t.Errorf("no attention raised for an unclassifiable VM; items: %+v", items)
+	}
+}

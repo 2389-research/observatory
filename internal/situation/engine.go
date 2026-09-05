@@ -197,6 +197,36 @@ var rulesByKind = map[string][]rule{
 		},
 	}},
 
+	// vm.reconcile_ambiguous is the startup scan declining to guess. It fires
+	// reconciliation_surprise for the same reason "vmm_disappeared_on_restart"
+	// does -- it can only be raised by a restart -- and it is the more urgent of
+	// the two: that one describes a row the controller settled, this one a row
+	// nobody could settle, still holding its reservations.
+	"vm.reconcile_ambiguous": {{
+		class:    "reconciliation_surprise",
+		severity: store.SeverityNeedsDecision,
+		summary: func(env *events.Envelope) string {
+			vmID, _ := env.Data["vm_id"].(string)
+			state, _ := env.Data["state"].(string)
+			detail, _ := env.Data["detail"].(string)
+			return fmt.Sprintf("VM %s could not be classified on restart; the row is held at %s: %s", vmID, state, detail)
+		},
+		systemAction: "left the row and its resource reservations exactly as the last controller wrote them",
+		actionsFn: func(env *events.Envelope) []store.SuggestedAction {
+			vmID, _ := env.Data["vm_id"].(string)
+			if vmID == "" {
+				return nil
+			}
+			return []store.SuggestedAction{
+				{
+					Action:    "get",
+					Params:    map[string]any{"path": "/api/v1/events?vm_id=" + vmID},
+					Rationale: "the row is the last controller's word; this VM's event history is what led to it",
+				},
+			}
+		},
+	}},
+
 	// run.state_changed fires only on terminal transitions. The event is
 	// store-synthesized: vm_id is in data, not the envelope. succeeded → info;
 	// failed/inconclusive/aborted → needs_decision (operator must review report).

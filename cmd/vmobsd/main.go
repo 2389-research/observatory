@@ -176,18 +176,47 @@ func verifyRuntimeLock(lockPath string, logger *slog.Logger) error {
 	return fmt.Errorf("runtime lock verification failed: %s", strings.Join(msgs, "; "))
 }
 
+// classifyFindings splits the adapter's startup scan into the two answers
+// Reconcile acts on, and drops the third.
+//
+// "adopted" is proof of life: the VMM is alive with a runner attached to it.
+// "ambiguous" is the scan declining to answer, and it used to be dropped here --
+// which made it indistinguishable from "vmm_gone" by the time Reconcile saw it,
+// so a row nobody could classify was failed with reason
+// "vmm_disappeared_on_restart" and its compute handed back to admission. The
+// detail travels with it because it is the only pointer an operator gets to what
+// on the host could not be read.
+//
+// "vmm_gone" is deliberately absent from both maps: it is the default Reconcile
+// already handles, and naming it here would create a second place to keep in
+// step with the first.
+func classifyFindings(findings []jailer.Finding) (map[string]bool, map[string]string) {
+	adopted := map[string]bool{}
+	ambiguous := map[string]string{}
+	for _, f := range findings {
+		switch f.Outcome {
+		case "adopted":
+			adopted[f.VMID] = true
+		case "ambiguous":
+			ambiguous[f.VMID] = f.Detail
+		}
+	}
+	return adopted, ambiguous
+}
+
 // managerConfig builds the lifecycle manager's config from the daemon config.
 // LockPath must be the same path the jailer adapter stages from
 // (runtime_linux.go): /host/status publishes what a launch would stage, and it
 // can only be right about that by reading the file the launch reads.
-func managerConfig(cfg *config.Config, tpls map[string]runtime.Template, host runtime.HostResources, adopted map[string]bool) runtime.ManagerConfig {
+func managerConfig(cfg *config.Config, tpls map[string]runtime.Template, host runtime.HostResources, adopted map[string]bool, ambiguous map[string]string) runtime.ManagerConfig {
 	return runtime.ManagerConfig{
-		Admission:  cfg.Admission,
-		VMDefaults: cfg.VMDefaults,
-		Templates:  tpls,
-		Host:       host,
-		LockPath:   cfg.Runtime.LockFile,
-		AdoptedVMs: adopted,
+		Admission:    cfg.Admission,
+		VMDefaults:   cfg.VMDefaults,
+		Templates:    tpls,
+		Host:         host,
+		LockPath:     cfg.Runtime.LockFile,
+		AdoptedVMs:   adopted,
+		AmbiguousVMs: ambiguous,
 	}
 }
 
@@ -329,15 +358,15 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready f
 	// Reconcile fails every running VM it cannot account for, and it runs inside
 	// NewManager — so the adapter's verdicts have to be in hand before the manager
 	// is built, not applied to the rows afterwards.
-	adopted := map[string]bool{}
-	for _, f := range adapterFindings {
-		if f.Outcome == "adopted" {
-			adopted[f.VMID] = true
-			logger.Info("adopting vm across restart", "vm_id", f.VMID, "detail", f.Detail)
-		}
+	adopted, ambiguous := classifyFindings(adapterFindings)
+	for vmID := range adopted {
+		logger.Info("adopting vm across restart", "vm_id", vmID)
+	}
+	for vmID, detail := range ambiguous {
+		logger.Warn("vm could not be classified across restart", "vm_id", vmID, "detail", detail)
 	}
 
-	mgr, err := runtime.NewManager(st, rt, managerConfig(cfg, tpls, host, adopted))
+	mgr, err := runtime.NewManager(st, rt, managerConfig(cfg, tpls, host, adopted, ambiguous))
 	if err != nil {
 		return fmt.Errorf("create lifecycle manager: %w", err)
 	}

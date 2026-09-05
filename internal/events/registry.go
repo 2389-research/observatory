@@ -115,8 +115,19 @@ var registry = []KindInfo{
 		Provenance:    HostObserved,
 		Semantics:     "A cleanup the controller retried did not complete; the VM's host resources are still owned. Data carries vm_id, the state the row is retained in, and reason.",
 		Caveats: []string{
-			"the row is not terminal: the cleanup is retried at every controller start until it succeeds",
+			"a row held at stopping or deleting is retried at every controller start; a stopped row's outstanding cleanup is retried by the next delete",
 			"reason is the runtime's own error text, redacted per SPEC §15.3",
+		},
+	},
+	{
+		Kind:          "vm.reconcile_ambiguous",
+		Family:        "vm",
+		SchemaVersion: 1,
+		Provenance:    HostObserved,
+		Semantics:     "A startup scan looked at this VM's host state and could not classify it, so its row was left exactly as found. Data carries vm_id, the state the row is held in, and detail.",
+		Caveats: []string{
+			"the row is not a claim about the VM: it is the state the last controller left, held because nothing since has observed otherwise",
+			"detail is the runtime's own account of what it could not tell, redacted per SPEC §15.3",
 		},
 	},
 	{
