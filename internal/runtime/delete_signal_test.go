@@ -244,3 +244,65 @@ func TestStrandedDeleteRecoversOnRestart(t *testing.T) {
 		t.Errorf("state after restart = %q, want deleted (verbs: %v)", final.ObservedState, verbs)
 	}
 }
+
+// TestReconcileDeletingKeepsRowWhenSignalFails: a signal that fails for any
+// reason but an absent runtime must stop the release. Releasing anyway would
+// hand back a netns and a jail chroot for a VM nobody could confirm dead, and
+// the "deleted" row over it would be the lie R1 exists to prevent.
+func TestReconcileDeletingKeepsRowWhenSignalFails(t *testing.T) {
+	st := openStoreForManager(t)
+	fk := runtimetest.NewFake()
+	vmID := newDeletingVM(t, st, "reconcile-signal-fails")
+
+	fk.FailNext("ForceStop", vmID, errors.New("privd unreachable"))
+
+	mgr, err := runtime.NewManager(st, fk, defaultCfg())
+	if err != nil {
+		t.Fatalf("NewManager (reconcile): %v", err)
+	}
+	defer mgr.Close()
+
+	verbs := verbsSince(fk, vmID, 0)
+	for _, v := range verbs {
+		if v == "Release" {
+			t.Errorf("reconcile ran %v: released a VM whose signal failed", verbs)
+		}
+	}
+	vm, err := st.GetVM(t.Context(), vmID)
+	if err != nil {
+		t.Fatalf("GetVM: %v", err)
+	}
+	if vm.ObservedState != "deleting" {
+		t.Errorf("state = %q, want deleting — an unsignalled VM must stay visible", vm.ObservedState)
+	}
+}
+
+// TestDeleteFailsWhenSignalFails: Delete's own guard reports the same way the
+// live path does — a typed force_stop failure, and no release behind it.
+func TestDeleteFailsWhenSignalFails(t *testing.T) {
+	st := openStoreForManager(t)
+	fk := runtimetest.NewFake()
+	vmID, n := failedVMAfterLaunch(t, st, fk, "delete-signal-fails")
+
+	fk.FailNext("ForceStop", vmID, errors.New("privd unreachable"))
+
+	mgr := newManager(t, st, fk)
+	defer mgr.Close()
+
+	_, err := mgr.Delete(t.Context(), vmID, false, nil)
+	if err == nil {
+		t.Fatal("delete succeeded although the signal failed")
+	}
+	var opErr *runtime.ErrRuntimeOpFailed
+	if !errors.As(err, &opErr) {
+		t.Fatalf("error is %T (%v), want *runtime.ErrRuntimeOpFailed", err, err)
+	}
+	if opErr.Op != "force_stop" {
+		t.Errorf("Op = %q, want force_stop", opErr.Op)
+	}
+	for _, v := range verbsSince(fk, vmID, n) {
+		if v == "Release" {
+			t.Error("Delete released a VM whose signal failed")
+		}
+	}
+}
