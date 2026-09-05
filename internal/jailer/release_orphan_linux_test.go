@@ -328,3 +328,159 @@ func TestReleaseIgnoresStageRecordAndReleasesBothResources(t *testing.T) {
 			"so a guard on the record would have skipped release_network", pc.netCIDR)
 	}
 }
+
+// TestAFailedReleaseKeepsTheSlotLease is the identity half of the same finding.
+// The manifest is not just a record of what a launch provisioned — it is the
+// lease on the slot, and through the slot on the jail uid and the guest CID
+// (uid = JailUIDBase + slot, cid = CIDBase + slot, internal/jailer/launch.go).
+// allocateSlot reads a slot as taken for exactly as long as some manifest names
+// it, so removing the manifest is the act of reclaiming those identities.
+//
+// doRelease removed it before taking its verdict, which meant a release that
+// reported failure had already surrendered the lease: the chroot survives under
+// uid N while the next launch is handed slot N and runs a different VM's
+// firecracker under the same uid, sharing the same CID with a VM that is still
+// alive. Delete parks the row at "deleting" and Reconcile retries the release —
+// correctly — but by then the identity is already reusable.
+func TestAFailedReleaseKeepsTheSlotLease(t *testing.T) {
+	adapter, jailBase := releaseAdapter(t, &unreachablePrivd{})
+	vmID := "vm-lease-holder"
+	writeOrphanChroot(t, jailBase, vmID)
+
+	m := Manifest{
+		VMID:   vmID,
+		Slot:   0,
+		UID:    10000,
+		CID:    3,
+		Stages: []string{stageReserved, stageStaged, stageNetwork, stageVMMStarted},
+	}
+	if err := writeManifest(adapter.cfg.StateDir, m); err != nil {
+		t.Fatalf("writeManifest: %v", err)
+	}
+
+	if err := adapter.doRelease(context.Background(), vmID); err == nil {
+		t.Fatalf("doRelease returned success while the chroot for %s is still on disk", vmID)
+	}
+
+	slot, err := allocateSlot(adapter.cfg.StateDir, "vm-next", 4)
+	if err != nil {
+		t.Fatalf("allocateSlot after a failed release: %v", err)
+	}
+	if slot == m.Slot {
+		t.Errorf("allocateSlot handed out slot %d again; the release that failed had already "+
+			"given up the lease on uid %d and cid %d, which the surviving chroot still uses",
+			slot, m.UID, m.CID)
+	}
+}
+
+// TestAFailedNetworkReleaseKeepsTheSlotLease covers the other half of the same
+// invariant. The chroot verdict and the network verdict are separate branches,
+// and a netns privd could not tear down is just as much an unreleased resource
+// as a surviving chroot: the release reports failure, so the lease has to stand.
+func TestAFailedNetworkReleaseKeepsTheSlotLease(t *testing.T) {
+	// entry set, no jailDir to remove: ReleaseVM succeeds and clears the VM half,
+	// ReleaseNetwork then answers not_found for the entry it deleted... so drive
+	// the failure explicitly instead.
+	pc := &netFailingPrivd{}
+	adapter, _ := releaseAdapter(t, pc)
+	vmID := "vm-netns-stuck"
+
+	m := Manifest{
+		VMID:   vmID,
+		Slot:   0,
+		Stages: []string{stageReserved, stageStaged, stageNetwork, stageVMMStarted},
+	}
+	if err := writeManifest(adapter.cfg.StateDir, m); err != nil {
+		t.Fatalf("writeManifest: %v", err)
+	}
+
+	err := adapter.doRelease(context.Background(), vmID)
+	if err == nil {
+		t.Fatal("doRelease returned success while release_network failed")
+	}
+	if !strings.Contains(err.Error(), "release_network") {
+		t.Errorf("error = %q; want it to name the verb that failed", err)
+	}
+
+	slot, err := allocateSlot(adapter.cfg.StateDir, "vm-next", 4)
+	if err != nil {
+		t.Fatalf("allocateSlot after a failed network release: %v", err)
+	}
+	if slot == m.Slot {
+		t.Errorf("allocateSlot handed out slot %d again while %s's netns is still allocated",
+			slot, vmID)
+	}
+}
+
+// netFailingPrivd releases the VM half and refuses the network half — the shape
+// of a netns teardown privd accepted responsibility for and could not finish.
+type netFailingPrivd struct{}
+
+func (*netFailingPrivd) AllocateNetwork(context.Context, privd.AllocateNetworkReq) error {
+	return errUnreachablePrivd
+}
+
+func (*netFailingPrivd) StartVM(context.Context, privd.StartVMReq) (privd.StartVMResp, error) {
+	return privd.StartVMResp{}, errUnreachablePrivd
+}
+
+func (*netFailingPrivd) SignalVM(context.Context, privd.SignalVMReq) error {
+	return errUnreachablePrivd
+}
+
+func (*netFailingPrivd) ReleaseVM(context.Context, privd.ReleaseVMReq) error { return nil }
+
+func (*netFailingPrivd) ReleaseNetwork(context.Context, privd.ReleaseNetworkReq) error {
+	return &privd.RemoteError{Cause: "internal", Message: "netns delete failed"}
+}
+
+// TestARetriedReleaseLeavesTheVMThatTookTheSlotAlone is what makes the retry in
+// Reconcile's "deleting" branch safe to run over and over. A release can succeed
+// completely and the controller still die before the row reaches "deleted", so
+// the retry runs against a VM whose identities have already been handed on — and
+// by then a new VM legitimately holds the slot, uid and CID the old one had.
+//
+// Nothing here is destroyed by slot: every teardown doRelease performs is keyed
+// by vm_id — the privd verbs, <StageRoot>/<id>, <StateDir>/vms/<id> and
+// <JailBase>/firecracker/<id>. This test is the assertion that keeps it that way,
+// because a single slot-keyed path would make the safe retry destructive.
+func TestARetriedReleaseLeavesTheVMThatTookTheSlotAlone(t *testing.T) {
+	pc := &ledgerPrivd{} // no entry: both verbs answer not_found, as for an already-released VM
+	adapter, jailBase := releaseAdapter(t, pc)
+
+	// The successor legitimately holds slot 0 now.
+	successor := Manifest{
+		VMID:   "vm-successor",
+		Slot:   0,
+		Stages: []string{stageReserved, stageStaged, stageNetwork, stageVMMStarted},
+	}
+	if err := writeManifest(adapter.cfg.StateDir, successor); err != nil {
+		t.Fatalf("writeManifest successor: %v", err)
+	}
+	successorJail := writeOrphanChroot(t, jailBase, successor.VMID)
+	successorStage := filepath.Join(adapter.cfg.StageRoot, successor.VMID)
+	if err := os.MkdirAll(successorStage, 0o700); err != nil {
+		t.Fatalf("mkdir successor stage dir: %v", err)
+	}
+
+	// The retry, for a predecessor that is already fully gone.
+	if err := adapter.doRelease(context.Background(), "vm-predecessor"); err != nil {
+		t.Fatalf("retried doRelease for an already-released VM: %v; want nil", err)
+	}
+
+	for _, path := range []string{
+		successorJail,
+		successorStage,
+		manifestPath(adapter.cfg.StateDir, successor.VMID),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("stat %s: %v; the retry destroyed a resource belonging to the VM "+
+				"that now holds the slot", path, err)
+		}
+	}
+	if slot, err := allocateSlot(adapter.cfg.StateDir, "vm-third", 4); err != nil {
+		t.Fatalf("allocateSlot: %v", err)
+	} else if slot == successor.Slot {
+		t.Errorf("allocateSlot = %d; the successor's lease did not survive the retry", slot)
+	}
+}

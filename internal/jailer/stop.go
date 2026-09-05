@@ -522,6 +522,11 @@ func (a *Adapter) Release(ctx context.Context, vmID string) error {
 // than not_found is a resource privd knows about and could not clear, which is
 // an error too. Either one leaves Delete's row at "deleting" -- a delete that
 // lies is worse than one that has to be retried.
+//
+// The manifest is removed only after that verdict, because it is the lease on
+// the slot -- and so on the jail uid and guest CID derived from it. A release
+// that reports failure must not have already handed those identities to the
+// next launch.
 func (a *Adapter) doRelease(ctx context.Context, vmID string) error {
 	releaseCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -535,22 +540,6 @@ func (a *Adapter) doRelease(ctx context.Context, vmID string) error {
 	if err := durable.RemoveAll(stageDir); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("jailer release %s: remove stage dir: %w", vmID, err)
 	}
-
-	// Remove <StateDir>/vms/<id>/ — includes manifest.json, token, runner-state.json, etc.
-	// This must be last so the manifest is still readable until all other cleanup is done.
-	// Removing a missing path is a no-op — no stage guard needed.
-	//
-	// The removal is made durable before this returns nil, because nil is what
-	// lets the caller reclaim the slot, uid and cid the manifest named. A
-	// removal that a crash could undo would put those identities back in use
-	// under a VM that has already been told they are free.
-	vmStateDir := filepath.Join(a.cfg.StateDir, "vms", vmID)
-	if err := durable.RemoveAll(vmStateDir); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("jailer release %s: remove state dir: %w", vmID, err)
-	}
-
-	// Spool dir is intentionally not removed: the importer reads segments independently.
-	// (Brief note: Task 7's importer prunes segments only, not VM dirs — verified.)
 
 	// The verdict comes from the filesystem, not from what privd returned.
 	jailDir := filepath.Join(a.cfg.JailBase, "firecracker", vmID)
@@ -571,6 +560,32 @@ func (a *Adapter) doRelease(ctx context.Context, vmID string) error {
 	if netErr != nil {
 		return fmt.Errorf("jailer release %s: release_network: %w", vmID, netErr)
 	}
+
+	// Remove <StateDir>/vms/<id>/ — includes manifest.json, token, runner-state.json, etc.
+	// Removing a missing path is a no-op — no stage guard needed.
+	//
+	// This runs last, after the verdict rather than before it, because the
+	// manifest is not only a record of what the launch provisioned: it is the
+	// lease on the slot, and through the slot on the jail uid and the guest CID
+	// (uid = JailUIDBase + slot, cid = CIDBase + slot, see Launch). allocateSlot
+	// reads a slot as taken for exactly as long as some manifest names it, so
+	// removing the manifest IS the act of reclaiming those identities. Doing it
+	// before the verdict surrendered the lease on the failure path: the chroot
+	// survives under uid N while the next launch is handed slot N and starts a
+	// different VM's firecracker under the same uid, on the same CID as a VM
+	// that is still alive. The row parked at "deleting" and Reconcile's retry
+	// were both correct and both too late.
+	//
+	// The removal is made durable before this returns nil, because nil is what
+	// lets the caller reclaim those identities. A removal that a crash could
+	// undo would put them back in use under a VM already told they are free.
+	vmStateDir := filepath.Join(a.cfg.StateDir, "vms", vmID)
+	if err := durable.RemoveAll(vmStateDir); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("jailer release %s: remove state dir: %w", vmID, err)
+	}
+
+	// Spool dir is intentionally not removed: the importer reads segments independently.
+	// (Brief note: Task 7's importer prunes segments only, not VM dirs — verified.)
 	return nil
 }
 
