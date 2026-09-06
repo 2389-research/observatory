@@ -1,5 +1,30 @@
 # Specification Package Validation
 
+## Revision 24 (2026-09-06) — the container boundary is measured, not inherited
+
+Kata `q4b2`. `docs/design/container-boundary.md` names every privileged operation v2's
+launch chain performs — privd's five verbs, the jailer's argv, the guest channel — and
+what each asks of the kernel, set against Docker's defaults measured on aibox03
+(Docker 27.2.1, kernel 6.8.0-138-generic, jailer/Firecracker v1.16.1).
+
+Method note, because it is the finding: v1's container measurements were re-derived
+rather than copied. v1 ran Firecracker directly and its own plan records that its
+passing test "did not validate guest authentication, jailer isolation, TAP/network
+namespaces, the helper, restart recovery, or AT-002". Re-running the chain under v2's
+own argv killed two inherited assumptions — the read-only cgroup mount does not block
+v2's jailer, and `/dev/vhost-vsock` is never opened because the guest channel is a unix
+socket — and surfaced one v1 could not have seen: Docker's default seccomp profile
+blocks `pivot_root`, so the jailer fails at no capability level until seccomp is lifted.
+Two exceptions are required where v1 needed one.
+
+The document authorizes no configuration. It is the input to the device/cgroup/security
+review the kata makes a precondition, and §7 lists what remains unmeasured — starting
+with whether the jailed uid can open `/dev/kvm` after the privilege drop.
+
+Package checks after the addition: 47/47 passing, unchanged in count — `check.py`'s
+README inventory check reaches `design/` since Revision 23, so the new file is verified
+to exist and to be listed.
+
 ## Revision 23 (2026-09-06) — the agent-control gap map joins the package, and the inventory check reaches it
 
 Kata `3tn6`. `docs/design/agent-control-contract.md` maps v1's agent control protocol
