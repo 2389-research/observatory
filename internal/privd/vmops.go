@@ -50,6 +50,15 @@ func openDirAt(dir *os.File, name string, create bool) (*os.File, error) {
 	return os.NewFile(uintptr(fd), filepath.Join(dir.Name(), name)), nil
 }
 
+// jailBaseMode is the mode of <jail-base>/firecracker, the one directory in the
+// jail tree that root creates and the unprivileged daemon must walk through:
+// the runner dials v.sock beneath it and teardown stats the chroot. A base
+// without the traverse bits fails both, and fails them quietly -- the dial gets
+// EACCES and retries until the attach deadline, so the launch reports a timeout
+// and names no mode. 0755 matches the directory above it, and the VM ids it
+// would reveal are already listed by the stage root.
+const jailBaseMode = 0o755
+
 // jailRoot returns a descriptor on <JailBase>/firecracker/<vmID>/root, creating
 // the two directories on the way down when create is set.
 //
@@ -62,11 +71,37 @@ func openDirAt(dir *os.File, name string, create bool) (*os.File, error) {
 // <JailBase>/firecracker is the anchor. privd creates it, never chowns it, and
 // no guest has an entry there to swap, so it is the last component on the way
 // down that a guest cannot have touched.
+// EnsureJailBase creates <jailBase>/firecracker and leaves it in the mode the
+// unprivileged daemon needs to walk through.
+//
+// privd calls this once before it serves, and again on the create path of every
+// launch. Startup is where it belongs, because the first operation an
+// unreachable base breaks is teardown, and teardown asks for no directory to be
+// created: a privd that only fixed the mode while starting a VM would leave an
+// install unable to delete the VMs it inherited, and unable to launch its way
+// out, because those same VMs hold the capacity the launch is refused for.
+func EnsureJailBase(jailBase string) error {
+	base := filepath.Join(jailBase, "firecracker")
+	if err := os.MkdirAll(base, jailBaseMode); err != nil {
+		return fmt.Errorf("privd: mkdir jail base %q: %w", base, err)
+	}
+	// MkdirAll applies the umask and leaves an existing directory's mode alone,
+	// so neither path can be trusted to produce a base the daemon can reach
+	// through. Set it: the traverse bit is a requirement of the design, not a
+	// policy an operator tunes. What it guards is one level down -- each
+	// <vm_id> jail is 0750 owned by that VM's jail uid and gid, and only a
+	// caller in that group gets in.
+	if err := os.Chmod(base, jailBaseMode); err != nil {
+		return fmt.Errorf("privd: chmod jail base %q: %w", base, err)
+	}
+	return nil
+}
+
 func (r *RealOps) jailRoot(vmID string, create bool) (*os.File, error) {
 	base := filepath.Join(r.cfg.JailBase, "firecracker")
 	if create {
-		if err := os.MkdirAll(base, 0o750); err != nil {
-			return nil, fmt.Errorf("privd: mkdir jail base %q: %w", base, err)
+		if err := EnsureJailBase(r.cfg.JailBase); err != nil {
+			return nil, err
 		}
 	}
 	basefd, err := openDirNoFollow(base)

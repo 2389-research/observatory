@@ -86,6 +86,14 @@ func main() {
 		log.Fatalf("vmobs-privd: chmod socket: %v", err)
 	}
 
+	// The jail base is privd's to create and the unprivileged daemon's to walk
+	// through, and it is settled here rather than at the first launch: teardown
+	// reaches through it too, and a teardown creates nothing. See
+	// privd.EnsureJailBase.
+	if err := privd.EnsureJailBase(flags.jailBase); err != nil {
+		log.Fatalf("vmobs-privd: %v", err)
+	}
+
 	ops := privd.NewRealOps(privd.RealOpsCfg{
 		JailBase:        flags.jailBase,
 		StageRoot:       flags.stageRoot,
