@@ -404,3 +404,32 @@ the write the sentence describes. If you move code in a file the docs cite,
 grep the docs for its name — `git grep -n 'launch.go:' docs/` — and re-derive
 every number, or the next reader debugs from a line that means nothing. Kata
 `b2t2`.
+
+**privd refuses a host identity another live VM already holds.** `allocateSlot`
+scans one state dir, so two vmobsd processes on one host both hand out slot 0
+and both derive jail uid `JailUIDBase+0`, guest CID `CIDBase+0` and the first
+subnet. The allocator cannot see outside its own directory; privd can, because
+every claim on the host passes through it. `allocate_network` now refuses a
+subnet another entry holds, and `start_vm` refuses a uid or a CID another entry
+holds, both `invalid_state` and both naming the holder's vm_id — the collision
+used to be silent at the allocator and surface four stages later as "runner
+exited before attaching". The ledger is the registry: `release_vm` zeroes uid,
+gid, CID and pid together, so a non-zero uid is a live lease and a zero one is
+an identity the allocator is right to hand out again. An entry that will not
+parse refuses the claim rather than reading as free — unknown is not free, the
+same ruling `allocateSlot` makes about an unreadable manifest. The scan reads
+every entry including the requesting VM's own, which is safe only because
+`handleStartVM` writes the ledger after `StartVM` returns a pid: record the
+identity any earlier and a VM's own failed attempt would refuse its retry.
+`start_vm` also refuses a guest CID below 3 — vsock reserves 0-2 and firecracker
+rejects them, but the reason privd checks is that a zero CID in the ledger means
+released: `internal/config` accepts `cid_base: 0` and validates nothing, so slot
+0 would be a live VM whose identity reads as free and the second claim on it
+would be granted. Kata `4fap`.
+
+**One privd per host is an assumption, not an enforcement.**
+`cmd/vmobs-privd/main_linux.go` unlinks the socket path before listening, so a
+second privd takes the address from a live first one, which keeps running and
+serving nobody. The `4fap` refusals above are only sound while every claim goes
+through one process. `scripts/aibox03/vmobs-privd.service` is `Type=simple`, so
+systemd runs one instance; nothing in the binary does. Kata `c3f2`.
