@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/2389-research/observatory-v2/internal/durable"
 )
@@ -85,4 +86,42 @@ func (l *ledger) delete(vmID string) error {
 		return fmt.Errorf("ledger delete %s: %w", vmID, err)
 	}
 	return nil
+}
+
+// all returns every entry in the ledger, and fails naming any file it cannot
+// read. An entry that will not parse held a subnet, a uid and a CID, and which
+// ones is now unknown; callers use this to refuse a claim, so unknown must not
+// read as free.
+//
+// A file is a VM record only when its name is <valid vm_id>.json. get() never
+// had to care -- it addresses one name it was handed -- but a scan meets
+// whatever else is in the directory, including the ".publish-*.tmp" file
+// durable.WriteFile leaves behind if it crashes between create and rename.
+// Every write path validates the vm_id first, so nothing this rejects was ever
+// written by privd.
+func (l *ledger) all() ([]VMEntry, error) {
+	entries, err := os.ReadDir(l.dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("ledger scan: %w", err)
+	}
+	var out []VMEntry
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		id := strings.TrimSuffix(name, ".json")
+		if !ValidVMID(id) {
+			continue
+		}
+		entry, err := l.get(id)
+		if err != nil {
+			return nil, fmt.Errorf("ledger scan: %s: %w", id, err)
+		}
+		out = append(out, entry)
+	}
+	return out, nil
 }

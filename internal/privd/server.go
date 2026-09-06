@@ -185,6 +185,12 @@ func (s *Server) handleAllocateNetwork(raw json.RawMessage) Response {
 		return errResp("internal", "ledger read failed")
 	}
 
+	if holder, err := s.subnetHolder(r.CIDR); err != nil {
+		return errResp("internal", err.Error())
+	} else if holder != "" {
+		return errResp("invalid_state", fmt.Sprintf("subnet %s is already allocated to vm %s", r.CIDR, holder))
+	}
+
 	entry := VMEntry{
 		VMID:          r.VMID,
 		NetCIDR:       r.CIDR,
@@ -243,6 +249,10 @@ func (s *Server) handleReleaseNetwork(raw json.RawMessage) Response {
 	return okResp(nil)
 }
 
+// minGuestCID is the lowest vsock CID a guest may use. The spec reserves 0
+// (hypervisor), 1 (local) and 2 (host).
+const minGuestCID = 3
+
 func (s *Server) handleStartVM(raw json.RawMessage) Response {
 	var r StartVMReq
 	if err := json.Unmarshal(raw, &r); err != nil {
@@ -255,6 +265,17 @@ func (s *Server) handleStartVM(raw json.RawMessage) Response {
 	// UID range check.
 	if r.UID < s.cfg.UIDMin || r.UID >= s.cfg.UIDMax {
 		return errResp("bad_request", fmt.Sprintf("uid %d outside allowed range [%d, %d)", r.UID, s.cfg.UIDMin, s.cfg.UIDMax))
+	}
+
+	// CID range check. The vsock spec reserves 0-2 and firecracker refuses a
+	// guest_cid below 3, so a request carrying one could never have booted. It is
+	// checked here because identityHolder treats a zero CID in the ledger as an
+	// identity a released VM gave back: with cid_base set to 0 -- which config
+	// accepts -- slot 0 would produce a live VM whose CID reads as released, and
+	// the second claim on it would be granted. Refusing the request keeps the two
+	// meanings of zero apart.
+	if r.CID < minGuestCID {
+		return errResp("bad_request", fmt.Sprintf("cid %d is reserved by the vsock spec; a guest cid starts at %d", r.CID, minGuestCID))
 	}
 
 	// Every staged file must be one privd knows. The name is joined onto the
@@ -300,6 +321,12 @@ func (s *Server) handleStartVM(raw json.RawMessage) Response {
 	// Already started check.
 	if entry.PID != 0 {
 		return errResp("invalid_state", "vm already started")
+	}
+
+	if holder, what, err := s.identityHolder(r.UID, r.CID); err != nil {
+		return errResp("internal", err.Error())
+	} else if holder != "" {
+		return errResp("invalid_state", fmt.Sprintf("%s is already held by vm %s", what, holder))
 	}
 
 	// Populate entry fields from request before calling backend.
@@ -426,6 +453,74 @@ func (s *Server) handleReleaseVM(raw json.RawMessage) Response {
 		}
 	}
 	return okResp(nil)
+}
+
+// Host identities are claimed per daemon and spent per host. A vmobsd derives a
+// VM's jail uid and guest CID from a slot it allocated by scanning its own state
+// directory, and its subnet from an allocator that counts only its own VMs
+// (internal/jailer/manifest.go, internal/jailer/launch.go). Two vmobsd processes
+// on one host therefore hand out the same slot 0, the same uid, the same CID and
+// the same subnet, and neither can see the other.
+//
+// privd can. It is the single process every claim passes through, and its ledger
+// already records which VM holds which identity. The two functions below turn
+// that record into a refusal, so the second claim fails here, by name, instead of
+// succeeding and surfacing several stages later as a VM that would not boot.
+//
+// That rests on there being one privd per host, which the systemd unit gives us
+// and the binary does not: a second privd unlinks the first one's socket and
+// binds its own (kata c3f2). Two privds is two ledgers, or one ledger behind two
+// mutexes, and either way a claim can be granted twice.
+//
+// Both are called with s.mu held.
+
+// subnetHolder returns the vm_id already allocated cidr, or "" when it is free.
+//
+// The scan includes the requesting VM and does not need to exclude it: the
+// caller reaches this only after ledger.get returned ErrNotExist, so the
+// requesting VM has no entry here to match.
+func (s *Server) subnetHolder(cidr string) (string, error) {
+	entries, err := s.ledger.all()
+	if err != nil {
+		return "", err
+	}
+	for _, e := range entries {
+		if e.NetCIDR == cidr {
+			return e.VMID, nil
+		}
+	}
+	return "", nil
+}
+
+// identityHolder returns the vm_id already running under uid or on cid, and
+// which of the two it was, or "" when both are free.
+//
+// release_vm zeroes a VM's uid and CID together, so a zero in either field is an
+// entry that has given its identities back and the slot allocator is right to
+// hand them out again. That makes this a lease rather than a tombstone: only a
+// VM that still holds an identity can refuse a claim on it. Zero needs no guard
+// of its own here -- handleStartVM refuses a uid outside [UIDMin, UIDMax) and a
+// CID below 3, so no valid request can ask for the value a released entry holds.
+//
+// The scan includes the requesting VM and does not need to exclude it. Its own
+// entry carries a uid and a CID only once handleStartVM has written the ledger,
+// which happens after StartVM has returned a pid -- and an entry with a pid is
+// refused by the already-started guard above, before reaching here. So the only
+// entry a VM can meet for itself is one whose identities are zero.
+func (s *Server) identityHolder(uid int, cid uint32) (string, string, error) {
+	entries, err := s.ledger.all()
+	if err != nil {
+		return "", "", err
+	}
+	for _, e := range entries {
+		if e.UID == uid {
+			return e.VMID, fmt.Sprintf("jail uid %d", uid), nil
+		}
+		if e.CID == cid {
+			return e.VMID, fmt.Sprintf("guest cid %d", cid), nil
+		}
+	}
+	return "", "", nil
 }
 
 // peerUID is defined in peer_linux.go (linux) and peer_other.go (other platforms).
