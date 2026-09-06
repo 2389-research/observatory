@@ -128,3 +128,32 @@ func TestAppArmorAllowsTheJailerAndNothingMore(t *testing.T) {
 		}
 	}
 }
+
+// TestAppArmorAllowsTheProbeChildsPrivateRoot: privd's jail probe runs its child
+// with SysProcAttr.Unshareflags CLONE_NEWNS, and Go's own exec does
+// mount("", "/", "", MS_REC|MS_PRIVATE) in that child before execve
+// (syscall/exec_linux.go). That mount is privd's, not the jailer's, so the trace
+// that produced the rules above never saw it.
+//
+// Measured 2026-09-06 on aibox03 with the profile loaded and only rslave allowed:
+//
+//	apparmor="DENIED" operation="mount" info="failed flags match" error=-13
+//	profile="vmobs-jailer" name="/" comm="vmobs-privd" flags="rw, rprivate"
+//
+// error=-13 is EACCES, raised in the forked child, so Go reported it as
+// "fork/exec /usr/local/sbin/vmobs-privd: permission denied" -- an exec failure
+// naming no mount. privd refused to bind its socket and the API never came up.
+//
+// rprivate is the stricter of the two: rslave still lets host mount events into
+// the container, rprivate lets nothing propagate either way. Neither can reach
+// the host, which is what the rule is defending.
+func TestAppArmorAllowsTheProbeChildsPrivateRoot(t *testing.T) {
+	raw, err := os.ReadFile(apparmorPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", apparmorPath, err)
+	}
+	const want = "mount options=(rw, rprivate) -> /,"
+	if !strings.Contains(string(raw), want) {
+		t.Errorf("profile is missing %q; privd cannot exec its jail probe child without it", want)
+	}
+}

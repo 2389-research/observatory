@@ -6,7 +6,10 @@
 # rendered with Name=vmobs-jailer and DaemonProfile=unconfined.
 #
 # The only change from that template is the `deny mount,` line, which is replaced
-# by rules permitting exactly what `jailer` was traced doing and nothing else:
+# by rules permitting exactly what the two confined programs were traced doing and
+# nothing else.
+#
+# `jailer`, per launch:
 #
 #   setns(3, CLONE_NEWNET)                              -- no mount rule needed
 #   unshare(CLONE_NEWNS)                                -- no mount rule needed
@@ -14,6 +17,10 @@
 #   mount(<jail>/root, <jail>/root, NULL, MS_BIND|MS_REC, NULL)
 #   pivot_root(".", "old_root")
 #   umount2("old_root", MNT_DETACH)
+#
+# `vmobs-privd`, once at startup, running its jail probe child:
+#
+#   mount(NULL, "/", NULL, MS_REC|MS_PRIVATE, NULL)     -- made by Go, not by us
 #
 # Everything else the jailer does -- mknod of /dev/{kvm,net/tun,urandom,userfaultfd}
 # and chown of the jail tree -- is covered by the template's blanket `capability,`
@@ -54,6 +61,13 @@ profile vmobs-jailer flags=(attach_disconnected,mediate_deleted) {
   # The jailer makes the container's mount tree private before pivoting, so a
   # mount it creates cannot propagate back to the host.
   mount options=(rw, rslave) -> /,
+  # privd's jail probe forks a child holding CLONE_NEWNS, and Go's exec marks /
+  # private in that child before execve (syscall/exec_linux.go). It is a second,
+  # stricter propagation change on the same mount point, made by the runtime
+  # rather than by any code here -- which is why tracing the jailer never found
+  # it. Denied, the kernel raises EACCES in the forked child and Go reports an
+  # exec failure naming no mount at all; privd then refuses to bind its socket.
+  mount options=(rw, rprivate) -> /,
   # pivot_root needs its new root to be a mount point; the jailer bind-mounts
   # each jail directory onto itself to make one. Confined to the chroot base.
   mount options=(rw, rbind) /srv/vmobs/jail/** -> /srv/vmobs/jail/**,
