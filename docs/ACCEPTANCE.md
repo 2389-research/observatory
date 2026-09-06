@@ -144,9 +144,9 @@ AT-001: TESTED_PASS.
 
 AT-005: TESTED_PASS (partial — nine injection points; not injected: a failure between a
   stage's side effect and the manifest write that records it, at the three writes
-  launch.go:150/:176/:226, where doRollback reads a manifest that does not yet name the stage
+  launch.go:160/:191/:242, where doRollback reads a manifest that does not yet name the stage
   and skips its release — the runner case, 4db1081, is a known instance — and, on a restart
-  only, any failure before the write at :150, because the reserved write at :111 replaces the
+  only, any failure before the write at :160, because the reserved write at :115 replaces the
   stopped VM's manifest and with it the network record that rollback and Release act on. Not a
   real-KVM result: fake VMM — a privd test backend's `sleep 300` stand-in — with real privd,
   runner and guest.Agent code; labeled per this file's fake-runtime rule; does not satisfy a
@@ -161,13 +161,13 @@ AT-005: TESTED_PASS (partial — nine injection points; not injected: a failure 
     state_dir_mkdir_failure, manifest_write_fresh_vm, manifest_write_restart,
     staging_digest_mismatch, stage_copy_failure, allocate_network_failure, start_vm_failure,
     runner_spawn_failure, wrong_token_attach_timeout.
-  Each subtest makes one step fail — the state-dir mkdir at launch.go:107 (vms/ made
-  read-only; the subtest refuses to run as root), the reserved manifest write at :111 for a
+  Each subtest makes one step fail — the state-dir mkdir at launch.go:111 (vms/ made
+  read-only; the subtest refuses to run as root), the reserved manifest write at :115 for a
   fresh VM and again for a restart (the launch runs in a child process under RLIMIT_FSIZE=0,
   so writeManifest's first write fails with the state dir already made), artifact verification
-  at :268, the rootfs copy inside doStage after :273 (a directory planted where the file goes,
-  after vmlinux has been copied), the allocate_network verb at :146, the start_vm verb at
-  :162, the runner spawn at :218, or the guest attach (wrong token, timeout) — and asserts what
+  at :292, the rootfs copy inside doStage at :312 (a directory planted where the file goes,
+  after vmlinux has been copied), the allocate_network verb at :156, the start_vm verb at
+  :177, the runner spawn at :233, or the guest attach (wrong token, timeout) — and asserts what
   the failure leaves and the exact backend call sequence the rollback issues, proving cleanup
   calls only the release verbs for what was actually allocated: the five failures before the
   first privd verb see no backend call at all and, except for the restart, no state dir,
@@ -182,7 +182,7 @@ AT-005: TESTED_PASS (partial — nine injection points; not injected: a failure 
   launch of the same VM ID that succeeds after the injected failure, over the same privd server
   and prefix pool; manifest_write_restart's recovery must keep the stopped VM's slot and CIDR.
   What that proves: the VM's state dir, manifest and slot — and the uid and CID
-  derived from the slot (launch.go:63-70) — are gone, because allocateSlot's manifest scan
+  derived from the slot (launch.go:72-74) — are gone, because allocateSlot's manifest scan
   (internal/jailer/manifest.go:127) hands the slot out again. What it does not prove: the /30
   prefix is NOT returned — internal/network/alloc.go has Next() (:152) and Exclusions() (:146)
   and no release path, so a rolled-back launch keeps its prefix for the daemon's lifetime, and
@@ -191,7 +191,11 @@ AT-005: TESTED_PASS (partial — nine injection points; not injected: a failure 
   launch is evidenced only by TestManagerLaunchFailure (internal/runtime/manager_test.go:176,
   :212-218), a SPEC §18 fake-runtime unit test. wrong_token_attach_timeout also asserts
   the runner process is gone before recovery and that the injected wrong token never appears in
-  any error string (§15.3).
+  any error string (§15.3), and that the launch error names an archive under <StateDir>/failed/
+  holding a non-empty runner.log and no token — the runner's own account of the fatal step,
+  which doRollback used to delete along with the state dir (kata b2t2). Every subtest checks
+  the same archive whenever its error names one; only the attach case requires one, because it
+  is the only injection point at which the runner has actually run and written something.
   Harness: a real privd.Server and a real *privd.Client, wrapped by a decorator that injects one
   failure on demand and records every call; a real vmobs-runner binary; for the two
   manifest-write subtests, the test binary re-executed as a child with RLIMIT_FSIZE lowered to
@@ -663,8 +667,10 @@ AT-075: TESTED_PASS (partial — the controller half is live; the runner half is
 An earlier draft of AT-075 booted a second VM under a throwaway daemon on a private state dir
 while the primary controller was still up. It never reached the restart — the launch failed at
 stage attached with "runner exited before attaching: exit status 1" — and the exact fatal step
-was not isolated, because doRollback removes the VM state dir and runner.log with it. Recovering
-that log needs a product change outside M2a's scope. What is certain is that the setup put two
+was not isolated, because doRollback removed the VM state dir and runner.log with it. That log
+now survives: doRollback copies runner.log and runner-state.json into <StateDir>/failed/ before
+the removal and the launch error names the archive (internal/jailer/postmortem.go, kata b2t2).
+The run above predates it, so its fatal step stays unknown. What is certain is that the setup put two
 live controllers on one host, which production never does: allocateSlot (internal/jailer/
 manifest.go) scans only its own state dir, so both handed out slot 0, and slot is what
 uid = JailUIDBase + slot and cid = CIDBase + slot are derived from. The scenario AT-075 names

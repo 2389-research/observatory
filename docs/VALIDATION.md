@@ -1,5 +1,32 @@
 # Specification Package Validation
 
+## Revision 21 (2026-09-06) — a failed launch keeps its runner log, and AT-005's line citations are corrected
+
+Kata `b2t2`. `doRollback` removes the VM state directory, and for a launch that failed at
+`runner_spawned` or `attached` that directory held `runner.log` — the only account of the fatal
+step. The stage name survived and the cause did not. `internal/jailer/postmortem.go` now copies
+`runner.log` and `runner-state.json` into `<StateDir>/failed/<timestamp>-<vm>-<boot>/` before the
+removal, and the launch error names the archive, so the reason reaches the operator through the
+failure record the API already exposes. The capability token is never copied (§15.3); the copies
+are capped at 256 KiB with a first line naming what was dropped; sixteen archives are kept.
+
+`docs/ACCEPTANCE.md` changes in two ways. The AT-075 note that said recovering that log "needs a
+product change outside M2a's scope" is replaced by what the product now does, with the run it
+describes still marked unexplained — the fix does not retroactively diagnose a run that predates
+it. AT-005's status block gains the assertion the injection suite now makes about the archive.
+
+Nine line citations into `internal/jailer/launch.go` were already wrong before this change and
+are corrected: the three post-side-effect manifest writes (`:150/:176/:226` → `:160/:191/:242`),
+the reserved write (`:111` → `:115`), the state-dir mkdir (`:107` → `:111`), artifact
+verification (`:268` → `:292`), the rootfs copy (`:273` → `:312`), the `allocate_network` verb
+(`:146` → `:156`), `start_vm` (`:162` → `:177`), the runner spawn (`:218` → `:233`), and the
+uid/CID derivation (`:63-70` → `:72-74`). They drifted by different amounts because separate
+commits added lines at separate places, which is why nothing caught them. `check.py` verifies the
+package's structure, not that a number points where its sentence says — a line citation into code
+is the same failure mode as a digest quoted into prose, and it rots the same way.
+
+47 checks, all passing.
+
 ## Revision 20 (2026-09-06) — acceptance evidence becomes a record, and revision 19's lock claim is withdrawn
 
 Adds an "Execution records" section to the evidence rules in `docs/ACCEPTANCE.md` and replaces
