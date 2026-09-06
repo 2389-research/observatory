@@ -44,8 +44,18 @@ func main() {
 
 	applyProcessUmask()
 
-	// Remove a stale socket from a previous run so Listen doesn't fail with EADDRINUSE.
-	_ = os.Remove(flags.socket)
+	// Own the socket path and the ledger directory before touching either, and
+	// clear the stale socket a previous run left only once that hold proves
+	// nothing is listening on the name. A second privd fails here, naming the
+	// holder, instead of unlinking a live one's socket and serving its clients.
+	//
+	// The kernel drops both holds when this process ends however it ends, so the
+	// release below is the orderly path rather than the guarantee.
+	single, err := acquireSingleton(flags)
+	if err != nil {
+		log.Fatalf("vmobs-privd: %v", err)
+	}
+	defer single.release()
 
 	ln, err := net.Listen("unix", flags.socket)
 	if err != nil {
@@ -85,6 +95,9 @@ func main() {
 
 	serveErr := srv.Serve(ctx, ln)
 	stop()
+	// The socket goes; the lock files stay. Removing a lock file while another
+	// privd is between its open and its flock would leave the two holding
+	// different inodes and both believing they own the host.
 	_ = os.Remove(flags.socket)
 	if serveErr != nil {
 		log.Printf("vmobs-privd: serve: %v", serveErr)

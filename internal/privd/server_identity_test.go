@@ -236,7 +236,13 @@ func TestAllocateNetworkIgnoresDebrisInTheLedgerDirectory(t *testing.T) {
 	s, _, _ := identityFixture(t)
 
 	mustOK(t, "allocate first", allocateCIDR(t, s, "vm-first", "10.201.0.0/30"))
-	for _, name := range []string{".publish-12345.tmp", "notes.txt", ".hidden.json"} {
+	// Two of these are load-bearing rather than illustrative. LedgerLockName is
+	// privd's own singleton lock, which lives in this directory and must never
+	// read as a VM record -- ValidVMID drops it on the leading dot. And
+	// "vm-no-extension" is a valid VM id with no suffix: the .json check is the
+	// only thing standing between it and a get() for a file that is not there,
+	// which would fail the scan and refuse every claim on the host.
+	for _, name := range []string{".publish-12345.tmp", "notes.txt", ".hidden.json", LedgerLockName, "vm-no-extension"} {
 		if err := os.WriteFile(filepath.Join(s.ledger.dir, name), []byte("{not json"), 0o600); err != nil {
 			t.Fatalf("plant %s: %v", name, err)
 		}

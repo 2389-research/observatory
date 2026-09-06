@@ -99,6 +99,13 @@ func (l *ledger) delete(vmID string) error {
 // durable.WriteFile leaves behind if it crashes between create and rename.
 // Every write path validates the vm_id first, so nothing this rejects was ever
 // written by privd.
+// LedgerLockName is the file vmobs-privd flocks inside its ledger directory to
+// prove it is the only privd on this host (cmd/vmobs-privd/singleton.go). It
+// lives here, beside the scan that has to ignore it, so the two cannot drift
+// apart: ValidVMID drops it on the leading dot, and TestAllocateNetworkIgnores-
+// DebrisInTheLedgerDirectory plants it by this name to keep that true.
+const LedgerLockName = ".privd.lock"
+
 func (l *ledger) all() ([]VMEntry, error) {
 	entries, err := os.ReadDir(l.dir)
 	if err != nil {
