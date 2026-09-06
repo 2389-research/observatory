@@ -427,9 +427,34 @@ released: `internal/config` accepts `cid_base: 0` and validates nothing, so slot
 0 would be a live VM whose identity reads as free and the second claim on it
 would be granted. Kata `4fap`.
 
-**One privd per host is an assumption, not an enforcement.**
-`cmd/vmobs-privd/main_linux.go` unlinks the socket path before listening, so a
-second privd takes the address from a live first one, which keeps running and
-serving nobody. The `4fap` refusals above are only sound while every claim goes
-through one process. `scripts/aibox03/vmobs-privd.service` is `Type=simple`, so
-systemd runs one instance; nothing in the binary does. Kata `c3f2`.
+**privd enforces one instance per host, with two flocks taken before it binds.**
+`acquireSingleton` holds `<socket>.lock` and `<ledger-dir>/.privd.lock` before
+anything is removed or listened on, and only then clears the stale socket a
+previous run left — the hold is what makes that socket provably stale. Two locks
+because there are two invariants: the address, and the ledger the `4fap`
+refusals above are read from. Two privds pointed at one ledger directory by
+different socket paths would serialize their claims behind separate mutexes and
+both read an identity as free, so the socket lock alone would not be enough. The
+lock files are never removed on shutdown, deliberately: unlinking one while
+another privd sits between its `open` and its `flock` leaves the two holding
+different inodes and both believing they own the host. Neither lock catches two
+complete installs that share nothing, and nothing claims to. Kata `c3f2`.
+
+**An flock held through an `*os.File` can be released by the garbage collector.**
+`os.File` carries a cleanup that closes the fd once nothing refers to the file,
+and closing an fd releases its flock — so a lock the caller stopped mentioning
+can be collected out from under a running process. Measured on go1.26.6, not
+theorised: `internal/privd`'s `InstanceLock` keeps a bare int fd for this reason
+and `TestInstanceLockSurvivesCollection` fails against an `*os.File` version.
+`O_CLOEXEC` on that fd is load-bearing too — privd execs the jailer and
+firecracker execs beneath it, and `os/exec` relies on `O_CLOEXEC` rather than
+sweeping descriptors, so an inherited lock would leave a guest holding privd's
+hold. Kata `c3f2`.
+
+**Do not lexically clean a path you are going to lock and then bind.**
+`filepath.Abs`/`Clean` resolve `..` textually; the kernel resolves it after
+following symlinks, so the two disagree whenever a `..` sits after a symlink
+component. A privd that cleaned its socket path first could take its lock in one
+directory and bind its socket in another, on top of a live privd it never
+noticed. `acquireSingleton` uses the paths exactly as given so the lock, the
+removal and the bind are one string the kernel resolves one way. Kata `c3f2`.

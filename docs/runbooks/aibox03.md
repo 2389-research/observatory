@@ -99,6 +99,24 @@ ls -l /run/vmobs/privd.sock
 scripts/linux 'go test ./internal/privd/ -run TestPrivdLiveSmoke -v'
 ```
 
+### One instance, enforced
+
+`vmobs-privd` takes an exclusive `flock` on `/run/vmobs/privd.sock.lock` and on
+`/run/vmobs/privd/.privd.lock` before it removes the stale socket or binds, so a
+second instance refuses to start rather than unlinking a live one's socket:
+
+```
+vmobs-privd: another vmobs-privd owns the socket /run/vmobs/privd.sock: \
+  lock /run/vmobs/privd.sock.lock is already held by pid 1234: \
+  resource temporarily unavailable
+```
+
+That message means the named pid is alive and serving — do not delete the lock
+file to get past it. The hold belongs to the open file description, so the kernel
+drops it the moment that process ends, however it ends; a lock file left on disk
+with nothing holding it does not block anything. Both paths sit under
+`RuntimeDirectory=vmobs vmobs/privd`, which systemd removes when the unit stops.
+
 ### Caution
 
 Agents must never restart `vmobs-privd` directly (`systemctl restart vmobs-privd` requires root). If the daemon goes down, the operator re-runs setup.sh or manually restarts via `sudo systemctl restart vmobs-privd`.
