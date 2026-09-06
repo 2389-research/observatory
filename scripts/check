@@ -12,6 +12,15 @@ fi
 fail=0
 note() { printf '%s\n' "$*"; }
 
+# The Go gates print their own failures. The web gates are noisy enough on
+# success that they are silenced, which leaves a failing one naming nothing --
+# a flaky vitest run and a real regression print the identical line, and the
+# only way to tell them apart is to run the step again by hand. Send that
+# output to a file per step and name the file in the failure instead.
+logdir="${TMPDIR:-/tmp}"
+logdir="${logdir%/}/vmobs-check"   # TMPDIR often ends in a slash
+mkdir -p "$logdir"
+
 unformatted=$(gofmt -l cmd internal tests 2>/dev/null)
 if [ -n "$unformatted" ]; then
   note "FAIL gofmt — run: gofmt -w $unformatted"
@@ -54,14 +63,19 @@ fi
 # serves a page that no longer matches web/src. Rebuilding and asking git
 # whether anything moved is the only honest way to know.
 if command -v npm >/dev/null 2>&1; then
-  if (cd web && npm ci >/dev/null 2>&1 && npm run typecheck >/dev/null 2>&1); then
+  if (cd web && npm ci && npm run typecheck) >"$logdir/web-typecheck.log" 2>&1; then
     note "PASS web typecheck"
   else
-    note "FAIL web typecheck — run: cd web && npm ci && npm run typecheck"
+    note "FAIL web typecheck — $logdir/web-typecheck.log; rerun: cd web && npm ci && npm run typecheck"
     fail=1
   fi
-  if (cd web && npm test >/dev/null 2>&1); then note "PASS web tests"; else note "FAIL web tests — run: cd web && npm test"; fail=1; fi
-  if (cd web && npm run build >/dev/null 2>&1); then
+  if (cd web && npm test) >"$logdir/web-test.log" 2>&1; then
+    note "PASS web tests"
+  else
+    note "FAIL web tests — $logdir/web-test.log; rerun: cd web && npm test"
+    fail=1
+  fi
+  if (cd web && npm run build) >"$logdir/web-build.log" 2>&1; then
     if git diff --quiet -- web/dist; then
       note "PASS web dist current"
     else
@@ -69,7 +83,7 @@ if command -v npm >/dev/null 2>&1; then
       fail=1
     fi
   else
-    note "FAIL web build — run: scripts/build-web"
+    note "FAIL web build — $logdir/web-build.log; rerun: scripts/build-web"
     fail=1
   fi
 else
