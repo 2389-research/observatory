@@ -128,8 +128,14 @@ func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (*lock.Images
 	// error message surfaces which step failed (§5.3).
 	currentStage := stageReserved
 	rollback := func(stageErr error) error {
-		a.doRollback(vmID)
-		return fmt.Errorf("launch %s failed at stage %s: %w", vmID, currentStage, stageErr)
+		rescued := a.doRollback(vmID)
+		if rescued == "" {
+			return fmt.Errorf("launch %s failed at stage %s: %w", vmID, currentStage, stageErr)
+		}
+		// The stage says which step failed; the archive is the only place the
+		// answer to "why" survives the rollback that just removed the state dir.
+		return fmt.Errorf("launch %s failed at stage %s: %w; runner output rescued to %s",
+			vmID, currentStage, stageErr, rescued)
 	}
 
 	// ── Step 3: Stage ─────────────────────────────────────────────────────────
@@ -512,15 +518,22 @@ func (a *Adapter) waitAttached(ctx context.Context, stateFile string, cmd *exec.
 // reports the resource is still there says so on stderr, because "tolerated" and
 // "gone" are different answers and only one of them is safe to assume.
 //
+// Returns the archive its rescue wrote, or "" when there was nothing to rescue.
+// The last thing this function does is delete the VM's state directory, which is
+// where the runner's log lives, so the rescue has to happen here and the caller
+// has to be told where it went.
+//
 // Called with launchMu held by design (§5.3): the launch slot must not be reused
 // until the transaction is fully unwound. Two 2s sleeps (SIGTERM grace for the
 // runner, then for the VMM) mean worst-case ~4s of queueing for concurrent Launch
 // calls — that is intentional and acceptable.
-func (a *Adapter) doRollback(vmID string) {
+func (a *Adapter) doRollback(vmID string) string {
 	m, err := readManifest(a.cfg.StateDir, vmID)
 	if err != nil {
 		// If we can't read the manifest we can't know what to clean up — skip.
-		return
+		// Nothing below runs, including the state dir removal, so the runner's
+		// log is still where the launch left it and needs no rescue.
+		return ""
 	}
 
 	// Determine which stages completed.
@@ -560,13 +573,14 @@ func (a *Adapter) doRollback(vmID string) {
 		releaseErr := a.releaseVMWhenDead(releaseCtx, vmID)
 		releaseCancel()
 		if releaseErr != nil {
-			// Swallowed, then reported. doRollback returns nothing — Launch's caller
-			// gets the error that started the rollback, which is the more useful one —
-			// and returning early here would skip the network release as well. But a
-			// failure at this point is not an already-gone resource: it means the
-			// chroot is still on disk, the ledger entry is still pinned, and the VM
-			// may still be running behind a launch that reported failure. That has to
-			// reach the daemon log; settling it needs a cleanup backlog (M1b).
+			// Swallowed, then reported. The only thing doRollback returns is the
+			// rescue path — Launch's caller gets the error that started the rollback,
+			// which is the more useful one — and returning early here would skip the
+			// network release as well. But a failure at this point is not an
+			// already-gone resource: it means the chroot is still on disk, the ledger
+			// entry is still pinned, and the VM may still be running behind a launch
+			// that reported failure. That has to reach the daemon log; settling it
+			// needs a cleanup backlog (M1b).
 			fmt.Fprintf(os.Stderr,
 				"jailer: rollback: warn: release jail chroot for %s: %v; chroot and privd ledger entry retained, and the VM may still be running\n",
 				vmID, releaseErr)
@@ -584,11 +598,21 @@ func (a *Adapter) doRollback(vmID string) {
 	stageDir := filepath.Join(a.cfg.StageRoot, vmID)
 	_ = durable.RemoveAll(stageDir)
 
+	// Rescue the runner's log and phase file before the removal below takes them.
+	// The runner was killed at the top of this function, so the log is complete;
+	// rescuing any earlier would archive a half-written one.
+	rescued, rescueErr := rescueFailedLaunch(a.cfg.StateDir, vmID, m.BootID)
+	if rescueErr != nil {
+		fmt.Fprintf(os.Stderr, "jailer: rollback: warn: rescue runner artifacts for %s: %v\n", vmID, rescueErr)
+	}
+
 	// Remove VM state dir. Rollback is best-effort by contract — the caller
 	// reports the stage failure that brought it here, not this one — so the
 	// barrier is taken and its answer discarded like the removal's own.
 	vmStateDir := filepath.Join(a.cfg.StateDir, "vms", vmID)
 	_ = durable.RemoveAll(vmStateDir)
+
+	return rescued
 }
 
 // killRunnerByPID sends SIGTERM to the runner pid, waits 2s, then SIGKILL.

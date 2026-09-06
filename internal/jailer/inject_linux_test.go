@@ -211,6 +211,55 @@ func assertCleanup(t *testing.T, h *injectHarness, vmID, failedAt string, launch
 	if _, err := os.Stat(stageDir); !os.IsNotExist(err) {
 		t.Errorf("stage dir still present after rollback (err: %v)", err)
 	}
+
+	// Whatever else the rollback did, an archive it names has to be there and
+	// has to hold something. An error that points at an empty or missing
+	// directory is worse than one that points nowhere.
+	if archive := rescuedArchive(launchErr); archive != "" {
+		assertRescuedArchive(t, archive)
+	}
+}
+
+// rescueMarker is what the launch error puts before the archive path. Kept in
+// one place so the tests break loudly if launch.go stops saying it.
+const rescueMarker = "runner output rescued to "
+
+// rescuedArchive returns the archive path a launch error names, or "" if it
+// names none.
+func rescuedArchive(launchErr error) string {
+	if launchErr == nil {
+		return ""
+	}
+	msg := launchErr.Error()
+	i := strings.Index(msg, rescueMarker)
+	if i < 0 {
+		return ""
+	}
+	return msg[i+len(rescueMarker):]
+}
+
+// assertRescuedArchive checks the one thing the archive exists to provide: the
+// runner's own output, with the capability token nowhere near it (§15.3).
+func assertRescuedArchive(t *testing.T, archive string) {
+	t.Helper()
+	entries, err := os.ReadDir(archive)
+	if err != nil {
+		t.Errorf("launch error names rescue archive %s, which cannot be read: %v", archive, err)
+		return
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), "token") {
+			t.Errorf("§15.3 violation: rescue archive %s holds %q", archive, e.Name())
+		}
+	}
+	body, err := os.ReadFile(filepath.Join(archive, "runner.log"))
+	if err != nil {
+		t.Errorf("rescue archive %s has no readable runner.log: %v", archive, err)
+		return
+	}
+	if len(body) == 0 {
+		t.Errorf("rescue archive %s holds an empty runner.log, which explains nothing", archive)
+	}
 }
 
 // assertRecoveryLaunch clears any failure injection on h and verifies that a
@@ -966,6 +1015,15 @@ func TestInject(t *testing.T) {
 		assertRunnerGone(t, vmID)
 
 		assertCleanup(t, h, vmID, "attached", launchErr)
+
+		// b2t2: this is the failure that started the issue — the runner exited
+		// before attaching and doRollback removed the state dir holding the only
+		// account of why. The error has to hand the reader that account.
+		archive := rescuedArchive(launchErr)
+		if archive == "" {
+			t.Fatalf("launch failed at stage attached but the error names no rescued runner log: %v", launchErr)
+		}
+		assertRescuedArchive(t, archive)
 
 		// §15.3: no 64-char lowercase-hex substring may appear in the error string —
 		// catches any leaked capability token, not just the planted wrongToken value.
