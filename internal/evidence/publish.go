@@ -12,7 +12,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/2389-research/observatory-v2/internal/durable"
@@ -201,24 +200,4 @@ func digestFile(path string) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
-// Names lists the record files in dir, for a caller that wants to report where
-// evidence landed without reading it.
-func Names(dir string) ([]string, error) {
-	entries, err := os.ReadDir(dir)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("evidence: read %s: %w", dir, err)
-	}
-	var out []string
-	for _, entry := range entries {
-		if name := entry.Name(); !entry.IsDir() && !strings.HasPrefix(name, ".") {
-			out = append(out, name)
-		}
-	}
-	sort.Strings(out)
-	return out, nil
 }
