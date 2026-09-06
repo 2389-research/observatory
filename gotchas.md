@@ -381,3 +381,26 @@ holds one record per acceptance row, and each carries the lock digest, the
 binary digests and the pinned artifact digests the run actually verified
 against. Never hand-write a digest into prose when a record can carry it. Kata
 `2jt1`.
+
+**A failed launch's runner log survives in `<StateDir>/failed/`.** `doRollback`
+removes `<StateDir>/vms/<id>`, which is where `runner.log` lives, so a launch
+that failed at `runner_spawned` or `attached` used to report the stage and
+delete the reason. It now copies `runner.log` and `runner-state.json` into
+`<StateDir>/failed/<timestamp>-<vm>-<boot>/` first, and the launch error names
+that directory — which reaches the operator, because `failLaunch` writes the
+error string into the VM's failure reason and the operation's error message.
+Sixteen archives are kept, each artifact capped at 256 KiB with a first line
+saying what was dropped. The capability token is never copied (§15.3). The
+archive sits beside `vms/`, not inside it: `allocateSlot`, `Reconcile` and the
+M1a gate's `stateDirEntries` all read every entry of `<StateDir>/vms` as a VM,
+and an archive in there would read as a leak. Kata `b2t2`.
+
+**Line citations into code rot exactly like hand-copied digests.** Nine
+`internal/jailer/launch.go` citations in `docs/ACCEPTANCE.md`'s AT-005 block
+were wrong before anyone noticed, by four lines in one place and ten in
+another, because separate commits inserted lines at separate points. `check.py`
+validates the package's structure and cannot tell that `:150` no longer names
+the write the sentence describes. If you move code in a file the docs cite,
+grep the docs for its name — `git grep -n 'launch.go:' docs/` — and re-derive
+every number, or the next reader debugs from a line that means nothing. Kata
+`b2t2`.
