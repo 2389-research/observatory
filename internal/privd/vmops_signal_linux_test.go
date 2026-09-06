@@ -153,14 +153,13 @@ func TestSignalPathsGiveBackTheirDescriptors(t *testing.T) {
 	// The pid file names our stand-in, but the jail dir belongs to another VM,
 	// so the argv check withholds the kill.
 	writeJailedPID(t, jailBase, "vm-signal-neighbour", f.pid)
-	neighbourJail := filepath.Join(jailBase, "firecracker", "vm-signal-neighbour")
 
 	before := pidfdCount(t)
 	for i := 0; i < 50; i++ {
 		if err := ops.SignalVM(stale, "term"); err == nil {
 			t.Fatalf("SignalVM with a stale entry returned nil on iteration %d", i)
 		}
-		ops.killJailedVMM(neighbourJail, "vm-signal-neighbour")
+		ops.killJailedVMM("vm-signal-neighbour")
 	}
 	if !f.alive(t) {
 		t.Fatal("the stand-in died during the leak loop; both routes were supposed to refuse")

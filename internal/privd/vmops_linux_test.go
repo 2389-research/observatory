@@ -276,7 +276,12 @@ func TestVerifyAndCopyFromPinnedFd(t *testing.T) {
 	// Copy from the pinned fd — must ignore the swapped path content.
 	// Use current uid/gid; chowning to root requires privileges we don't have here.
 	dstDir := t.TempDir()
-	if err := privd.CopyFromPinnedFd(fd, dstDir, staged, os.Getuid(), os.Getgid()); err != nil {
+	dstFd, err := os.Open(dstDir)
+	if err != nil {
+		t.Fatalf("open dst dir: %v", err)
+	}
+	defer dstFd.Close()
+	if err := privd.CopyFromPinnedFd(fd, dstFd, staged, os.Getuid(), os.Getgid()); err != nil {
 		t.Fatalf("CopyFromPinnedFd: %v", err)
 	}
 

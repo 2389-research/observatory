@@ -76,7 +76,12 @@ func TestStagedFileNameCannotEscapeTheJailRoot(t *testing.T) {
 		defer pinned.Close()
 		// uid/gid -1 leaves ownership alone, so the copy needs no root here. A root
 		// privd would also chown the escaped path to the VM's uid.
-		copyErr := CopyFromPinnedFd(pinned, jailRoot, f, -1, -1)
+		jailRootDir, openErr := openDirNoFollow(jailRoot)
+		if openErr != nil {
+			t.Fatalf("open jail root: %v", openErr)
+		}
+		defer jailRootDir.Close()
+		copyErr := CopyFromPinnedFd(pinned, jailRootDir, f, -1, -1)
 		got, readErr := os.ReadFile(dstPath)
 		if copyErr == nil && readErr == nil {
 			t.Fatalf("VerifyStagedFile accepted %q and the copy wrote %d bytes to %q, outside the jail root %q: %q",

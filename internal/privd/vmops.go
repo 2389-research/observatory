@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -23,6 +24,76 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// openDirNoFollow opens name as a directory, refusing a symlink at the last
+// component. Callers own the returned descriptor.
+func openDirNoFollow(name string) (*os.File, error) {
+	fd, err := unix.Open(name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), name), nil
+}
+
+// openDirAt opens name inside dir as a directory, creating it first when create
+// is set. The open refuses a symlink, so a name a guest replaced with one is an
+// error here instead of a redirection later.
+func openDirAt(dir *os.File, name string, create bool) (*os.File, error) {
+	if create {
+		if err := unix.Mkdirat(int(dir.Fd()), name, 0o750); err != nil && !errors.Is(err, unix.EEXIST) {
+			return nil, err
+		}
+	}
+	fd, err := unix.Openat(int(dir.Fd()), name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), filepath.Join(dir.Name(), name)), nil
+}
+
+// jailRoot returns a descriptor on <JailBase>/firecracker/<vmID>/root, creating
+// the two directories on the way down when create is set.
+//
+// Everything privileged that StartVM does after this is aimed at the descriptor
+// rather than at the path, because the path stops being privd's the moment step
+// 2 chowns the tree: from then on the guest's uid owns <vmID> and <vmID>/root,
+// and can replace either name -- or any name inside root -- with a symlink.
+// Resolving the path again would follow it, as root.
+//
+// <JailBase>/firecracker is the anchor. privd creates it, never chowns it, and
+// no guest has an entry there to swap, so it is the last component on the way
+// down that a guest cannot have touched.
+func (r *RealOps) jailRoot(vmID string, create bool) (*os.File, error) {
+	base := filepath.Join(r.cfg.JailBase, "firecracker")
+	if create {
+		if err := os.MkdirAll(base, 0o750); err != nil {
+			return nil, fmt.Errorf("privd: mkdir jail base %q: %w", base, err)
+		}
+	}
+	basefd, err := openDirNoFollow(base)
+	if err != nil {
+		return nil, fmt.Errorf("privd: open jail base %q: %w", base, err)
+	}
+	defer func() { _ = basefd.Close() }()
+
+	jailfd, err := openDirAt(basefd, vmID, create)
+	if err != nil {
+		return nil, &BackendError{
+			Cause:   "invalid_state",
+			Message: fmt.Sprintf("jail dir for %s is not a directory privd will open: %v", vmID, err),
+		}
+	}
+	defer func() { _ = jailfd.Close() }()
+
+	rootfd, err := openDirAt(jailfd, "root", create)
+	if err != nil {
+		return nil, &BackendError{
+			Cause:   "invalid_state",
+			Message: fmt.Sprintf("jail root for %s is not a directory privd will open: %v", vmID, err),
+		}
+	}
+	return rootfd, nil
+}
+
 // maxPidFileBytes bounds what privd reads out of a jail's firecracker.pid.
 // /proc/sys/kernel/pid_max tops out at 2^22, so a pid is at most seven digits;
 // 32 bytes is room to spare for the number and the newline after it.
@@ -35,18 +106,24 @@ import (
 // makes its contents the guest's to choose.
 const maxPidFileBytes = 32
 
-// readPidFile returns the first maxPidFileBytes of name, trimmed. It does not
-// parse: callers report an unparsable pid file in their own words, and what
-// they need from here is text short enough to repeat.
+// readPidFileAt returns the first maxPidFileBytes of name inside dir, trimmed.
+// It does not parse: callers report an unparsable pid file in their own words,
+// and what they need from here is text short enough to repeat.
+//
+// The open is against the descriptor and refuses a symlink. A guest that could
+// point firecracker.pid at a file holding "1" would be handing privd init's pid
+// and, through /proc, init's starttime -- a pair that agrees with itself, passes
+// the identity gate, and gets pid 1 signalled on the next stop.
 //
 // Trailing bytes survive the trim on purpose. A firecracker.pid holding a pid
 // followed by anything else is not a file to take a pid from, so the caller's
 // parse fails and it says what it saw.
-func readPidFile(name string) (string, error) {
-	f, err := os.Open(name)
+func readPidFileAt(dir *os.File, name string) (string, error) {
+	fd, err := unix.Openat(int(dir.Fd()), name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return "", err
 	}
+	f := os.NewFile(uintptr(fd), name)
 	defer func() { _ = f.Close() }()
 
 	data, err := io.ReadAll(io.LimitReader(f, maxPidFileBytes))
@@ -115,37 +192,55 @@ func VerifyStagedFile(stageDir string, f StagedFile) (*os.File, error) {
 }
 
 // CopyFromPinnedFd copies from the already-verified *os.File (seeks to 0 first) into
-// dstDir/<f.Name>. This is the second half of the single-open staging pipeline: the fd
+// <f.Name> inside the directory dstDir names. This is the second half of the single-open staging pipeline: the fd
 // was opened and digest-verified by VerifyStagedFile; we never reopen the path.
 // Mode: 0644 for most files, 0640 for fc-config.json. Chowns to uid:gid.
-func CopyFromPinnedFd(src *os.File, dstDir string, f StagedFile, uid, gid int) error {
+func CopyFromPinnedFd(src *os.File, dstDir *os.File, f StagedFile, uid, gid int) error {
 	// Seek the verified fd back to the start — same open, never a new path open.
 	if _, err := src.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("privd: seek staged file %q: %w", f.Name, err)
 	}
 
-	mode := os.FileMode(0o644)
+	// openat resolves ".." against the descriptor like any other path, so the
+	// dirfd bounds symlinks and not traversal. The whitelist is what bounds
+	// traversal, and asking it here as well as in VerifyStagedFile costs one
+	// comparison and means the copy cannot be reached with a name the jailer
+	// would never stage.
+	if !ValidStagedName(f.Name) {
+		return &BackendError{
+			Cause:   "bad_request",
+			Message: fmt.Sprintf("staged file name %q is not one privd copies", f.Name),
+		}
+	}
+
+	mode := uint32(0o644)
 	if f.Name == "fc-config.json" {
 		mode = 0o640
 	}
 
-	dstPath := filepath.Join(dstDir, f.Name)
-	dst, err := os.OpenFile(dstPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+	// O_NOFOLLOW against the jail-root descriptor. The destination directory is
+	// the guest's after the first start, so the name may already be a symlink;
+	// following it would have root write wherever the guest pointed.
+	fd, err := unix.Openat(int(dstDir.Fd()), f.Name, unix.O_WRONLY|unix.O_CREAT|unix.O_TRUNC|unix.O_NOFOLLOW|unix.O_CLOEXEC, mode)
 	if err != nil {
-		return fmt.Errorf("privd: create dst %q: %w", f.Name, err)
+		return &BackendError{
+			Cause:   "invalid_state",
+			Message: fmt.Sprintf("cannot create %s in the jail root: %v", f.Name, err),
+		}
 	}
-	defer dst.Close()
+	dst := os.NewFile(uintptr(fd), f.Name)
+	defer func() { _ = dst.Close() }()
 
 	if _, err := io.Copy(dst, src); err != nil {
 		return fmt.Errorf("privd: copy %q: %w", f.Name, err)
 	}
+	// fchown, not a chown by name: the name is never consulted again, so nothing
+	// can be swapped in under it between the copy and the ownership change.
+	if err := dst.Chown(uid, gid); err != nil {
+		return fmt.Errorf("privd: chown %q: %w", f.Name, err)
+	}
 	if err := dst.Close(); err != nil {
 		return fmt.Errorf("privd: close dst %q: %w", f.Name, err)
-	}
-
-	// chown to uid:gid.
-	if err := os.Lchown(dstPath, uid, gid); err != nil {
-		return fmt.Errorf("privd: chown %q: %w", f.Name, err)
 	}
 	return nil
 }
@@ -264,16 +359,17 @@ func (r *RealOps) StartVM(entry *VMEntry, req StartVMReq) (StartVMResp, error) {
 	// Step 2: create jail dirs and copy each file from its pinned fd.
 	// The path is never reopened — CopyFromPinnedFd seeks to 0 and reads the
 	// same fd that was digest-verified above, closing the TOCTOU window entirely.
-	root := filepath.Join(r.cfg.JailBase, "firecracker", req.VMID, "root")
-	if err := os.MkdirAll(root, 0o750); err != nil {
+	rootDir, err := r.jailRoot(req.VMID, true)
+	if err != nil {
 		for _, f := range fds {
 			f.Close()
 		}
-		return StartVMResp{}, fmt.Errorf("privd: mkdir jail root %q: %w", root, err)
+		return StartVMResp{}, err
 	}
+	defer func() { _ = rootDir.Close() }()
 
 	for i, f := range req.Files {
-		err := CopyFromPinnedFd(fds[i], root, f, req.UID, req.GID)
+		err := CopyFromPinnedFd(fds[i], rootDir, f, req.UID, req.GID)
 		fds[i].Close() // close immediately after copy, regardless of outcome
 		if err != nil {
 			// Close remaining open fds.
@@ -309,26 +405,27 @@ func (r *RealOps) StartVM(entry *VMEntry, req StartVMReq) (StartVMResp, error) {
 		// Wait for v.sock (100 × 100ms = 10s), then fix the chmod race.
 		// Jailer tightens the chroot root to 0700 mid-startup; we reopen to 0750
 		// strictly after firecracker binds v.sock (which follows jailer's chroot prep).
-		sockPath := filepath.Join(root, "v.sock")
 		sockFound := false
+		var st unix.Stat_t
 		for i := 0; i < 100; i++ {
-			if _, err := os.Stat(sockPath); err == nil {
+			if err := unix.Fstatat(int(rootDir.Fd()), "v.sock", &st, unix.AT_SYMLINK_NOFOLLOW); err == nil {
 				sockFound = true
 				break
 			}
 			time.Sleep(100 * time.Millisecond)
 		}
 		if !sockFound {
-			r.log.Printf("v.sock not found after 10s at %s — proceeding with chmod anyway", sockPath)
+			r.log.Printf("v.sock not found after 10s in the jail root for %s — proceeding with chmod anyway", req.VMID)
 		}
-		if err := os.Chmod(root, 0o750); err != nil {
+		// fchmod on the descriptor: the directory whose mode is loosened is the
+		// one privd created, whatever the path resolves to by now.
+		if err := rootDir.Chmod(0o750); err != nil {
 			r.log.Printf("chmod jail root 0750: %v (non-fatal)", err)
 		}
 	}
 
 	// Step 4: read firecracker.pid and derive starttime.
-	pidFile := filepath.Join(root, "firecracker.pid")
-	raw, err := readPidFile(pidFile)
+	raw, err := readPidFileAt(rootDir, "firecracker.pid")
 	if err != nil {
 		return StartVMResp{}, fmt.Errorf("privd: read firecracker.pid: %w", err)
 	}
@@ -367,7 +464,7 @@ func (r *RealOps) StartVM(entry *VMEntry, req StartVMReq) (StartVMResp, error) {
 // every step that does not happen is logged instead.
 func (r *RealOps) AbortStartVM(entry VMEntry) error {
 	jailDir := filepath.Join(r.cfg.JailBase, "firecracker", entry.VMID)
-	r.killJailedVMM(jailDir, entry.VMID)
+	r.killJailedVMM(entry.VMID)
 	if err := os.RemoveAll(jailDir); err != nil {
 		return fmt.Errorf("privd: abort start %s: remove jail dir %q: %w", entry.VMID, jailDir, err)
 	}
@@ -415,11 +512,12 @@ func argvServesVM(argv []string, vmID string) bool {
 	return false
 }
 
-// killJailedVMM SIGKILLs the firecracker named by the pid file inside jailDir,
-// when there is one and the process it names really is this VM's firecracker.
+// killJailedVMM SIGKILLs the firecracker named by the pid file in this VM's jail
+// root, when there is one and the process it names really is this VM's
+// firecracker.
 //
-// Identity is what makes this safe to do at all. StartVM's MkdirAll does not
-// clear the tree, so a chroot left by an earlier failed start can carry a pid
+// Identity is what makes this safe to do at all. StartVM does not clear the
+// tree, so a chroot left by an earlier failed start can carry a pid
 // file naming a process that exited long ago — and pids are recycled (SPEC §5.5
 // asks for more than a pid). There is no starttime to compare against: the
 // failure being undone is precisely that StartVM never got to read one.
@@ -447,9 +545,14 @@ func argvServesVM(argv []string, vmID string) bool {
 // what makes a wrong guess about the argv visible: if a future jailer ever
 // spelled it "--id=<vmID>", every withheld kill would print the spelling that
 // defeated it.
-func (r *RealOps) killJailedVMM(jailDir, vmID string) {
-	pidFile := filepath.Join(jailDir, "root", "firecracker.pid")
-	raw, err := readPidFile(pidFile)
+func (r *RealOps) killJailedVMM(vmID string) {
+	rootDir, err := r.jailRoot(vmID, false)
+	if err != nil {
+		return // no jail root to read: nothing here names a process
+	}
+	defer func() { _ = rootDir.Close() }()
+
+	raw, err := readPidFileAt(rootDir, "firecracker.pid")
 	if err != nil {
 		return // no pid file: the jailer never got far enough to write one
 	}

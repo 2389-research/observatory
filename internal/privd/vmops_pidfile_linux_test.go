@@ -81,19 +81,33 @@ func TestAbortStartDoesNotEchoAPidFileItCannotParse(t *testing.T) {
 		t.Fatalf("write pid file: %v", err)
 	}
 
-	ops.killJailedVMM(jailDir, vmID)
+	ops.killJailedVMM(vmID)
 	assertBoundedAndSilent(t, "the abort-start log line", logBuf.String())
+}
+
+// pidFileDir returns a descriptor on a fresh directory alongside the path of the
+// firecracker.pid inside it, because readPidFileAt takes the directory and the
+// tests write through the path.
+func pidFileDir(t *testing.T) (*os.File, string) {
+	t.Helper()
+	dir := t.TempDir()
+	fd, err := openDirNoFollow(dir)
+	if err != nil {
+		t.Fatalf("open temp dir: %v", err)
+	}
+	t.Cleanup(func() { _ = fd.Close() })
+	return fd, filepath.Join(dir, "firecracker.pid")
 }
 
 // TestReadPidFileStopsAtTheBound is the bound itself, tested where it lives.
 func TestReadPidFileStopsAtTheBound(t *testing.T) {
-	name := filepath.Join(t.TempDir(), "firecracker.pid")
+	dir, name := pidFileDir(t)
 	junk := junkPidFile()
 	if err := os.WriteFile(name, junk, 0o600); err != nil {
 		t.Fatalf("write pid file: %v", err)
 	}
 
-	raw, err := readPidFile(name)
+	raw, err := readPidFileAt(dir, "firecracker.pid")
 	if err != nil {
 		t.Fatalf("readPidFile: %v", err)
 	}
@@ -109,12 +123,12 @@ func TestReadPidFileStopsAtTheBound(t *testing.T) {
 // break the thing it protects: the pid file firecracker actually writes still
 // parses.
 func TestReadPidFileReadsWhatFirecrackerWrites(t *testing.T) {
-	name := filepath.Join(t.TempDir(), "firecracker.pid")
+	dir, name := pidFileDir(t)
 	if err := os.WriteFile(name, []byte("4194303\n"), 0o600); err != nil {
 		t.Fatalf("write pid file: %v", err)
 	}
 
-	raw, err := readPidFile(name)
+	raw, err := readPidFileAt(dir, "firecracker.pid")
 	if err != nil {
 		t.Fatalf("readPidFile: %v", err)
 	}
@@ -128,13 +142,13 @@ func TestReadPidFileReadsWhatFirecrackerWrites(t *testing.T) {
 // neighbour's pid followed by padding must not have privd read the pid and
 // discard the rest: the padding stays, the parse fails, and nothing is signalled.
 func TestReadPidFileKeepsTrailingBytes(t *testing.T) {
-	name := filepath.Join(t.TempDir(), "firecracker.pid")
+	dir, name := pidFileDir(t)
 	body := append([]byte("4242\n"), bytes.Repeat([]byte("A"), 4096)...)
 	if err := os.WriteFile(name, body, 0o600); err != nil {
 		t.Fatalf("write pid file: %v", err)
 	}
 
-	raw, err := readPidFile(name)
+	raw, err := readPidFileAt(dir, "firecracker.pid")
 	if err != nil {
 		t.Fatalf("readPidFile: %v", err)
 	}
