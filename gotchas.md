@@ -86,10 +86,10 @@ Distilled working knowledge for agents and collaborators in this repo. Append en
 ## The lock's two halves have different lifetimes
 
 `runtime.lock.json` is re-read on every launch, but only half of it. `doStage`
-(`internal/jailer/launch.go`) calls `lock.Load` and then `VerifyArtifacts` — the
-guest kernel and root image. The binary half (firecracker, jailer) is verified
-once by `verifyRuntimeLock` at daemon startup and never re-read; privd owns
-those paths at launch time.
+(`internal/jailer/launch.go`) calls `lock.Load` and then `lock.OpenPinned` once
+per artifact — the guest kernel and root image. The binary half (firecracker,
+jailer) is verified once by `verifyRuntimeLock` at daemon startup and never
+re-read; privd owns those paths at launch time.
 
 So a copy of the lock parsed at startup is the operative pin for binaries and
 operative for nothing on the image side. Anything answering "what would a launch
@@ -307,4 +307,43 @@ cross-check that its last component is the vm_id.
 **aibox03's shell is fish, so `$?` is a syntax error in `scripts/linux`.** Use
 `$status`. The failure is loud (`fish: $? is not the exit status`) but it comes
 after the command has already run, so a gate can execute and still report
-nothing.
+nothing. Variable assignment differs too: `d=$(mktemp -d)` is
+`fish: Unsupported use of '='`, and unlike the `$?` case it aborts the whole
+command line before anything runs — write `set d (mktemp -d)`.
+
+**`t.TempDir()`'s mode follows the host umask, so a permission assertion about
+it is not portable.** Go creates the numbered subdirectory with
+`os.Mkdir(dir, 0777)`, which lands at 0755 on a umask-022 workstation and
+**0775 on aibox03, whose umask is 002**. A check that refused group-writable
+directories therefore passed every local test and failed ten pre-existing
+jailer tests on the host, all with the same "writable beyond its owner (mode
+0775)" message. A fixture that needs a known mode must `os.Chmod` it after
+creation — `MkdirAll`'s mode argument is masked the same way.
+
+**The trusted-path check on pinned artifacts refuses other-writable, not
+group-writable.** `refuseWritable` (`internal/lock/pinned.go`) tests
+`perm&0o002`. Group-writable is how this host actually ships artifacts:
+`/srv/vmobs` is `harper:vmobs-fixture` mode 0775 so the fixture group can stage
+into it, and `~/vmobs-build/images/dist` is 0775 as well — a check on `0o022`
+would refuse the live M1a gate's own artifact directory. The cost is that
+anyone in a deliberately shared group can swap an artifact without the
+placement check noticing; the digest still catches the swap.
+
+**A verified path is not a verified file — `lock.OpenPinned` returns the
+descriptor its digest covered.** `doStage` used to hash
+`<RepoRoot>/images/dist/vmlinux` through `VerifyArtifacts`, close it, and then
+reopen the same *name* to copy it; whatever the name pointed at the second time
+is what got staged. It now opens each artifact once, with `O_NOFOLLOW` and
+`O_NONBLOCK`, hashes that descriptor, rewinds it, and copies from it —
+`copyVerified` takes an `*os.File` rather than a path precisely so no call site
+can reintroduce the gap. Both artifacts are opened before `MkdirAll` creates the
+stage directory, so a refusal leaves nothing behind. The per-component `Lstat`
+walk above the leaf is a *placement* check — is this file somewhere only its
+owner can reach — and is deliberately not a defence against an attacker racing
+between the `Lstat` and the open; more `Lstat`s cannot make it into one.
+Separately, `computeStagedFiles` cross-checks the two lock-backed staged copies
+against the lock's pinned digests: privd verifies staged bytes against a digest
+this side computes from those same bytes, so without the lock comparison the
+chain agrees with itself no matter what is in the file. `config.ext4`,
+`workspace.ext4` and `fc-config.json` are generated per boot and have no pin.
+Kata `sd56`.
