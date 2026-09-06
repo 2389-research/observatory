@@ -1,5 +1,18 @@
 # Specification Package Validation
 
+## Revision 26 (2026-09-06) — verified systems review recorded in Kata
+
+Checked the eight supplied review findings against source at `bd65d80` and existing
+Kata history. Filed `3dnv`, `bm7v`, `bxm8`, `ryvx`, `exf0`, `8bdk`, `00e7`, and
+`apwk` with evidence, corrected scope and acceptance criteria. PLAN.md records
+the session; gotchas.md corrects the unconditional shutdown-order advice.
+
+`env -u GOROOT mise exec -- ./scripts/check`: all ten local gates passed.
+`uv run docs/validation/check.py`: 47/47 package checks passed. Concurrent unrelated
+deployment edits were present during the full gate; reviewed source files remained
+unchanged. These checks establish the local baseline, not fixes for these findings.
+No Linux/KVM fault or power-loss tests ran in this review.
+
 ## Revision 25 (2026-09-06) — the boundary document stops predicting and starts reporting
 
 Kata `q4b2`, implementation half. `docs/design/container-boundary.md` gains §10, the

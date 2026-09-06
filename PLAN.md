@@ -26,6 +26,31 @@ Two tracks:
 
 Auth note: P5 landed. Loopback dev mode (`require_authentication: false`, `mode: loopback_only`) remains valid for local iteration. Any non-loopback bind now requires `mode: https` with TLS files and `require_authentication: true`; config validation and the bind-time loopback guard both enforce this.
 
+## Verified systems review (2026-09-06)
+
+Doctor Biz requested verification and Kata filing, not implementation. Reviewed
+source at `bd65d801f062585ebe4ceeaace4065a873f4a7c8` and searched existing issues.
+All eight findings have supported scopes; the filed entries record evidence,
+corrections, acceptance checks and related prior work:
+
+- P1: `3dnv` manager shutdown and launch budgets; `bm7v` ambiguous privd outcomes;
+  `bxm8` HTTP bounds; `ryvx` auth durability; `exf0` importer failures; `8bdk` TTL validation.
+- P2: `00e7` network lease restoration/reclamation; `apwk` automatic cleanup retry.
+
+The original P0 labels were reduced to P1: the paths show serious liveness and
+outcome risks, but this audit did not reproduce a production outage. Current
+adapter locking serializes allocation, privd already rejects subnet collisions,
+manual DELETE retries stalled deletion, and stale heartbeats already degrade
+telemetry health. Existing startup Reconcile must not run unchanged on a ticker:
+it fails pending/running operations as controller restarts. Corrected the old
+shutdown gotcha, whose unconditional wait-before-cancel advice hid that risk.
+
+Verification: `env -u GOROOT mise exec -- ./scripts/check` passed all ten local
+gates; docs validation passed 47/47. Separate focused lifecycle/auth tests passed.
+No Linux/KVM fault or power-loss reproduction ran. Concurrent unrelated deployment
+edits were present during the gate; reviewed source files stayed unchanged. Read
+all eight issues back and verified their bodies, priorities and open status.
+
 ## Open questions for Doctor Biz
 
 None right now.
