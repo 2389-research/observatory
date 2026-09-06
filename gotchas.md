@@ -478,3 +478,25 @@ This is against the builder directive in `docs/README.md` as much as against
 P-07. The full map of this and six other gaps is
 `docs/design/agent-control-contract.md` — a review artifact, not a contract.
 Kata `3tn6`.
+
+**Docker's default seccomp profile blocks `pivot_root`, so the jailer cannot
+run in a default container at any capability level.** Measured on aibox03
+2026-09-06: with `CAP_NET_ADMIN` + `CAP_SYS_ADMIN` and `apparmor=unconfined`,
+v2's jailer argv still dies at `PivotRoot(Os { code: 1 })`; adding
+`seccomp=unconfined` makes the same command exit 0. `docker-default` AppArmor
+is a *separate* gate that blocks `mount --make-slave` (EACCES) even with
+seccomp fully off. Two exceptions are needed, not one — v1's container work
+needed only the AppArmor one because v1 never ran the jailer. Kata `q4b2`;
+full matrix in `docs/design/container-boundary.md`.
+
+**The guest channel is a unix socket, not `/dev/vhost-vsock`.** Firecracker
+implements virtio-vsock in userspace, and the runner dials
+`<JailBase>/firecracker/<id>/root/v.sock` (`internal/runner/runner.go:52`,
+`:226`). `/dev/vhost-vsock` exists on aibox03 and v2 never opens it, so a
+container profile that passes it through is granting a device for nothing.
+
+**v2's jailer writes no cgroup, so a read-only `/sys/fs/cgroup` is not a
+blocker.** `vmops.go:319` passes `--cgroup-version 2` with no `--cgroup` and
+no `--parent-cgroup`, and the jailer exits 0 against a read-only cgroup mount
+without creating a directory. Adding `--cgroup` limits later would reintroduce
+the requirement — that is a boundary change, not a tuning change. Kata `q4b2`.
