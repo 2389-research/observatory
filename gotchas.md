@@ -458,3 +458,23 @@ component. A privd that cleaned its socket path first could take its lock in one
 directory and bind its socket in another, on top of a live privd it never
 noticed. `acquireSingleton` uses the paths exactly as given so the lock, the
 removal and the bind are one string the kernel resolves one way. Kata `c3f2`.
+
+**v1's and v2's acceptance IDs collide — AT-089..095 name different tests in
+each repo.** The sibling checkout at `../observatory` has its own
+`docs/ACCEPTANCE.md`, and its AT-089 is cold-agent discovery where v2's is
+`/situation` under a mixed fleet; its AT-095 is work-order budget exhaustion
+where v2's is oversized run progress. Citing a v1 row by id in a v2 document
+points at the wrong test and reads as if it were right. v2's `check.py` asserts
+exactly 102 sequential ids and `internal/evidence.acceptanceRows` mirrors that
+count, so a new v2 row starts at AT-103 — copying a v1 id either fails the
+package check or silently rebinds a live row. Kata `3tn6`.
+
+**`/meta`'s `links` is hand-maintained and already trails the route table.**
+`handleMeta` derives `features` from the table in `api.New` and then writes
+`links` as a literal map, so a route can arrive without its link and nothing
+catches it: `features` reports `vm_batches: true` while no key names a batch
+path. Feature names are not paths, so `features` cannot stand in for `links`.
+This is against the builder directive in `docs/README.md` as much as against
+P-07. The full map of this and six other gaps is
+`docs/design/agent-control-contract.md` — a review artifact, not a contract.
+Kata `3tn6`.
