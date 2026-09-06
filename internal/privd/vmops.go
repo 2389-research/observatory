@@ -104,6 +104,39 @@ func (r *RealOps) jailRoot(vmID string, create bool) (*os.File, error) {
 // privd socket to a caller that is not root, one into privd's log. Reading the
 // whole file makes that report as large as the guest cares to make it, and
 // makes its contents the guest's to choose.
+// stageDir opens the directory privd will read this VM's boot artifacts out of.
+// The path is derived, never taken from the request: vm_id is one validated
+// path component (ValidVMID) and the adapter builds the same join, so nothing
+// is lost by deriving it and the caller stops choosing which directory root
+// reads gigabytes from.
+//
+// StageRoot is privd's own config and is allowed to be a symlink -- pointing
+// /var/vmobs/stage at another filesystem is a supported install -- so it gets a
+// plain open. The vm_id component underneath it belongs to the caller, who owns
+// the stage root and can leave a symlink at the name privd is about to derive;
+// openDirAt refuses that with O_NOFOLLOW. Every staged file is then opened
+// against the descriptor this returns, so the read cannot leave the directory
+// no matter what appears in the tree afterwards.
+func (r *RealOps) stageDir(vmID string) (*os.File, error) {
+	rootfd, err := os.Open(r.cfg.StageRoot)
+	if err != nil {
+		return nil, &BackendError{
+			Cause:   "internal",
+			Message: fmt.Sprintf("stage root %q is not a directory privd can open", r.cfg.StageRoot),
+		}
+	}
+	defer func() { _ = rootfd.Close() }()
+
+	dirfd, err := openDirAt(rootfd, vmID, false)
+	if err != nil {
+		return nil, &BackendError{
+			Cause:   "bad_request",
+			Message: fmt.Sprintf("no stage directory for %s under the stage root privd was configured with (%s): %v", vmID, r.cfg.StageRoot, err),
+		}
+	}
+	return dirfd, nil
+}
+
 const maxPidFileBytes = 32
 
 // readPidFileAt returns the first maxPidFileBytes of name inside dir, trimmed.
@@ -133,7 +166,7 @@ func readPidFileAt(dir *os.File, name string) (string, error) {
 	return string(bytes.TrimSpace(data)), nil
 }
 
-// VerifyStagedFile opens the named file in stageDir using O_NOFOLLOW (refuses symlinks),
+// VerifyStagedFileAt opens the named file against dir using O_NOFOLLOW (refuses symlinks),
 // streams its SHA-256 from the open fd, and returns the open *os.File on success.
 // On any error (including digest mismatch) the fd is closed and nil is returned.
 // Callers must close the returned *os.File. This is the TOCTOU-safe entry point:
@@ -141,25 +174,28 @@ func readPidFileAt(dir *os.File, name string) (string, error) {
 // is never reopened after verification.
 //
 // §15.3: error messages name the file, never dump its contents.
-func VerifyStagedFile(stageDir string, f StagedFile) (*os.File, error) {
-	// The name is joined onto stageDir here and onto the jail root by
-	// CopyFromPinnedFd. Both joins are only as safe as the name, and this
-	// function is exported: the server's check is the gate, and this one is what
-	// makes the gate's absence in some future caller a refusal instead of a
-	// traversal.
+func VerifyStagedFileAt(dir *os.File, f StagedFile) (*os.File, error) {
+	// The name is resolved against dir here and against the jail root by
+	// CopyFromPinnedFd. A descriptor bounds symlinks, not traversal -- openat
+	// walks ".." exactly like a path does -- so the whitelist is what keeps both
+	// resolutions inside their directory. This function is exported: the
+	// server's check is the gate, and this one is what makes the gate's absence
+	// in some future caller a refusal instead of a traversal.
 	if !ValidStagedName(f.Name) {
 		return nil, &BackendError{
 			Cause:   "bad_request",
 			Message: fmt.Sprintf("%q is not a staged file name", truncateName(f.Name)),
 		}
 	}
-	fpath := filepath.Join(stageDir, f.Name)
 
-	// O_NOFOLLOW: if the path is a symlink the open fails (ELOOP on Linux).
-	fd, err := unix.Open(fpath, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	// O_NOFOLLOW: if the name is a symlink the open fails (ELOOP on Linux). It
+	// is a bare openat and not os.Root, which resolves a symlink that stays
+	// inside its root and drops the caller's O_NOFOLLOW while doing it.
+	fd, err := unix.Openat(int(dir.Fd()), f.Name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, fmt.Errorf("privd: open staged file %q: %w", f.Name, err)
 	}
+	fpath := filepath.Join(dir.Name(), f.Name)
 	file := os.NewFile(uintptr(fd), fpath)
 
 	// fstat: confirm regular file.
@@ -353,14 +389,22 @@ func CheckSignalIdentity(entry VMEntry) error {
 //     Wait up to 10s for <root>/v.sock, then chmod root 0750.
 //  4. Read <root>/firecracker.pid, read /proc/<pid>/stat field 22, return both.
 func (r *RealOps) StartVM(entry *VMEntry, req StartVMReq) (StartVMResp, error) {
-	stageDir := req.StageDir
-
 	// Step 1: verify all staged files, keeping each fd open (single-open pipeline).
 	// All files are verified before any jail dir is touched; on any mismatch we
 	// close all open fds and abort.
+	//
+	// req.StageDir is not consulted. The directory is derived from vm_id and
+	// held open for the whole verify pass, so the files copied below are the
+	// ones privd read out of the directory privd named.
+	stageDir, err := r.stageDir(req.VMID)
+	if err != nil {
+		return StartVMResp{}, err
+	}
+	defer func() { _ = stageDir.Close() }()
+
 	fds := make([]*os.File, len(req.Files))
 	for i, f := range req.Files {
-		pinned, err := VerifyStagedFile(stageDir, f)
+		pinned, err := VerifyStagedFileAt(stageDir, f)
 		if err != nil {
 			// Close fds opened so far.
 			for _, open := range fds[:i] {

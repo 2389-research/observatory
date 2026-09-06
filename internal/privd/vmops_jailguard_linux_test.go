@@ -172,10 +172,13 @@ func guardOps(t *testing.T) (*RealOps, string, *bytes.Buffer) {
 	t.Helper()
 	dir := t.TempDir()
 	jailBase := filepath.Join(dir, "jail")
-	if err := os.MkdirAll(jailBase, 0o750); err != nil {
-		t.Fatalf("mkdir jail base: %v", err)
+	stageRoot := filepath.Join(dir, "stage")
+	for _, d := range []string{jailBase, stageRoot} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
 	}
-	ops := NewRealOps(RealOpsCfg{JailBase: jailBase, StageRoot: filepath.Join(dir, "stage")})
+	ops := NewRealOps(RealOpsCfg{JailBase: jailBase, StageRoot: stageRoot})
 	var buf bytes.Buffer
 	ops.log = log.New(&buf, "", 0)
 	return ops, jailBase, &buf

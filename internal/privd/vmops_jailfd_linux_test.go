@@ -80,7 +80,7 @@ func TestStartVMWillNotWriteThroughASymlinkInTheJailRoot(t *testing.T) {
 		return os.WriteFile(filepath.Join(root, "firecracker.pid"), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600)
 	}
 
-	stageDir := filepath.Join(t.TempDir(), "stage")
+	stageDir := filepath.Join(ops.cfg.StageRoot, vmID)
 	file := stageOne(t, stageDir, "vmlinux", []byte("a kernel image"))
 
 	entry := VMEntry{VMID: vmID, UID: os.Getuid(), GID: os.Getgid()}
@@ -120,7 +120,7 @@ func TestStartVMWillNotFollowASymlinkedJailRoot(t *testing.T) {
 		t.Fatalf("plant symlink: %v", err)
 	}
 
-	stageDir := filepath.Join(t.TempDir(), "stage")
+	stageDir := filepath.Join(ops.cfg.StageRoot, vmID)
 	file := stageOne(t, stageDir, "vmlinux", []byte("a kernel image"))
 
 	ops.hooks.RunCmd = func([]string) error {
@@ -191,9 +191,14 @@ func TestCopyFromPinnedFdRefusesANameTheJailerWouldNotStage(t *testing.T) {
 		}
 	}
 	src := stageOne(t, stageDir, "vmlinux", []byte("a kernel image"))
-	pinned, err := VerifyStagedFile(stageDir, src)
+	stageFd, err := openDirNoFollow(stageDir)
 	if err != nil {
-		t.Fatalf("VerifyStagedFile: %v", err)
+		t.Fatalf("open stage dir: %v", err)
+	}
+	defer stageFd.Close()
+	pinned, err := VerifyStagedFileAt(stageFd, src)
+	if err != nil {
+		t.Fatalf("VerifyStagedFileAt: %v", err)
 	}
 	defer pinned.Close()
 
@@ -234,7 +239,7 @@ func TestStartVMRefusesAJailRootThatAlreadyHoldsAStagedFile(t *testing.T) {
 		t.Fatalf("plant leftover: %v", err)
 	}
 
-	stageDir := filepath.Join(t.TempDir(), "stage")
+	stageDir := filepath.Join(ops.cfg.StageRoot, vmID)
 	file := stageOne(t, stageDir, "vmlinux", []byte("the kernel this start staged"))
 	ops.hooks.RunCmd = func([]string) error {
 		return os.WriteFile(filepath.Join(root, "firecracker.pid"), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600)
@@ -266,7 +271,7 @@ func TestStartVMStillCopiesIntoAJailRootItJustMade(t *testing.T) {
 	ops, jailBase, _ := guardOps(t)
 	const vmID = "vm-jailfd-clean"
 
-	stageDir := filepath.Join(t.TempDir(), "stage")
+	stageDir := filepath.Join(ops.cfg.StageRoot, vmID)
 	var files []StagedFile
 	for _, name := range StagedFileNames {
 		files = append(files, stageOne(t, stageDir, name, []byte("bytes of "+name)))

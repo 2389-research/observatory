@@ -272,21 +272,18 @@ func (s *Server) handleStartVM(raw json.RawMessage) Response {
 		}
 	}
 
-	// StageDir must resolve under StageRoot.
-	// Both sides get EvalSymlinks so a symlink StageRoot (e.g. /var/vmobs/stage →
-	// /mnt/storage/stage) doesn't produce a false containment failure.
-	resolved, err := filepath.EvalSymlinks(r.StageDir)
-	if err != nil {
-		return errResp("bad_request", fmt.Sprintf("stage_dir resolve: %v", err))
-	}
-	resolvedRoot, err := filepath.EvalSymlinks(s.cfg.StageRoot)
-	if err != nil {
-		return errResp("internal", "stage root resolve failed")
-	}
-	rootPrefix := filepath.Clean(resolvedRoot) + string(filepath.Separator)
-	resolvedClean := filepath.Clean(resolved) + string(filepath.Separator)
-	if len(resolvedClean) <= len(rootPrefix) || resolvedClean[:len(rootPrefix)] != rootPrefix {
-		return errResp("bad_request", "stage_dir not under stage root")
+	// stage_dir does not choose the directory privd reads from. The backend
+	// derives <StageRoot>/<vm_id> and opens it against the stage root, so
+	// containment is structural: there is no caller-supplied path left to
+	// resolve, and no EvalSymlinks race to lose.
+	//
+	// The field stays on the wire and stays checked for one thing it can still
+	// disagree about: which VM it names. An install whose adapter and privd were
+	// given different stage roots is caught by the backend's open, which names
+	// the directory privd looked in; an adapter that staged under a different id
+	// is caught here, before a jail tree exists.
+	if filepath.Base(filepath.Clean(r.StageDir)) != r.VMID {
+		return errResp("bad_request", "stage_dir does not name this vm's stage directory")
 	}
 
 	s.mu.Lock()
