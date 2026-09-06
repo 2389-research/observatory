@@ -23,6 +23,39 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// maxPidFileBytes bounds what privd reads out of a jail's firecracker.pid.
+// /proc/sys/kernel/pid_max tops out at 2^22, so a pid is at most seven digits;
+// 32 bytes is room to spare for the number and the newline after it.
+//
+// The bound is not about parsing. StartVM chowns the jail tree to the guest's
+// uid, so firecracker.pid is a file the guest owns and can rewrite, and both
+// readers report what they found: one into an error that travels back over the
+// privd socket to a caller that is not root, one into privd's log. Reading the
+// whole file makes that report as large as the guest cares to make it, and
+// makes its contents the guest's to choose.
+const maxPidFileBytes = 32
+
+// readPidFile returns the first maxPidFileBytes of name, trimmed. It does not
+// parse: callers report an unparsable pid file in their own words, and what
+// they need from here is text short enough to repeat.
+//
+// Trailing bytes survive the trim on purpose. A firecracker.pid holding a pid
+// followed by anything else is not a file to take a pid from, so the caller's
+// parse fails and it says what it saw.
+func readPidFile(name string) (string, error) {
+	f, err := os.Open(name)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = f.Close() }()
+
+	data, err := io.ReadAll(io.LimitReader(f, maxPidFileBytes))
+	if err != nil {
+		return "", err
+	}
+	return string(bytes.TrimSpace(data)), nil
+}
+
 // VerifyStagedFile opens the named file in stageDir using O_NOFOLLOW (refuses symlinks),
 // streams its SHA-256 from the open fd, and returns the open *os.File on success.
 // On any error (including digest mismatch) the fd is closed and nil is returned.
@@ -295,13 +328,13 @@ func (r *RealOps) StartVM(entry *VMEntry, req StartVMReq) (StartVMResp, error) {
 
 	// Step 4: read firecracker.pid and derive starttime.
 	pidFile := filepath.Join(root, "firecracker.pid")
-	pidData, err := os.ReadFile(pidFile)
+	raw, err := readPidFile(pidFile)
 	if err != nil {
 		return StartVMResp{}, fmt.Errorf("privd: read firecracker.pid: %w", err)
 	}
-	pid, err := strconv.Atoi(string(bytes.TrimSpace(pidData)))
+	pid, err := strconv.Atoi(raw)
 	if err != nil {
-		return StartVMResp{}, fmt.Errorf("privd: parse firecracker.pid %q: %w", string(pidData), err)
+		return StartVMResp{}, fmt.Errorf("privd: parse firecracker.pid %q: %w", raw, err)
 	}
 
 	statData, err := os.ReadFile(ProcStatPath(pid))
@@ -416,11 +449,10 @@ func argvServesVM(argv []string, vmID string) bool {
 // defeated it.
 func (r *RealOps) killJailedVMM(jailDir, vmID string) {
 	pidFile := filepath.Join(jailDir, "root", "firecracker.pid")
-	pidData, err := os.ReadFile(pidFile)
+	raw, err := readPidFile(pidFile)
 	if err != nil {
 		return // no pid file: the jailer never got far enough to write one
 	}
-	raw := string(bytes.TrimSpace(pidData))
 	pid, err := strconv.Atoi(raw)
 	if err != nil || pid <= 1 {
 		r.log.Printf("abort start %s: firecracker.pid holds %q, which is not a pid; killing nothing", vmID, raw)
