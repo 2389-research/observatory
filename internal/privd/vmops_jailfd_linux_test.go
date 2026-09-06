@@ -211,3 +211,93 @@ func TestCopyFromPinnedFdRefusesANameTheJailerWouldNotStage(t *testing.T) {
 		t.Error("CopyFromPinnedFd wrote outside the jail root")
 	}
 }
+
+// TestStartVMRefusesAJailRootThatAlreadyHoldsAStagedFile is the debris policy.
+// ReleaseVM removes the tree on a clean stop and AbortStartVM removes it on
+// every StartVM that returns an error, so the only way a boot artifact is
+// already sitting in the root is that one of those did not finish -- privd
+// killed mid-start, or a RemoveAll that errored (server.go logs that one).
+// Overwriting it starts a VM into a chroot privd did not build and cannot
+// describe.
+//
+// The refusal also stops privd depending on fs.protected_hardlinks, a sysctl it
+// does not own, to keep the copy off an inode it was not given. O_NOFOLLOW says
+// nothing about a hardlink; O_EXCL refuses every name that is already there,
+// whatever kind of thing it is.
+func TestStartVMRefusesAJailRootThatAlreadyHoldsAStagedFile(t *testing.T) {
+	ops, jailBase, _ := guardOps(t)
+	const vmID = "vm-jailfd-debris"
+	_, root := mkJailRoot(t, jailBase, vmID)
+
+	leftover := []byte("a kernel from a start that never finished")
+	if err := os.WriteFile(filepath.Join(root, "vmlinux"), leftover, 0o600); err != nil {
+		t.Fatalf("plant leftover: %v", err)
+	}
+
+	stageDir := filepath.Join(t.TempDir(), "stage")
+	file := stageOne(t, stageDir, "vmlinux", []byte("the kernel this start staged"))
+	ops.hooks.RunCmd = func([]string) error {
+		return os.WriteFile(filepath.Join(root, "firecracker.pid"), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600)
+	}
+
+	entry := VMEntry{VMID: vmID, UID: os.Getuid(), GID: os.Getgid()}
+	_, err := ops.StartVM(&entry, StartVMReq{
+		VMID:     vmID,
+		UID:      os.Getuid(),
+		GID:      os.Getgid(),
+		StageDir: stageDir,
+		Files:    []StagedFile{file},
+	})
+
+	got, readErr := os.ReadFile(filepath.Join(root, "vmlinux"))
+	if readErr != nil {
+		t.Fatalf("read leftover: %v", readErr)
+	}
+	if string(got) != string(leftover) {
+		t.Errorf("privd overwrote the leftover: the jail root now holds %q", got)
+	}
+	wantInvalidState(t, err)
+}
+
+// TestStartVMStillCopiesIntoAJailRootItJustMade keeps the refusal from being
+// bought by refusing every start. The ordinary case -- an empty root privd
+// created a moment ago -- still takes all four artifacts.
+func TestStartVMStillCopiesIntoAJailRootItJustMade(t *testing.T) {
+	ops, jailBase, _ := guardOps(t)
+	const vmID = "vm-jailfd-clean"
+
+	stageDir := filepath.Join(t.TempDir(), "stage")
+	var files []StagedFile
+	for _, name := range StagedFileNames {
+		files = append(files, stageOne(t, stageDir, name, []byte("bytes of "+name)))
+	}
+	root := filepath.Join(jailBase, "firecracker", vmID, "root")
+	ops.hooks.RunCmd = func([]string) error {
+		return os.WriteFile(filepath.Join(root, "firecracker.pid"), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600)
+	}
+
+	entry := VMEntry{VMID: vmID, UID: os.Getuid(), GID: os.Getgid()}
+	resp, err := ops.StartVM(&entry, StartVMReq{
+		VMID:     vmID,
+		UID:      os.Getuid(),
+		GID:      os.Getgid(),
+		StageDir: stageDir,
+		Files:    files,
+	})
+	if err != nil {
+		t.Fatalf("StartVM on a fresh jail root: %v", err)
+	}
+	if resp.PID != os.Getpid() {
+		t.Errorf("StartVM returned pid %d, want the stand-in's %d", resp.PID, os.Getpid())
+	}
+	for _, name := range StagedFileNames {
+		got, readErr := os.ReadFile(filepath.Join(root, name))
+		if readErr != nil {
+			t.Errorf("read %s from the jail root: %v", name, readErr)
+			continue
+		}
+		if string(got) != "bytes of "+name {
+			t.Errorf("jail root holds %q for %s", got, name)
+		}
+	}
+}

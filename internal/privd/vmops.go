@@ -221,8 +221,23 @@ func CopyFromPinnedFd(src *os.File, dstDir *os.File, f StagedFile, uid, gid int)
 	// O_NOFOLLOW against the jail-root descriptor. The destination directory is
 	// the guest's after the first start, so the name may already be a symlink;
 	// following it would have root write wherever the guest pointed.
-	fd, err := unix.Openat(int(dstDir.Fd()), f.Name, unix.O_WRONLY|unix.O_CREAT|unix.O_TRUNC|unix.O_NOFOLLOW|unix.O_CLOEXEC, mode)
+	//
+	// O_EXCL rather than O_TRUNC. privd creates this directory on the start it
+	// is serving, a clean stop releases it, and a failed start rolls it back, so
+	// the name is only taken if one of those did not finish. Truncating what is
+	// there boots a VM into a chroot privd did not build and cannot describe;
+	// refusing leaves the debris where an operator can see it. O_EXCL also
+	// refuses a name that is already a hardlink, which O_NOFOLLOW says nothing
+	// about -- so the copy stays off an inode privd was not given without privd
+	// having to trust fs.protected_hardlinks, a sysctl it does not own.
+	fd, err := unix.Openat(int(dstDir.Fd()), f.Name, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, mode)
 	if err != nil {
+		if errors.Is(err, unix.EEXIST) {
+			return &BackendError{
+				Cause:   "invalid_state",
+				Message: fmt.Sprintf("jail root already holds %s from an earlier start; release the VM before starting it again", f.Name),
+			}
+		}
 		return &BackendError{
 			Cause:   "invalid_state",
 			Message: fmt.Sprintf("cannot create %s in the jail root: %v", f.Name, err),
