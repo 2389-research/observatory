@@ -10,19 +10,163 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/2389-research/observatory-v2/internal/network"
 	"golang.org/x/sys/unix"
 )
 
-// VerifyStagedFile opens the named file in stageDir using O_NOFOLLOW (refuses symlinks),
+// openDirNoFollow opens name as a directory, refusing a symlink at the last
+// component. Callers own the returned descriptor.
+func openDirNoFollow(name string) (*os.File, error) {
+	fd, err := unix.Open(name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), name), nil
+}
+
+// openDirAt opens name inside dir as a directory, creating it first when create
+// is set. The open refuses a symlink, so a name a guest replaced with one is an
+// error here instead of a redirection later.
+func openDirAt(dir *os.File, name string, create bool) (*os.File, error) {
+	if create {
+		if err := unix.Mkdirat(int(dir.Fd()), name, 0o750); err != nil && !errors.Is(err, unix.EEXIST) {
+			return nil, err
+		}
+	}
+	fd, err := unix.Openat(int(dir.Fd()), name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), filepath.Join(dir.Name(), name)), nil
+}
+
+// jailRoot returns a descriptor on <JailBase>/firecracker/<vmID>/root, creating
+// the two directories on the way down when create is set.
+//
+// Everything privileged that StartVM does after this is aimed at the descriptor
+// rather than at the path, because the path stops being privd's the moment step
+// 2 chowns the tree: from then on the guest's uid owns <vmID> and <vmID>/root,
+// and can replace either name -- or any name inside root -- with a symlink.
+// Resolving the path again would follow it, as root.
+//
+// <JailBase>/firecracker is the anchor. privd creates it, never chowns it, and
+// no guest has an entry there to swap, so it is the last component on the way
+// down that a guest cannot have touched.
+func (r *RealOps) jailRoot(vmID string, create bool) (*os.File, error) {
+	base := filepath.Join(r.cfg.JailBase, "firecracker")
+	if create {
+		if err := os.MkdirAll(base, 0o750); err != nil {
+			return nil, fmt.Errorf("privd: mkdir jail base %q: %w", base, err)
+		}
+	}
+	basefd, err := openDirNoFollow(base)
+	if err != nil {
+		return nil, fmt.Errorf("privd: open jail base %q: %w", base, err)
+	}
+	defer func() { _ = basefd.Close() }()
+
+	jailfd, err := openDirAt(basefd, vmID, create)
+	if err != nil {
+		return nil, &BackendError{
+			Cause:   "invalid_state",
+			Message: fmt.Sprintf("jail dir for %s is not a directory privd will open: %v", vmID, err),
+		}
+	}
+	defer func() { _ = jailfd.Close() }()
+
+	rootfd, err := openDirAt(jailfd, "root", create)
+	if err != nil {
+		return nil, &BackendError{
+			Cause:   "invalid_state",
+			Message: fmt.Sprintf("jail root for %s is not a directory privd will open: %v", vmID, err),
+		}
+	}
+	return rootfd, nil
+}
+
+// maxPidFileBytes bounds what privd reads out of a jail's firecracker.pid.
+// /proc/sys/kernel/pid_max tops out at 2^22, so a pid is at most seven digits;
+// 32 bytes is room to spare for the number and the newline after it.
+//
+// The bound is not about parsing. StartVM chowns the jail tree to the guest's
+// uid, so firecracker.pid is a file the guest owns and can rewrite, and both
+// readers report what they found: one into an error that travels back over the
+// privd socket to a caller that is not root, one into privd's log. Reading the
+// whole file makes that report as large as the guest cares to make it, and
+// makes its contents the guest's to choose.
+// stageDir opens the directory privd will read this VM's boot artifacts out of.
+// The path is derived, never taken from the request: vm_id is one validated
+// path component (ValidVMID) and the adapter builds the same join, so nothing
+// is lost by deriving it and the caller stops choosing which directory root
+// reads gigabytes from.
+//
+// StageRoot is privd's own config and is allowed to be a symlink -- pointing
+// /var/vmobs/stage at another filesystem is a supported install -- so it gets a
+// plain open. The vm_id component underneath it belongs to the caller, who owns
+// the stage root and can leave a symlink at the name privd is about to derive;
+// openDirAt refuses that with O_NOFOLLOW. Every staged file is then opened
+// against the descriptor this returns, so the read cannot leave the directory
+// no matter what appears in the tree afterwards.
+func (r *RealOps) stageDir(vmID string) (*os.File, error) {
+	rootfd, err := os.Open(r.cfg.StageRoot)
+	if err != nil {
+		return nil, &BackendError{
+			Cause:   "internal",
+			Message: fmt.Sprintf("stage root %q is not a directory privd can open", r.cfg.StageRoot),
+		}
+	}
+	defer func() { _ = rootfd.Close() }()
+
+	dirfd, err := openDirAt(rootfd, vmID, false)
+	if err != nil {
+		return nil, &BackendError{
+			Cause:   "bad_request",
+			Message: fmt.Sprintf("no stage directory for %s under the stage root privd was configured with (%s): %v", vmID, r.cfg.StageRoot, err),
+		}
+	}
+	return dirfd, nil
+}
+
+const maxPidFileBytes = 32
+
+// readPidFileAt returns the first maxPidFileBytes of name inside dir, trimmed.
+// It does not parse: callers report an unparsable pid file in their own words,
+// and what they need from here is text short enough to repeat.
+//
+// The open is against the descriptor and refuses a symlink. A guest that could
+// point firecracker.pid at a file holding "1" would be handing privd init's pid
+// and, through /proc, init's starttime -- a pair that agrees with itself, passes
+// the identity gate, and gets pid 1 signalled on the next stop.
+//
+// Trailing bytes survive the trim on purpose. A firecracker.pid holding a pid
+// followed by anything else is not a file to take a pid from, so the caller's
+// parse fails and it says what it saw.
+func readPidFileAt(dir *os.File, name string) (string, error) {
+	fd, err := unix.Openat(int(dir.Fd()), name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return "", err
+	}
+	f := os.NewFile(uintptr(fd), name)
+	defer func() { _ = f.Close() }()
+
+	data, err := io.ReadAll(io.LimitReader(f, maxPidFileBytes))
+	if err != nil {
+		return "", err
+	}
+	return string(bytes.TrimSpace(data)), nil
+}
+
+// VerifyStagedFileAt opens the named file against dir using O_NOFOLLOW (refuses symlinks),
 // streams its SHA-256 from the open fd, and returns the open *os.File on success.
 // On any error (including digest mismatch) the fd is closed and nil is returned.
 // Callers must close the returned *os.File. This is the TOCTOU-safe entry point:
@@ -30,25 +174,28 @@ import (
 // is never reopened after verification.
 //
 // §15.3: error messages name the file, never dump its contents.
-func VerifyStagedFile(stageDir string, f StagedFile) (*os.File, error) {
-	// The name is joined onto stageDir here and onto the jail root by
-	// CopyFromPinnedFd. Both joins are only as safe as the name, and this
-	// function is exported: the server's check is the gate, and this one is what
-	// makes the gate's absence in some future caller a refusal instead of a
-	// traversal.
+func VerifyStagedFileAt(dir *os.File, f StagedFile) (*os.File, error) {
+	// The name is resolved against dir here and against the jail root by
+	// CopyFromPinnedFd. A descriptor bounds symlinks, not traversal -- openat
+	// walks ".." exactly like a path does -- so the whitelist is what keeps both
+	// resolutions inside their directory. This function is exported: the
+	// server's check is the gate, and this one is what makes the gate's absence
+	// in some future caller a refusal instead of a traversal.
 	if !ValidStagedName(f.Name) {
 		return nil, &BackendError{
 			Cause:   "bad_request",
 			Message: fmt.Sprintf("%q is not a staged file name", truncateName(f.Name)),
 		}
 	}
-	fpath := filepath.Join(stageDir, f.Name)
 
-	// O_NOFOLLOW: if the path is a symlink the open fails (ELOOP on Linux).
-	fd, err := unix.Open(fpath, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	// O_NOFOLLOW: if the name is a symlink the open fails (ELOOP on Linux). It
+	// is a bare openat and not os.Root, which resolves a symlink that stays
+	// inside its root and drops the caller's O_NOFOLLOW while doing it.
+	fd, err := unix.Openat(int(dir.Fd()), f.Name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, fmt.Errorf("privd: open staged file %q: %w", f.Name, err)
 	}
+	fpath := filepath.Join(dir.Name(), f.Name)
 	file := os.NewFile(uintptr(fd), fpath)
 
 	// fstat: confirm regular file.
@@ -81,37 +228,70 @@ func VerifyStagedFile(stageDir string, f StagedFile) (*os.File, error) {
 }
 
 // CopyFromPinnedFd copies from the already-verified *os.File (seeks to 0 first) into
-// dstDir/<f.Name>. This is the second half of the single-open staging pipeline: the fd
+// <f.Name> inside the directory dstDir names. This is the second half of the single-open staging pipeline: the fd
 // was opened and digest-verified by VerifyStagedFile; we never reopen the path.
 // Mode: 0644 for most files, 0640 for fc-config.json. Chowns to uid:gid.
-func CopyFromPinnedFd(src *os.File, dstDir string, f StagedFile, uid, gid int) error {
+func CopyFromPinnedFd(src *os.File, dstDir *os.File, f StagedFile, uid, gid int) error {
 	// Seek the verified fd back to the start — same open, never a new path open.
 	if _, err := src.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("privd: seek staged file %q: %w", f.Name, err)
 	}
 
-	mode := os.FileMode(0o644)
+	// openat resolves ".." against the descriptor like any other path, so the
+	// dirfd bounds symlinks and not traversal. The whitelist is what bounds
+	// traversal, and asking it here as well as in VerifyStagedFile costs one
+	// comparison and means the copy cannot be reached with a name the jailer
+	// would never stage.
+	if !ValidStagedName(f.Name) {
+		return &BackendError{
+			Cause:   "bad_request",
+			Message: fmt.Sprintf("staged file name %q is not one privd copies", f.Name),
+		}
+	}
+
+	mode := uint32(0o644)
 	if f.Name == "fc-config.json" {
 		mode = 0o640
 	}
 
-	dstPath := filepath.Join(dstDir, f.Name)
-	dst, err := os.OpenFile(dstPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+	// O_NOFOLLOW against the jail-root descriptor. The destination directory is
+	// the guest's after the first start, so the name may already be a symlink;
+	// following it would have root write wherever the guest pointed.
+	//
+	// O_EXCL rather than O_TRUNC. privd creates this directory on the start it
+	// is serving, a clean stop releases it, and a failed start rolls it back, so
+	// the name is only taken if one of those did not finish. Truncating what is
+	// there boots a VM into a chroot privd did not build and cannot describe;
+	// refusing leaves the debris where an operator can see it. O_EXCL also
+	// refuses a name that is already a hardlink, which O_NOFOLLOW says nothing
+	// about -- so the copy stays off an inode privd was not given without privd
+	// having to trust fs.protected_hardlinks, a sysctl it does not own.
+	fd, err := unix.Openat(int(dstDir.Fd()), f.Name, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, mode)
 	if err != nil {
-		return fmt.Errorf("privd: create dst %q: %w", f.Name, err)
+		if errors.Is(err, unix.EEXIST) {
+			return &BackendError{
+				Cause:   "invalid_state",
+				Message: fmt.Sprintf("jail root already holds %s from an earlier start; release the VM before starting it again", f.Name),
+			}
+		}
+		return &BackendError{
+			Cause:   "invalid_state",
+			Message: fmt.Sprintf("cannot create %s in the jail root: %v", f.Name, err),
+		}
 	}
-	defer dst.Close()
+	dst := os.NewFile(uintptr(fd), f.Name)
+	defer func() { _ = dst.Close() }()
 
 	if _, err := io.Copy(dst, src); err != nil {
 		return fmt.Errorf("privd: copy %q: %w", f.Name, err)
 	}
+	// fchown, not a chown by name: the name is never consulted again, so nothing
+	// can be swapped in under it between the copy and the ownership change.
+	if err := dst.Chown(uid, gid); err != nil {
+		return fmt.Errorf("privd: chown %q: %w", f.Name, err)
+	}
 	if err := dst.Close(); err != nil {
 		return fmt.Errorf("privd: close dst %q: %w", f.Name, err)
-	}
-
-	// chown to uid:gid.
-	if err := os.Lchown(dstPath, uid, gid); err != nil {
-		return fmt.Errorf("privd: chown %q: %w", f.Name, err)
 	}
 	return nil
 }
@@ -142,6 +322,37 @@ func JailerArgv(cfg RealOpsCfg, entry VMEntry) []string {
 		"--config-file", "fc-config.json",
 		"--api-sock", "api.sock",
 	}
+}
+
+// openProcess takes a descriptor on pid before anything is checked about it.
+//
+// os.FindProcess calls pidfd_open on Linux, and the Signal that follows goes
+// through pidfd_send_signal rather than kill(2). That is the whole point: a pid
+// is a number the host reissues, so between reading /proc to decide a process is
+// ours and signalling it there is a window in which the number can come to mean
+// a different process -- and privd signals as root, on behalf of a caller that
+// is not.
+//
+// Opening first is what closes that window, and it closes it either way round.
+// A pid already recycled when this runs is refused by the starttime compare that
+// follows. A pid recycled after this runs cannot redirect the signal, because
+// the descriptor still names the process that was opened; the signal reaches a
+// process that is gone and returns ESRCH. Neither case rests on the kernel
+// keeping the pid number reserved for as long as the descriptor is held.
+//
+// os.FindProcess reports no error for a process that is gone -- it hands back a
+// value whose every operation fails -- so the zero signal is what asks. Callers
+// must Release the returned process.
+func openProcess(pid int) (*os.Process, error) {
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.Signal(syscall.Signal(0)); err != nil {
+		_ = p.Release()
+		return nil, err
+	}
+	return p, nil
 }
 
 // CheckSignalIdentity re-reads /proc/<pid>/stat and returns a BackendError with
@@ -178,14 +389,22 @@ func CheckSignalIdentity(entry VMEntry) error {
 //     Wait up to 10s for <root>/v.sock, then chmod root 0750.
 //  4. Read <root>/firecracker.pid, read /proc/<pid>/stat field 22, return both.
 func (r *RealOps) StartVM(entry *VMEntry, req StartVMReq) (StartVMResp, error) {
-	stageDir := req.StageDir
-
 	// Step 1: verify all staged files, keeping each fd open (single-open pipeline).
 	// All files are verified before any jail dir is touched; on any mismatch we
 	// close all open fds and abort.
+	//
+	// req.StageDir is not consulted. The directory is derived from vm_id and
+	// held open for the whole verify pass, so the files copied below are the
+	// ones privd read out of the directory privd named.
+	stageDir, err := r.stageDir(req.VMID)
+	if err != nil {
+		return StartVMResp{}, err
+	}
+	defer func() { _ = stageDir.Close() }()
+
 	fds := make([]*os.File, len(req.Files))
 	for i, f := range req.Files {
-		pinned, err := VerifyStagedFile(stageDir, f)
+		pinned, err := VerifyStagedFileAt(stageDir, f)
 		if err != nil {
 			// Close fds opened so far.
 			for _, open := range fds[:i] {
@@ -199,16 +418,17 @@ func (r *RealOps) StartVM(entry *VMEntry, req StartVMReq) (StartVMResp, error) {
 	// Step 2: create jail dirs and copy each file from its pinned fd.
 	// The path is never reopened — CopyFromPinnedFd seeks to 0 and reads the
 	// same fd that was digest-verified above, closing the TOCTOU window entirely.
-	root := filepath.Join(r.cfg.JailBase, "firecracker", req.VMID, "root")
-	if err := os.MkdirAll(root, 0o750); err != nil {
+	rootDir, err := r.jailRoot(req.VMID, true)
+	if err != nil {
 		for _, f := range fds {
 			f.Close()
 		}
-		return StartVMResp{}, fmt.Errorf("privd: mkdir jail root %q: %w", root, err)
+		return StartVMResp{}, err
 	}
+	defer func() { _ = rootDir.Close() }()
 
 	for i, f := range req.Files {
-		err := CopyFromPinnedFd(fds[i], root, f, req.UID, req.GID)
+		err := CopyFromPinnedFd(fds[i], rootDir, f, req.UID, req.GID)
 		fds[i].Close() // close immediately after copy, regardless of outcome
 		if err != nil {
 			// Close remaining open fds.
@@ -244,32 +464,33 @@ func (r *RealOps) StartVM(entry *VMEntry, req StartVMReq) (StartVMResp, error) {
 		// Wait for v.sock (100 × 100ms = 10s), then fix the chmod race.
 		// Jailer tightens the chroot root to 0700 mid-startup; we reopen to 0750
 		// strictly after firecracker binds v.sock (which follows jailer's chroot prep).
-		sockPath := filepath.Join(root, "v.sock")
 		sockFound := false
+		var st unix.Stat_t
 		for i := 0; i < 100; i++ {
-			if _, err := os.Stat(sockPath); err == nil {
+			if err := unix.Fstatat(int(rootDir.Fd()), "v.sock", &st, unix.AT_SYMLINK_NOFOLLOW); err == nil {
 				sockFound = true
 				break
 			}
 			time.Sleep(100 * time.Millisecond)
 		}
 		if !sockFound {
-			r.log.Printf("v.sock not found after 10s at %s — proceeding with chmod anyway", sockPath)
+			r.log.Printf("v.sock not found after 10s in the jail root for %s — proceeding with chmod anyway", req.VMID)
 		}
-		if err := os.Chmod(root, 0o750); err != nil {
+		// fchmod on the descriptor: the directory whose mode is loosened is the
+		// one privd created, whatever the path resolves to by now.
+		if err := rootDir.Chmod(0o750); err != nil {
 			r.log.Printf("chmod jail root 0750: %v (non-fatal)", err)
 		}
 	}
 
 	// Step 4: read firecracker.pid and derive starttime.
-	pidFile := filepath.Join(root, "firecracker.pid")
-	pidData, err := os.ReadFile(pidFile)
+	raw, err := readPidFileAt(rootDir, "firecracker.pid")
 	if err != nil {
 		return StartVMResp{}, fmt.Errorf("privd: read firecracker.pid: %w", err)
 	}
-	pid, err := strconv.Atoi(string(bytes.TrimSpace(pidData)))
+	pid, err := strconv.Atoi(raw)
 	if err != nil {
-		return StartVMResp{}, fmt.Errorf("privd: parse firecracker.pid %q: %w", string(pidData), err)
+		return StartVMResp{}, fmt.Errorf("privd: parse firecracker.pid %q: %w", raw, err)
 	}
 
 	statData, err := os.ReadFile(ProcStatPath(pid))
@@ -302,7 +523,7 @@ func (r *RealOps) StartVM(entry *VMEntry, req StartVMReq) (StartVMResp, error) {
 // every step that does not happen is logged instead.
 func (r *RealOps) AbortStartVM(entry VMEntry) error {
 	jailDir := filepath.Join(r.cfg.JailBase, "firecracker", entry.VMID)
-	r.killJailedVMM(jailDir, entry.VMID)
+	r.killJailedVMM(entry.VMID)
 	if err := os.RemoveAll(jailDir); err != nil {
 		return fmt.Errorf("privd: abort start %s: remove jail dir %q: %w", entry.VMID, jailDir, err)
 	}
@@ -350,11 +571,12 @@ func argvServesVM(argv []string, vmID string) bool {
 	return false
 }
 
-// killJailedVMM SIGKILLs the firecracker named by the pid file inside jailDir,
-// when there is one and the process it names really is this VM's firecracker.
+// killJailedVMM SIGKILLs the firecracker named by the pid file in this VM's jail
+// root, when there is one and the process it names really is this VM's
+// firecracker.
 //
-// Identity is what makes this safe to do at all. StartVM's MkdirAll does not
-// clear the tree, so a chroot left by an earlier failed start can carry a pid
+// Identity is what makes this safe to do at all. StartVM does not clear the
+// tree, so a chroot left by an earlier failed start can carry a pid
 // file naming a process that exited long ago — and pids are recycled (SPEC §5.5
 // asks for more than a pid). There is no starttime to compare against: the
 // failure being undone is precisely that StartVM never got to read one.
@@ -382,18 +604,32 @@ func argvServesVM(argv []string, vmID string) bool {
 // what makes a wrong guess about the argv visible: if a future jailer ever
 // spelled it "--id=<vmID>", every withheld kill would print the spelling that
 // defeated it.
-func (r *RealOps) killJailedVMM(jailDir, vmID string) {
-	pidFile := filepath.Join(jailDir, "root", "firecracker.pid")
-	pidData, err := os.ReadFile(pidFile)
+func (r *RealOps) killJailedVMM(vmID string) {
+	rootDir, err := r.jailRoot(vmID, false)
+	if err != nil {
+		return // no jail root to read: nothing here names a process
+	}
+	defer func() { _ = rootDir.Close() }()
+
+	raw, err := readPidFileAt(rootDir, "firecracker.pid")
 	if err != nil {
 		return // no pid file: the jailer never got far enough to write one
 	}
-	raw := string(bytes.TrimSpace(pidData))
 	pid, err := strconv.Atoi(raw)
 	if err != nil || pid <= 1 {
 		r.log.Printf("abort start %s: firecracker.pid holds %q, which is not a pid; killing nothing", vmID, raw)
 		return
 	}
+	// The descriptor comes before the three reads that decide whether to kill.
+	// This path has the longer window of the two -- stat, then comm, then cmdline,
+	// then the signal -- and it is the one running while a start is already going
+	// wrong, so the pid it holds is the likeliest in privd to have been freed.
+	p, err := openProcess(pid)
+	if err != nil {
+		return // process already gone; nothing to kill
+	}
+	defer func() { _ = p.Release() }()
+
 	statData, err := os.ReadFile(ProcStatPath(pid))
 	if err != nil {
 		return // process already gone; nothing to kill
@@ -411,7 +647,7 @@ func (r *RealOps) killJailedVMM(jailDir, vmID string) {
 		r.log.Printf("abort start %s: firecracker pid %d has argv %q, which does not carry --id %s; leaving it alone — a vmm may survive this rollback", vmID, pid, argv, vmID)
 		return
 	}
-	if err := unix.Kill(pid, unix.SIGKILL); err != nil {
+	if err := p.Signal(unix.SIGKILL); err != nil {
 		r.log.Printf("abort start %s: kill firecracker pid %d: %v", vmID, pid, err)
 		return
 	}
@@ -421,11 +657,8 @@ func (r *RealOps) killJailedVMM(jailDir, vmID string) {
 // SignalVM implements OpsBackend.SignalVM.
 // Re-reads /proc to verify identity before signalling (§5.5).
 func (r *RealOps) SignalVM(entry VMEntry, kind string) error {
-	// Identity gate: re-read /proc at signal time.
-	if err := CheckSignalIdentity(entry); err != nil {
-		return err
-	}
-
+	// The kind is decided before a descriptor is taken: a caller that asked for
+	// a signal privd does not send has nothing to open.
 	var sig unix.Signal
 	switch kind {
 	case "term":
@@ -436,7 +669,21 @@ func (r *RealOps) SignalVM(entry VMEntry, kind string) error {
 		return fmt.Errorf("privd: unknown signal kind %q", kind)
 	}
 
-	if err := unix.Kill(entry.PID, sig); err != nil {
+	// Pin the process, then check it, then signal it. A process already gone
+	// gives the same answer the identity gate would have: there is nothing here
+	// that matches the ledger.
+	p, err := openProcess(entry.PID)
+	if err != nil {
+		return &BackendError{Cause: "invalid_state", Message: "pid recycled"}
+	}
+	defer func() { _ = p.Release() }()
+
+	// Identity gate: re-read /proc at signal time.
+	if err := CheckSignalIdentity(entry); err != nil {
+		return err
+	}
+
+	if err := p.Signal(sig); err != nil {
 		return fmt.Errorf("privd: kill pid %d: %w", entry.PID, err)
 	}
 	return nil

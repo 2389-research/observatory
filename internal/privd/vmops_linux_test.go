@@ -26,6 +26,11 @@ import (
 //   - Symlink in place of the file → error (O_NOFOLLOW).
 func TestStagedFileVerification(t *testing.T) {
 	dir := t.TempDir()
+	dirFd, err := os.Open(dir)
+	if err != nil {
+		t.Fatalf("open stage dir: %v", err)
+	}
+	defer dirFd.Close()
 
 	content := []byte("hello vm image data")
 	fname := "rootfs.ext4"
@@ -40,7 +45,7 @@ func TestStagedFileVerification(t *testing.T) {
 
 	t.Run("correct_digest", func(t *testing.T) {
 		staged := privd.StagedFile{Name: fname, SHA256: correctDigest}
-		fd, err := privd.VerifyStagedFile(dir, staged)
+		fd, err := privd.VerifyStagedFileAt(dirFd, staged)
 		if err != nil {
 			t.Errorf("correct digest: unexpected error: %v", err)
 		}
@@ -52,7 +57,7 @@ func TestStagedFileVerification(t *testing.T) {
 
 	t.Run("wrong_digest", func(t *testing.T) {
 		staged := privd.StagedFile{Name: fname, SHA256: wrongDigest}
-		fd, err := privd.VerifyStagedFile(dir, staged)
+		fd, err := privd.VerifyStagedFileAt(dirFd, staged)
 		if fd != nil {
 			fd.Close()
 			t.Error("wrong digest: expected nil fd, got non-nil (fd leak)")
@@ -76,14 +81,17 @@ func TestStagedFileVerification(t *testing.T) {
 		}
 	})
 
+	// The name here has to be one ValidStagedName accepts, or the refusal comes
+	// from the whitelist and the O_NOFOLLOW this subtest exists for is never
+	// reached.
 	t.Run("symlink_rejected", func(t *testing.T) {
-		linkName := "symlink.ext4"
+		linkName := "vmlinux"
 		linkPath := filepath.Join(dir, linkName)
 		if err := os.Symlink(fpath, linkPath); err != nil {
 			t.Fatalf("symlink: %v", err)
 		}
 		staged := privd.StagedFile{Name: linkName, SHA256: correctDigest}
-		fd, err := privd.VerifyStagedFile(dir, staged)
+		fd, err := privd.VerifyStagedFileAt(dirFd, staged)
 		if fd != nil {
 			fd.Close()
 			t.Error("symlink: expected nil fd, got non-nil (fd leak)")
@@ -230,7 +238,7 @@ func TestSignalIdentityGate(t *testing.T) {
 //
 // Protocol:
 //  1. Write a known file to a stage dir and compute its digest.
-//  2. Call VerifyStagedFile — it must return a non-nil *os.File (the pinned fd).
+//  2. Call VerifyStagedFileAt — it must return a non-nil *os.File (the pinned fd).
 //  3. Swap the stage path with different content (simulating a TOCTOU attacker).
 //  4. Seek the pinned fd to 0 and copy via CopyFromPinnedFd into a destination.
 //  5. Assert the destination contains the ORIGINAL content, not the swapped content.
@@ -239,6 +247,11 @@ func TestSignalIdentityGate(t *testing.T) {
 // so this test either fails to compile or copies the swapped content.
 func TestVerifyAndCopyFromPinnedFd(t *testing.T) {
 	dir := t.TempDir()
+	dirFd, err := os.Open(dir)
+	if err != nil {
+		t.Fatalf("open stage dir: %v", err)
+	}
+	defer dirFd.Close()
 
 	original := []byte("original verified image data")
 	swapped := []byte("ATTACKER CONTENT — should never land in jail")
@@ -253,13 +266,13 @@ func TestVerifyAndCopyFromPinnedFd(t *testing.T) {
 
 	staged := privd.StagedFile{Name: fname, SHA256: digest}
 
-	// VerifyStagedFile must now return the open fd on success.
-	fd, err := privd.VerifyStagedFile(dir, staged)
-	if err != nil {
-		t.Fatalf("VerifyStagedFile: %v", err)
+	// VerifyStagedFileAt must now return the open fd on success.
+	fd, verifyErr := privd.VerifyStagedFileAt(dirFd, staged)
+	if verifyErr != nil {
+		t.Fatalf("VerifyStagedFileAt: %v", verifyErr)
 	}
 	if fd == nil {
-		t.Fatal("VerifyStagedFile returned nil fd on success")
+		t.Fatal("VerifyStagedFileAt returned nil fd on success")
 	}
 	defer fd.Close()
 
@@ -276,7 +289,12 @@ func TestVerifyAndCopyFromPinnedFd(t *testing.T) {
 	// Copy from the pinned fd — must ignore the swapped path content.
 	// Use current uid/gid; chowning to root requires privileges we don't have here.
 	dstDir := t.TempDir()
-	if err := privd.CopyFromPinnedFd(fd, dstDir, staged, os.Getuid(), os.Getgid()); err != nil {
+	dstFd, err := os.Open(dstDir)
+	if err != nil {
+		t.Fatalf("open dst dir: %v", err)
+	}
+	defer dstFd.Close()
+	if err := privd.CopyFromPinnedFd(fd, dstFd, staged, os.Getuid(), os.Getgid()); err != nil {
 		t.Fatalf("CopyFromPinnedFd: %v", err)
 	}
 
@@ -292,24 +310,36 @@ func TestVerifyAndCopyFromPinnedFd(t *testing.T) {
 	}
 }
 
-// TestVerifyStagedFileReturnsNilFdOnMismatch checks that VerifyStagedFile returns
+// TestVerifyStagedFileReturnsNilFdOnMismatch checks that VerifyStagedFileAt returns
 // nil fd (not a leaked fd) when digest verification fails.
 func TestVerifyStagedFileReturnsNilFdOnMismatch(t *testing.T) {
 	dir := t.TempDir()
+	dirFd, err := os.Open(dir)
+	if err != nil {
+		t.Fatalf("open stage dir: %v", err)
+	}
+	defer dirFd.Close()
+
 	content := []byte("some data")
-	fname := "kernel"
+	// A name ValidStagedName accepts: any other name is refused by the whitelist
+	// and the digest is never computed, which is not what this test claims.
+	fname := "vmlinux"
 	if err := os.WriteFile(filepath.Join(dir, fname), content, 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
 	staged := privd.StagedFile{Name: fname, SHA256: strings.Repeat("a", 64)}
-	fd, err := privd.VerifyStagedFile(dir, staged)
-	if err == nil {
+	fd, verifyErr := privd.VerifyStagedFileAt(dirFd, staged)
+	if verifyErr == nil {
 		t.Fatal("expected digest_mismatch error, got nil")
+	}
+	var be *privd.BackendError
+	if !privd.AsBackendError(verifyErr, &be) || be.Cause != "digest_mismatch" {
+		t.Errorf("want digest_mismatch, got %v", verifyErr)
 	}
 	if fd != nil {
 		fd.Close()
-		t.Error("VerifyStagedFile returned non-nil fd on mismatch — fd leak")
+		t.Error("VerifyStagedFileAt returned non-nil fd on mismatch — fd leak")
 	}
 }
 

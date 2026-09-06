@@ -68,7 +68,13 @@ func TestStagedFileNameCannotEscapeTheJailRoot(t *testing.T) {
 	sum := sha256.Sum256(payload)
 	f := StagedFile{Name: name, SHA256: hex.EncodeToString(sum[:])}
 
-	pinned, err := VerifyStagedFile(stageDir, f)
+	stageFd, err := openDirNoFollow(stageDir)
+	if err != nil {
+		t.Fatalf("open stage dir: %v", err)
+	}
+	defer stageFd.Close()
+
+	pinned, err := VerifyStagedFileAt(stageFd, f)
 	if err == nil {
 		// Not refused. Finish the copy the way StartVM would and report what it took:
 		// a refusal that only happens later is not a refusal, and the bytes on disk
@@ -76,7 +82,12 @@ func TestStagedFileNameCannotEscapeTheJailRoot(t *testing.T) {
 		defer pinned.Close()
 		// uid/gid -1 leaves ownership alone, so the copy needs no root here. A root
 		// privd would also chown the escaped path to the VM's uid.
-		copyErr := CopyFromPinnedFd(pinned, jailRoot, f, -1, -1)
+		jailRootDir, openErr := openDirNoFollow(jailRoot)
+		if openErr != nil {
+			t.Fatalf("open jail root: %v", openErr)
+		}
+		defer jailRootDir.Close()
+		copyErr := CopyFromPinnedFd(pinned, jailRootDir, f, -1, -1)
 		got, readErr := os.ReadFile(dstPath)
 		if copyErr == nil && readErr == nil {
 			t.Fatalf("VerifyStagedFile accepted %q and the copy wrote %d bytes to %q, outside the jail root %q: %q",
@@ -95,6 +106,11 @@ func TestStagedFileNameCannotEscapeTheJailRoot(t *testing.T) {
 // and verifies.
 func TestVerifyStagedFileTakesTheNamesALaunchStages(t *testing.T) {
 	stageDir := t.TempDir()
+	stageFd, err := openDirNoFollow(stageDir)
+	if err != nil {
+		t.Fatalf("open stage dir: %v", err)
+	}
+	defer stageFd.Close()
 	for _, name := range StagedFileNames {
 		payload := []byte("bytes of " + name)
 		if err := os.WriteFile(filepath.Join(stageDir, name), payload, 0o644); err != nil {
@@ -102,9 +118,9 @@ func TestVerifyStagedFileTakesTheNamesALaunchStages(t *testing.T) {
 		}
 		sum := sha256.Sum256(payload)
 		f := StagedFile{Name: name, SHA256: hex.EncodeToString(sum[:])}
-		pinned, err := VerifyStagedFile(stageDir, f)
+		pinned, err := VerifyStagedFileAt(stageFd, f)
 		if err != nil {
-			t.Errorf("VerifyStagedFile refused %q, which every launch stages: %v", name, err)
+			t.Errorf("VerifyStagedFileAt refused %q, which every launch stages: %v", name, err)
 			continue
 		}
 		pinned.Close()

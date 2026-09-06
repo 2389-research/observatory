@@ -280,3 +280,26 @@ func TestStartVMTakesTheFileListALaunchSends(t *testing.T) {
 		t.Errorf("backend StartVM ran %v; want exactly one call", ops.startCalls)
 	}
 }
+
+// TestStartVMRefusesAStageDirThatNamesAnotherVM covers what is left of the
+// stage_dir check. The backend derives <StageRoot>/<vm_id> and opens it against
+// the stage root, so the field no longer chooses anything -- but it can still
+// disagree with vm_id, and a caller that staged under one id and started
+// another is a bug worth naming before a jail tree exists.
+func TestStartVMRefusesAStageDirThatNamesAnotherVM(t *testing.T) {
+	s, ops, stageDir := startVMFixture(t)
+	allocate(t, s, "vm-rollback")
+
+	other := filepath.Join(filepath.Dir(stageDir), "vm-somebody-else")
+	resp := startVM(t, s, "vm-rollback", other)
+
+	if resp.OK {
+		t.Fatal("start_vm accepted a stage_dir naming another vm")
+	}
+	if resp.Cause != "bad_request" {
+		t.Errorf("cause = %q, want bad_request", resp.Cause)
+	}
+	if len(ops.startCalls) != 0 {
+		t.Errorf("backend.StartVM ran despite the refusal (%d calls)", len(ops.startCalls))
+	}
+}
