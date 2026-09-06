@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/2389-research/observatory-v2/internal/network"
@@ -142,6 +143,37 @@ func JailerArgv(cfg RealOpsCfg, entry VMEntry) []string {
 		"--config-file", "fc-config.json",
 		"--api-sock", "api.sock",
 	}
+}
+
+// openProcess takes a descriptor on pid before anything is checked about it.
+//
+// os.FindProcess calls pidfd_open on Linux, and the Signal that follows goes
+// through pidfd_send_signal rather than kill(2). That is the whole point: a pid
+// is a number the host reissues, so between reading /proc to decide a process is
+// ours and signalling it there is a window in which the number can come to mean
+// a different process -- and privd signals as root, on behalf of a caller that
+// is not.
+//
+// Opening first is what closes that window, and it closes it either way round.
+// A pid already recycled when this runs is refused by the starttime compare that
+// follows. A pid recycled after this runs cannot redirect the signal, because
+// the descriptor still names the process that was opened; the signal reaches a
+// process that is gone and returns ESRCH. Neither case rests on the kernel
+// keeping the pid number reserved for as long as the descriptor is held.
+//
+// os.FindProcess reports no error for a process that is gone -- it hands back a
+// value whose every operation fails -- so the zero signal is what asks. Callers
+// must Release the returned process.
+func openProcess(pid int) (*os.Process, error) {
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.Signal(syscall.Signal(0)); err != nil {
+		_ = p.Release()
+		return nil, err
+	}
+	return p, nil
 }
 
 // CheckSignalIdentity re-reads /proc/<pid>/stat and returns a BackendError with
@@ -394,6 +426,16 @@ func (r *RealOps) killJailedVMM(jailDir, vmID string) {
 		r.log.Printf("abort start %s: firecracker.pid holds %q, which is not a pid; killing nothing", vmID, raw)
 		return
 	}
+	// The descriptor comes before the three reads that decide whether to kill.
+	// This path has the longer window of the two -- stat, then comm, then cmdline,
+	// then the signal -- and it is the one running while a start is already going
+	// wrong, so the pid it holds is the likeliest in privd to have been freed.
+	p, err := openProcess(pid)
+	if err != nil {
+		return // process already gone; nothing to kill
+	}
+	defer func() { _ = p.Release() }()
+
 	statData, err := os.ReadFile(ProcStatPath(pid))
 	if err != nil {
 		return // process already gone; nothing to kill
@@ -411,7 +453,7 @@ func (r *RealOps) killJailedVMM(jailDir, vmID string) {
 		r.log.Printf("abort start %s: firecracker pid %d has argv %q, which does not carry --id %s; leaving it alone — a vmm may survive this rollback", vmID, pid, argv, vmID)
 		return
 	}
-	if err := unix.Kill(pid, unix.SIGKILL); err != nil {
+	if err := p.Signal(unix.SIGKILL); err != nil {
 		r.log.Printf("abort start %s: kill firecracker pid %d: %v", vmID, pid, err)
 		return
 	}
@@ -421,11 +463,8 @@ func (r *RealOps) killJailedVMM(jailDir, vmID string) {
 // SignalVM implements OpsBackend.SignalVM.
 // Re-reads /proc to verify identity before signalling (§5.5).
 func (r *RealOps) SignalVM(entry VMEntry, kind string) error {
-	// Identity gate: re-read /proc at signal time.
-	if err := CheckSignalIdentity(entry); err != nil {
-		return err
-	}
-
+	// The kind is decided before a descriptor is taken: a caller that asked for
+	// a signal privd does not send has nothing to open.
 	var sig unix.Signal
 	switch kind {
 	case "term":
@@ -436,7 +475,21 @@ func (r *RealOps) SignalVM(entry VMEntry, kind string) error {
 		return fmt.Errorf("privd: unknown signal kind %q", kind)
 	}
 
-	if err := unix.Kill(entry.PID, sig); err != nil {
+	// Pin the process, then check it, then signal it. A process already gone
+	// gives the same answer the identity gate would have: there is nothing here
+	// that matches the ledger.
+	p, err := openProcess(entry.PID)
+	if err != nil {
+		return &BackendError{Cause: "invalid_state", Message: "pid recycled"}
+	}
+	defer func() { _ = p.Release() }()
+
+	// Identity gate: re-read /proc at signal time.
+	if err := CheckSignalIdentity(entry); err != nil {
+		return err
+	}
+
+	if err := p.Signal(sig); err != nil {
 		return fmt.Errorf("privd: kill pid %d: %w", entry.PID, err)
 	}
 	return nil
