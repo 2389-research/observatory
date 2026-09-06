@@ -10,6 +10,14 @@ Use statuses `SPECIFIED`, `TESTED_PASS`, `TESTED_FAIL`, `BLOCKED`, and `VERIFIED
 
 Use a dedicated controlled network fixture for deterministic HTTP, HTTPS, DNS, pinned certificates, streaming, redirects and failure responses. Fixture-network exceptions must be confined to the isolated test installation and never silently added to production policies. Internet smoke tests are supplementary, not the sole evidence.
 
+### Execution records
+
+A gate transcript says what happened. It does not say what ran. Each real-host gate therefore publishes one machine-readable record per acceptance row it exercises (`internal/evidence`, wired at `tests/integration/evidence_record_test.go`). A record binds that row's outcome to the commit the tree came from and whether the tree was modified, the sha256 of every binary that ran, the runtime-lock digest, the pinned guest-artifact digests the lock names, the host's identity and preflight verdict, the command that reproduces it, and the digest of the transcript the subtest wrote. Publishing an execution ID twice is refused, so a record is written once and never rewritten.
+
+The rules on this page are enforced by that package, not merely described here. Portable evidence cannot record a pass. Any result other than `blocked` requires an executed procedure, so a skipped subtest records `blocked`. A real-host run names the bytes that ran or it is refused. A row claiming the host returned to its idle baseline carries both host inventories and at least one observed terminal state, or it is refused. A fact a row's procedure names but the row does not check is carried as unmeasured rather than dropped.
+
+Records are published outside the repository — `$VMOBS_EVIDENCE_ROOT`, default `<tmpdir>/vmobs-evidence` — because `scripts/linux` rsyncs the working tree with `--delete`. That copy also arrives without `.git`, so `scripts/linux` carries the revision across; a gate with no revision to bind to publishes nothing and says why. The `.txt` transcripts committed under `tests/integration/evidence/` predate execution records and carry no such binding: they are readable history, not provenance.
+
 ## A. Host, images and provisioning
 
 | Test | Requirement | Procedure and required result |
@@ -96,13 +104,23 @@ eight passes, zero skips, 102.6s, same host and same runtime lock. The committed
 that run's; the rows below quote it where their text changed and run B's everywhere else, and the
 two are identical once UUIDs, timestamps, pids and temp-dir names are normalized. The §15.3 scan
 was repeated over the new file with the same result.
-Runtime lock at aa12929 (runtime.lock.json, unchanged since the 0881e69 rootfs re-pin): vmlinux
-b6067686…, rootfs c6a92bba…, firecracker 2fd01713…, jailer 1f3a0c1f…. The daemon verifies both
+Re-run 2026-09-06 (kata 2jt1): the gate now publishes one execution record per acceptance row it
+exercises. Eight subtests, eight passes, zero skips, 102.1s, same host. Normalized for UUIDs,
+timestamps, pids and temp-dir names, this run's transcript is byte-identical to the 2026-09-05
+one apart from the list of records it published — the wiring changed what the gate records and
+nothing about what it proves, so the quoted evidence below still holds. The seven records are
+committed at tests/integration/evidence/executions/. Each binds its row to commit 87cdc59, to the
+sha256 of the vmobsd, vmobs-runner and gate-test binaries that ran, to runtime-lock digest
+852ef9ea…, and to the four artifact digests the lock pins: vmlinux b6067686…, rootfs 0d970896…,
+firecracker 2fd01713…, jailer 1f3a0c1f…. Each also records source_dirty=true — the tree carried
+untracked files when the gate ran. AT-005 runs from a separate test binary and publishes no
+record.
+The earlier runs quoted the lock by hand, and the rootfs was re-pinned twice after them (e70224f,
+3ec51bf), so that hand-written digest had gone stale by the time anyone read it. Nothing on this
+page quotes a lock digest by hand any more; the record carries it. The daemon still verifies both
 binaries against the lock at startup (cmd/vmobsd/main.go:197) and every launch verifies both
-images against it before staging (internal/jailer/launch.go:268), so a passing run proves the
-artifacts matched those digests. The evidence file itself records no digest — unlike M0's, which
-carries a "Lock artifact verification" section — so these are read from the lock at the gate
-commit, not captured on the host.
+images before staging (internal/jailer/launch.go:268), so a passing run proves the artifacts
+matched those digests — and now the record says which digests those were.
 
 AT-001: TESTED_PASS.
   Completes the M0 note. A second real vmobsd daemon, pointed at a nonexistent privd socket, is

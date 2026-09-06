@@ -1,0 +1,3 @@
+
+## Subtest: 6_at009_four_concurrent_vms
+four VMs [92d8181f-8113-4a8c-80da-cfc9214e3dad 55de6d79-81c4-48c9-8a1a-21e2bcf88fae b0491faa-e54d-4cf0-b9d8-868091e0b5c4 8acff166-9244-4c4d-8383-8a150d6f8f7c]: created concurrently (four simultaneous POST /vms launches); all reached running with channel_established; all stopped and deleted

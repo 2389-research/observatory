@@ -1,5 +1,38 @@
 # Specification Package Validation
 
+## Revision 20 (2026-09-06) — acceptance evidence becomes a record, and revision 19's lock claim is withdrawn
+
+Adds an "Execution records" section to the evidence rules in `docs/ACCEPTANCE.md` and replaces
+the hand-quoted runtime lock in the M1a status block with the 2026-09-06 re-run. `check.py`
+gained one check: the row count `internal/evidence` mirrors must equal the number of rows this
+document defines, so the package cannot drift into refusing a row that exists (47 checks, all
+passing).
+
+Kata `2jt1` asked for immutable, digest-bound acceptance executions. A gate transcript said what
+happened; it did not say what ran. Each real-host gate now publishes one machine-readable record
+per acceptance row (`internal/evidence`), binding that row's outcome to the commit, the sha256 of
+every binary that ran, the runtime-lock digest, the artifact digests the lock pins, the host's
+identity and preflight verdict, and the digest of the transcript the subtest wrote. Publishing an
+execution ID twice is refused. The rules this page states are enforced there rather than
+described: portable evidence cannot record a pass, a result other than `blocked` needs an
+executed procedure, a real-host run names the bytes that ran, and a cleanup claim carries both
+host inventories and an observed terminal state or it is refused.
+
+Revision 19 said the 2026-09-05 M1a re-run used the "same host and runtime lock as the 2026-09-02
+runs". The host was the same; the lock was not. `runtime.lock.json` was re-pinned on 2026-09-04
+(`e70224f`) and again at 12:12 on 2026-09-05 (`3ec51bf`), three hours before that evidence
+landed (`5f97695`, 15:44). The M1a status block carried a rootfs digest of `c6a92bba…` from
+2026-09-02 that had by then been wrong for two days. Both claims were written by hand from a lock
+read at some earlier moment, which is the whole failure this kata removes: the 2026-09-06 records
+carry the lock digest the run actually verified against, and no lock digest on that page is
+hand-written any more.
+
+Evidence: `tests/integration/evidence/executions/`, seven records from the 2026-09-06 aibox03 run
+— eight subtests, eight passes, zero skips, 102.1s. Normalized for UUIDs, timestamps, pids and
+temp-dir names, that run's transcript is byte-identical to the 2026-09-05 one apart from the list
+of records it published. Each record reads back through `evidence.Load`, which validates it, and
+`evidence.Verify`, which re-hashes its artifact.
+
 ## Revision 19 (2026-09-05) — AT-011 and AT-018 now assert VMM death and reservation totals
 
 Amends the "L1 M1a status notes (2026-09-02)" block in `docs/ACCEPTANCE.md`: the AT-011 and

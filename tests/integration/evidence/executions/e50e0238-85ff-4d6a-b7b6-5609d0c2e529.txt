@@ -1,0 +1,3 @@
+
+## Subtest: 4_at011_graceful_stop
+vmA stopped graceful_stop=true; vmA vmm pid 3540406 starttime 43891657 gone from /proc=verified; host reserved 1024 MiB 2 vcpu 8320 MiB disk -> 512 MiB 1 vcpu 8320 MiB disk (released 512 MiB 1 vcpu, vmA charged 512 MiB 1 vcpu; disk unchanged, a stop keeps it); vmB state after vmA stop="running"; vmB state after vmA delete="running"; aStopTime=2026-09-06T05:11:01Z; vmB no state departure after stop=verified

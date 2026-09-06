@@ -1,0 +1,3 @@
+
+## Subtest: 5_at006_idempotency
+first_create=201 vm_id=f5b3bab3-0026-40a7-9364-fb442f22daab is_replay1=false replay=201 vm_id=f5b3bab3-0026-40a7-9364-fb442f22daab is_replay=true conflict=409 cause="idempotency_key_reused"

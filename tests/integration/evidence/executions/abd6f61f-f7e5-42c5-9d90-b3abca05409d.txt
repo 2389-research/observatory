@@ -1,0 +1,5 @@
+
+## Subtest: 3_two_real_vms
+vmA=cebdae4c-4a16-4078-920d-81cb9bc591b1 uid=20000 cid=3 netns=vmobs-cebdae4c-4a16-4078-920d-81cb9bc591b1 channel_established=true
+vmB=2dad2fee-d955-41a4-b16a-8481a663aa2a uid=20001 cid=4 netns=vmobs-2dad2fee-d955-41a4-b16a-8481a663aa2a channel_established=true
+root_image sha256=0d970896b92f5b4000f45074ba56a754efd1e43992c4ac0826275aaaa6d08858 reported by /host/status and vmA

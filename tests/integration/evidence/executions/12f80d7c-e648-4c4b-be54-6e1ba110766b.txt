@@ -1,0 +1,6 @@
+
+## Subtest: 7_at018_resource_leaks
+baseline: netns=1 veth=1 jail=1 fc_procs=1 state_entries=1 stage_entries=1
+after 5 graceful cycles + 1 force-delete: netns=1 veth=1 jail=1 fc_procs=1 state_entries=1 stage_entries=1
+delta: netns=+0 veth=+0 jail=+0 fc_procs=+0 state=+0 stage=+0
+force-delete vm=83d7653f-57df-4062-9218-a5dc1665fd38: vmm pid 3542088 starttime 43900201 gone from /proc=verified; host reserved 1024 MiB 2 vcpu 8320 MiB disk -> 512 MiB 1 vcpu 4160 MiB disk (released 512 MiB 1 vcpu 4160 MiB disk, vm charged 512 MiB 1 vcpu 4160 MiB disk)

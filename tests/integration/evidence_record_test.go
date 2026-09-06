@@ -230,6 +230,17 @@ func (r *gateRecorder) publish(t *testing.T, row *rowEvidence, testID, name, tra
 		}
 	}
 
+	// The transcript passed the §15.3 scan on its way into the gate's builder
+	// (evidenceSubtest). The fields a row sets by hand have not, so they are
+	// scanned here — the whole record cannot be, because its digest fields are
+	// 64-character hex by construction and that is what the scan looks for.
+	authored := []string{outcome.Summary, outcome.Expected, outcome.Actual}
+	authored = append(authored, row.unmeasured...)
+	for _, term := range row.terminal {
+		authored = append(authored, term.Subject, term.State)
+	}
+	assertNoToken(t, []byte(strings.Join(authored, "\n")))
+
 	id := evidence.NewID()
 	// A subtest that ends on t.Fatal never reaches its evidenceSubtest call, so
 	// the artifact says that rather than being empty.

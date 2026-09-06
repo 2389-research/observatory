@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "execution_id": "f4b93ae5-29f4-4175-8b1e-3b382fcbaef8",
+  "test_id": "AT-009",
+  "gate_id": "m1a",
+  "created_at": "2026-09-06T05:11:37.961927446Z",
+  "manifest": {
+    "schema_version": 1,
+    "class": "real_host",
+    "source_revision": "87cdc59949358d6f3091614e6335cb0ad66e1207",
+    "source_dirty": true,
+    "binary_digests": {
+      "gate_test": "07ca299ede1b7e8eb9b88e55f734c72bf8fcdd8566be87fca718134867d16a6d",
+      "vmobs-runner": "45c458999dcc831e85c4f6f474341d94a59c2436c15ec6fcadb088ad4b3f512d",
+      "vmobsd": "464df25f66fdb1d12a92c04ebe24bd0fe9d574a4d75994f85841918dfb40fca6"
+    },
+    "runtime_lock_digest": "852ef9ea3710796abd9018038f3fe0f9e036ed72fa83ea614544fc3f27d6608d",
+    "fixture_digests": {
+      "firecracker": "2fd0171309af7e24cf8dafc8a6f921c1434c49b5f9349bb996b7ed0a4deb8aa7",
+      "guest_kernel.vmlinux": "b606768652b4ecf5d8a2651d258e70d8f1892fca9f74c6b5fc2c9031a50ddd31",
+      "jailer": "1f3a0c1fe86212d0001819bfe0819071c01208b3ccc9398c3b3bc1b84cf21edd",
+      "root_image": "0d970896b92f5b4000f45074ba56a754efd1e43992c4ac0826275aaaa6d08858"
+    },
+    "command": [
+      "/tmp/go-build4017248600/b001/integration.test",
+      "-test.paniconexit0",
+      "-test.run=TestM1aGate",
+      "-test.v=true",
+      "-test.count=1",
+      "-test.timeout=25m0s"
+    ],
+    "host": {
+      "go_version": "go1.27.0",
+      "goos_goarch": "linux/amd64",
+      "hostname": "aibox03",
+      "kernel_release": "6.8.0-138-generic",
+      "preflight_overall": "pass",
+      "runtime_available": "true"
+    },
+    "cleanup_claimed": false,
+    "artifacts": [
+      {
+        "path": "f4b93ae5-29f4-4175-8b1e-3b382fcbaef8.txt",
+        "sha256": "c3c48f88c9aba5904396014567e6a6b05a040c453c11e91c4d165263df13e21f"
+      }
+    ]
+  },
+  "outcome": {
+    "schema_version": 1,
+    "procedure": "executed",
+    "result": "pass",
+    "summary": "subtest at009_four_concurrent_vms passed"
+  }
+}

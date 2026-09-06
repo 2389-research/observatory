@@ -1,0 +1,3 @@
+
+## Subtest: 8_at007_ordering
+vm=14bedf43-9da8-4494-9cd4-bef62f2afdfb running_transition_at="2026-09-06T05:12:23.057795Z" channel_established_at="2026-09-06T05:12:22.555034Z" running_not_before_channel=true

@@ -1,0 +1,3 @@
+
+## Subtest: 2_at001_privd_refusal
+POST /vms on bad-privd daemon: status=501 cause="runtime_unavailable" message="runtime not available on this host: guest_channel: cannot reach privd socket: dial unix /nonexistent/privd.sock: connect: no such file or directory" details.reason="guest_channel: cannot reach privd socket: dial unix /nonexistent/privd.sock: connect: no such file or directory" guest_channel_found=true dial_failure_found=true socket_named=true not_configured_found=false
