@@ -780,7 +780,7 @@ func TestInject(t *testing.T) {
 		h := buildInjectHarness(t, "", "10.118.0.0/24", 90, 0)
 		vmID := "vm-inject-9"
 
-		// copyFile opens its destination O_WRONLY|O_CREATE|O_TRUNC; a directory
+		// copyVerified opens its destination O_WRONLY|O_CREATE|O_TRUNC; a directory
 		// there fails it with EISDIR. vmlinux copies first, so the stage dir holds
 		// a real partial copy when the failure lands.
 		planted := filepath.Join(h.stageRoot, vmID, "rootfs.ext4")

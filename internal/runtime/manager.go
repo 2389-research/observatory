@@ -373,7 +373,7 @@ func (m *Manager) detachedContext(parent context.Context, budget time.Duration) 
 
 // launchBudget is a start action's budget. A launch is not a stop with the
 // arrow reversed: nothing in it waits on the guest's patience, and almost all
-// of it is file IO that no timeout interrupts (jailer copyFile takes no
+// of it is file IO that no timeout interrupts (jailer copyVerified takes no
 // context at all).
 //
 // Every staged byte is read five times and written twice — hashed against the

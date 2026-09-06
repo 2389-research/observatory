@@ -157,8 +157,13 @@ func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (*lock.Images
 
 	// ── Step 5: VMM ───────────────────────────────────────────────────────────
 	currentStage = stageVMMStarted
-	// Compute SHA-256s of the staged files for privd's TOCTOU-safe staging.
-	stagedFiles, err := a.computeStagedFiles(stageDir)
+	// Compute SHA-256s of the staged files for privd's TOCTOU-safe staging, and
+	// hold the two lock-backed ones to the digests staged carries back from the
+	// lock this launch read.
+	stagedFiles, err := computeStagedFiles(stageDir, map[string]string{
+		"vmlinux":     staged.GuestKernel.VmlinuxSHA256,
+		"rootfs.ext4": staged.RootImage.SHA256,
+	})
 	if err != nil {
 		return nil, rollback(fmt.Errorf("compute staged file hashes: %w", err))
 	}
@@ -270,24 +275,35 @@ func (a *Adapter) doStage(ctx context.Context, vmID, bootID string, cid uint32, 
 	// RepoRoot is the directory the lock's artifact paths resolve against.
 	// Lock paths like "images/dist/vmlinux" are relative to it — one source of truth.
 	repoRoot := a.cfg.RepoRoot
-	if mismatches := lk.VerifyArtifacts(repoRoot); len(mismatches) > 0 {
-		return lock.Images{}, fmt.Errorf("artifact hash mismatch: %+v", mismatches)
+
+	// Open both artifacts before creating anything: an admission refusal must
+	// leave no stage directory behind, and neither artifact should be copied if
+	// the other one is going to be refused.
+	//
+	// The descriptors, not the paths, are what gets copied below. Verifying a
+	// path and then reopening it to read would stage whatever the name pointed
+	// at the second time, which is not what the digest covered.
+	vmlinuxSrc, err := lock.OpenPinned(repoRoot, lk.GuestKernel.VmlinuxPath, lk.GuestKernel.VmlinuxSHA256)
+	if err != nil {
+		return lock.Images{}, fmt.Errorf("guest kernel: %w", err)
 	}
+	defer func() { _ = vmlinuxSrc.Close() }()
+
+	rootfsSrc, err := lock.OpenPinned(repoRoot, lk.RootImage.Path, lk.RootImage.SHA256)
+	if err != nil {
+		return lock.Images{}, fmt.Errorf("root image: %w", err)
+	}
+	defer func() { _ = rootfsSrc.Close() }()
 
 	// Create stage dir.
 	if err := os.MkdirAll(stageDir, 0o755); err != nil {
 		return lock.Images{}, fmt.Errorf("mkdir stage dir: %w", err)
 	}
 
-	// Copy vmlinux — path comes from the lock, resolved against repoRoot.
-	vmlinuxSrc := filepath.Join(repoRoot, lk.GuestKernel.VmlinuxPath)
-	if err := copyFile(vmlinuxSrc, filepath.Join(stageDir, "vmlinux")); err != nil {
+	if err := copyVerified(vmlinuxSrc, filepath.Join(stageDir, "vmlinux")); err != nil {
 		return lock.Images{}, fmt.Errorf("copy vmlinux: %w", err)
 	}
-
-	// Copy rootfs.ext4 — path comes from the lock, resolved against repoRoot.
-	rootfsSrc := filepath.Join(repoRoot, lk.RootImage.Path)
-	if err := copyFile(rootfsSrc, filepath.Join(stageDir, "rootfs.ext4")); err != nil {
+	if err := copyVerified(rootfsSrc, filepath.Join(stageDir, "rootfs.ext4")); err != nil {
 		return lock.Images{}, fmt.Errorf("copy rootfs: %w", err)
 	}
 
@@ -427,7 +443,19 @@ func (a *Adapter) doStage(ctx context.Context, vmID, bootID string, cid uint32, 
 
 // computeStagedFiles builds the list of StagedFiles for privd.StartVM by computing
 // the SHA-256 of each file in the stage directory that privd will copy.
-func (a *Adapter) computeStagedFiles(stageDir string) ([]privd.StagedFile, error) {
+//
+// pinned maps a staged name to the digest the lock pins for it, and a staged
+// file that disagrees with its pin refuses the launch. Without that comparison
+// the chain proves nothing: privd verifies the staged bytes against a digest
+// this function computes from those same bytes, so a stage directory replaced
+// after doStage wrote it would be hashed faithfully, accepted by privd, and
+// booted. The lock is the only party in the chain that can disagree.
+//
+// The three staged files with no pin — config.ext4, workspace.ext4 and
+// fc-config.json — are built by this adapter for this boot and no earlier
+// authority describes them, so their digests stay self-reported and privd's
+// check of them proves only that the copy into the jail was faithful.
+func computeStagedFiles(stageDir string, pinned map[string]string) ([]privd.StagedFile, error) {
 	// privd validates every name against this same list and refuses anything
 	// else, so the list lives on its side of the wire and is read from there.
 	var files []privd.StagedFile
@@ -436,6 +464,9 @@ func (a *Adapter) computeStagedFiles(stageDir string) ([]privd.StagedFile, error
 		digest, err := sha256File(path)
 		if err != nil {
 			return nil, fmt.Errorf("hash %s: %w", name, err)
+		}
+		if want, ok := pinned[name]; ok && digest != want {
+			return nil, fmt.Errorf("staged %s has %s, but the lock pins %s: the stage directory changed after it was written", name, digest, want)
 		}
 		files = append(files, privd.StagedFile{Name: name, SHA256: digest})
 	}
@@ -597,13 +628,13 @@ func sha256File(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// copyFile copies src to dst as a new regular file (no hardlinks).
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
+// copyVerified writes the contents of an already-open, already-verified source
+// to dst. It takes a descriptor rather than a path because that is the whole
+// point: the bytes written are the bytes the caller's digest check covered.
+func copyVerified(in *os.File, dst string) error {
+	if _, err := in.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
-	defer in.Close()
 	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
 		return err

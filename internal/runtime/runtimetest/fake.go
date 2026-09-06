@@ -100,7 +100,7 @@ func (f *Fake) Block(method, vmID string) chan struct{} {
 // it returns its own result when the test releases it even if the context died
 // while it ran. The real launch path is built that way — most of it is file IO
 // through helpers that take no context at all (internal/jailer/launch.go
-// copyFile) — so this is the shape that exercises bookkeeping which has to run
+// copyVerified) — so this is the shape that exercises bookkeeping which has to run
 // after the call's own budget is spent.
 func (f *Fake) BlockUninterruptible(method, vmID string) chan struct{} {
 	f.mu.Lock()

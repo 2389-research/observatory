@@ -617,100 +617,159 @@ func TestLaunchTransactionAgainstFakePrivd(t *testing.T) {
 	}
 }
 
-// TestLaunchDigestTamperingBlocksNetwork verifies that a digest mismatch in the staging
-// step causes a failure BEFORE allocate_network is called (network is step 4; digest
-// check is inside step 3/staging).
-func TestLaunchDigestTamperingBlocksNetwork(t *testing.T) {
-	backend := &testRecordingBackend{}
-	t.Cleanup(backend.killAll)
-	privdSock, stageRoot := startTestPrivdServer(t, backend)
-
-	dir := t.TempDir()
-	stateDir := filepath.Join(dir, "state")
-	spoolRoot := filepath.Join(dir, "spool")
-	jailBase := filepath.Join(dir, "jail")
-	for _, d := range []string{stateDir, spoolRoot, jailBase} {
-		if err := os.MkdirAll(d, 0o700); err != nil {
-			t.Fatalf("mkdir %s: %v", d, err)
-		}
-	}
-
-	imagesDir := filepath.Join(dir, "images", "dist")
-	if err := os.MkdirAll(imagesDir, 0o755); err != nil {
-		t.Fatalf("mkdir images/dist: %v", err)
-	}
-
-	// Write real files.
+// TestStagingRefusalBlocksNetwork verifies that every artifact admission refusal
+// stops the launch BEFORE allocate_network is called (network is step 4; artifact
+// admission is inside step 3/staging).
+//
+// Each case asserts what the refusal said, not just that one happened. A launch
+// that failed because the fixture never wrote the artifact would otherwise read
+// as a successful tamper rejection while proving nothing about the check.
+func TestStagingRefusalBlocksNetwork(t *testing.T) {
 	realContent := []byte("real content for tamper test")
-	if err := os.WriteFile(filepath.Join(imagesDir, "vmlinux"), realContent, 0o644); err != nil {
-		t.Fatalf("write vmlinux: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(imagesDir, "rootfs.ext4"), realContent, 0o644); err != nil {
-		t.Fatalf("write rootfs: %v", err)
-	}
-
-	// Lock has WRONG hashes — staging will fail on digest mismatch.
+	realSHA := sha256Hex(realContent)
 	wrongSHA := sha256Hex([]byte("this is not the real content"))
-	lockPath := filepath.Join(dir, "runtime.lock.json")
-	lockBody := fmt.Sprintf(`{
-		"schema": "vmobs.runtime_lock.v1",
-		"firecracker": {"version": "v1.16.1", "sha256": "", "install_path": "/usr/local/bin/firecracker"},
-		"jailer": {"sha256": "", "install_path": "/usr/local/bin/jailer"},
-		"host_support": {"arch": "amd64", "min_kernel": "5.10"},
-		"guest_kernel": {"version": "6.1.186", "vmlinux_sha256": %q, "vmlinux_path": "images/dist/vmlinux"},
-		"root_image": {"sha256": %q, "path": "images/dist/rootfs.ext4"},
-		"guestd": {"protocol_version": 1}
-	}`, wrongSHA, wrongSHA)
-	if err := os.WriteFile(lockPath, []byte(lockBody), 0o644); err != nil {
-		t.Fatalf("write lock: %v", err)
-	}
 
-	pool, err := network.NewAllocator(nil, []netip.Prefix{netip.MustParsePrefix("10.89.0.0/24")})
-	if err != nil {
-		t.Fatalf("NewAllocator: %v", err)
-	}
-
-	cfg := jailer.Config{
-		StateDir:    stateDir,
-		StageRoot:   stageRoot,
-		JailBase:    jailBase,
-		SpoolRoot:   spoolRoot,
-		RunnerBin:   runnerBin,
-		RepoRoot:    dir,
-		LockPath:    lockPath,
-		JailUIDBase: os.Getuid(),
-		JailGID:     os.Getgid(),
-		MaxSlots:    8,
-		CIDBase:     3,
-		Allocator:   pool,
-		Preflight: func(ctx context.Context, refresh bool) preflight.Report {
-			return preflight.Report{Overall: preflight.StatusPass}
+	cases := []struct {
+		name string
+		// prepare writes the artifacts under imagesDir and returns the digests
+		// the lock should pin for vmlinux and rootfs.
+		prepare  func(t *testing.T, imagesDir string) (vmlinuxSHA, rootfsSHA string)
+		wantSaid string
+	}{
+		{
+			name: "changed_bytes",
+			prepare: func(t *testing.T, imagesDir string) (string, string) {
+				writeArtifacts(t, imagesDir, realContent)
+				return wrongSHA, wrongSHA
+			},
+			wantSaid: "do not match the pinned digest",
+		},
+		{
+			name: "world_writable_artifact_dir",
+			prepare: func(t *testing.T, imagesDir string) (string, string) {
+				writeArtifacts(t, imagesDir, realContent)
+				if err := os.Chmod(imagesDir, 0o777); err != nil {
+					t.Fatalf("chmod images/dist: %v", err)
+				}
+				return realSHA, realSHA
+			},
+			wantSaid: "is world-writable",
+		},
+		{
+			name: "symlinked_artifact",
+			prepare: func(t *testing.T, imagesDir string) (string, string) {
+				writeArtifacts(t, imagesDir, realContent)
+				target := filepath.Join(imagesDir, "vmlinux")
+				moved := filepath.Join(imagesDir, "vmlinux.real")
+				if err := os.Rename(target, moved); err != nil {
+					t.Fatalf("rename vmlinux: %v", err)
+				}
+				if err := os.Symlink(moved, target); err != nil {
+					t.Fatalf("symlink vmlinux: %v", err)
+				}
+				return realSHA, realSHA
+			},
+			wantSaid: "is a symlink",
 		},
 	}
 
-	pc := &privd.Client{SocketPath: privdSock}
-	adapter, err := jailer.New(cfg, pc)
-	if err != nil {
-		t.Fatalf("jailer.New: %v", err)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			backend := &testRecordingBackend{}
+			t.Cleanup(backend.killAll)
+			privdSock, stageRoot := startTestPrivdServer(t, backend)
+
+			dir := t.TempDir()
+			stateDir := filepath.Join(dir, "state")
+			spoolRoot := filepath.Join(dir, "spool")
+			jailBase := filepath.Join(dir, "jail")
+			for _, d := range []string{stateDir, spoolRoot, jailBase} {
+				if err := os.MkdirAll(d, 0o700); err != nil {
+					t.Fatalf("mkdir %s: %v", d, err)
+				}
+			}
+
+			imagesDir := filepath.Join(dir, "images", "dist")
+			if err := os.MkdirAll(imagesDir, 0o755); err != nil {
+				t.Fatalf("mkdir images/dist: %v", err)
+			}
+			vmlinuxSHA, rootfsSHA := tc.prepare(t, imagesDir)
+
+			lockPath := filepath.Join(dir, "runtime.lock.json")
+			lockBody := fmt.Sprintf(`{
+				"schema": "vmobs.runtime_lock.v1",
+				"firecracker": {"version": "v1.16.1", "sha256": "", "install_path": "/usr/local/bin/firecracker"},
+				"jailer": {"sha256": "", "install_path": "/usr/local/bin/jailer"},
+				"host_support": {"arch": "amd64", "min_kernel": "5.10"},
+				"guest_kernel": {"version": "6.1.186", "vmlinux_sha256": %q, "vmlinux_path": "images/dist/vmlinux"},
+				"root_image": {"sha256": %q, "path": "images/dist/rootfs.ext4"},
+				"guestd": {"protocol_version": 1}
+			}`, vmlinuxSHA, rootfsSHA)
+			if err := os.WriteFile(lockPath, []byte(lockBody), 0o644); err != nil {
+				t.Fatalf("write lock: %v", err)
+			}
+
+			pool, err := network.NewAllocator(nil, []netip.Prefix{netip.MustParsePrefix("10.89.0.0/24")})
+			if err != nil {
+				t.Fatalf("NewAllocator: %v", err)
+			}
+
+			cfg := jailer.Config{
+				StateDir:    stateDir,
+				StageRoot:   stageRoot,
+				JailBase:    jailBase,
+				SpoolRoot:   spoolRoot,
+				RunnerBin:   runnerBin,
+				RepoRoot:    dir,
+				LockPath:    lockPath,
+				JailUIDBase: os.Getuid(),
+				JailGID:     os.Getgid(),
+				MaxSlots:    8,
+				CIDBase:     3,
+				Allocator:   pool,
+				Preflight: func(ctx context.Context, refresh bool) preflight.Report {
+					return preflight.Report{Overall: preflight.StatusPass}
+				},
+			}
+
+			pc := &privd.Client{SocketPath: privdSock}
+			adapter, err := jailer.New(cfg, pc)
+			if err != nil {
+				t.Fatalf("jailer.New: %v", err)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+
+			_, launchErr := adapter.Launch(ctx, runtime.VMSpec{
+				VMID:             "vm-tamper",
+				BootID:           "boot-tamper",
+				VCPUCount:        1,
+				MemoryMiB:        512,
+				WorkspaceDiskMiB: 64,
+			})
+			if launchErr == nil {
+				t.Fatal("expected Launch to fail on artifact admission, got nil")
+			}
+			if !strings.Contains(launchErr.Error(), tc.wantSaid) {
+				t.Errorf("launch refused for the wrong reason\n got: %v\nwant it to say: %q", launchErr, tc.wantSaid)
+			}
+
+			// network must NOT have been allocated — staging fails in step 3, network is step 4.
+			if len(backend.allocateCalls) > 0 {
+				t.Errorf("allocate_network was called despite an artifact refusal (got calls: %v)", backend.allocateCalls)
+			}
+		})
 	}
+}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	_, launchErr := adapter.Launch(ctx, runtime.VMSpec{
-		VMID:             "vm-tamper",
-		BootID:           "boot-tamper",
-		VCPUCount:        1,
-		MemoryMiB:        512,
-		WorkspaceDiskMiB: 64,
-	})
-	if launchErr == nil {
-		t.Fatal("expected Launch to fail on digest tamper, got nil")
-	}
-	t.Logf("launch failed as expected: %v", launchErr)
-
-	// network must NOT have been allocated — staging fails in step 3, network is step 4.
-	if len(backend.allocateCalls) > 0 {
-		t.Errorf("allocate_network was called despite digest mismatch (got calls: %v)", backend.allocateCalls)
+// writeArtifacts writes the two lock-backed artifacts into imagesDir with the
+// same bytes, which is all the staging refusal tests need to distinguish.
+func writeArtifacts(t *testing.T, imagesDir string, content []byte) {
+	t.Helper()
+	for _, name := range []string{"vmlinux", "rootfs.ext4"} {
+		if err := os.WriteFile(filepath.Join(imagesDir, name), content, 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
 	}
 }
