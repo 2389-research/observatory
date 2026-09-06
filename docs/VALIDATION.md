@@ -1,5 +1,28 @@
 # Specification Package Validation
 
+## Revision 22 (2026-09-06) — privd enforces one instance, and the runbook says how to read the refusal
+
+Kata `c3f2`. `cmd/vmobs-privd/main_linux.go` removed the socket path before listening, and a unix
+socket's name is not held by the process bound to it, so a second privd unlinked a live first
+one's socket and bound its own. The first kept serving a name nothing could reach while every
+client moved to the second — and with two privds come two ledgers, which turns off every refusal
+revision 20's registry work rests on. `acquireSingleton` now takes two non-blocking flocks,
+`<socket>.lock` and `<ledger-dir>/.privd.lock`, before anything is removed or bound, and clears
+the stale socket only once that hold proves nothing is listening (`8a1f90a`).
+
+`docs/runbooks/aibox03.md` gains a "One instance, enforced" section: the two lock paths, the
+refusal an operator sees, and the one thing they must not do about it — deleting a lock file to
+get past the message is deleting the only thing standing between two privds. The hold belongs to
+the open file description, so the kernel drops it however the process ends; a lock file on disk
+with nothing holding it blocks nothing, and both paths sit under the unit's `RuntimeDirectory`,
+which systemd removes when the unit stops (`6501aca`).
+
+Nothing this revision touches is a schema, an example `check.py` parses, or `check.py` logic. The
+runbook is prose, and `gotchas.md` — three entries replacing the one that called single-instance
+"an assumption, not an enforcement" — is outside the validated package.
+
+47 checks, all passing.
+
 ## Revision 21 (2026-09-06) — a failed launch keeps its runner log, and AT-005's line citations are corrected
 
 Kata `b2t2`. `doRollback` removes the VM state directory, and for a launch that failed at
