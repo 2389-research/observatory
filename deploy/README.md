@@ -95,6 +95,26 @@ dies immediately naming the flag, instead of failing four stages into a launch
 after admission, network allocation and staging — which reads like a bug in
 vmobs and is not one.
 
+### `/dev/kvm`, and the `--group-add` that is not here
+
+The container sees the node as `crw-rw---- root:<kvm gid>`, so the obvious flag
+is `--group-add <kvm gid>`. It is not in the run line, for two separate reasons.
+
+Firecracker does not need it. The jailer `mknod`s its own `dev/kvm` inside the
+chroot while it is still root, chowns it to the jail uid, and only then drops
+privilege — so the VMM opens a node it owns, holding no supplementary groups at
+all. The host's `kvm` group never enters the picture.
+
+`vmobsd` does need the group, for the `arch_kvm` preflight that opens the
+container's node before any VM exists — and `--group-add` cannot deliver it.
+The entrypoint drops to the `vmobs` user with `setpriv --init-groups`, which
+rebuilds the supplementary set from `/etc/group` and discards whatever docker
+granted. So `deploy/entrypoint.sh` reads the gid off the device node it was
+given and adds `vmobs` to that group inside the container, where the rebuild
+finds it. The gid differs between hosts; nothing hardcodes it.
+
+Measured in `docs/design/container-boundary.md` §10.
+
 ### `--init`
 
 The jailer daemonizes each Firecracker, so every VMM reparents to PID 1. With no

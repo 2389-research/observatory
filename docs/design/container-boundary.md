@@ -11,10 +11,14 @@ document that review needs and did not exist: the privileged surface named
 operation by operation, each requirement traced to v2's own code or measured
 on aibox03, set against what Docker actually grants.
 
-Nothing here is a decision. There is no Dockerfile, no compose file and no
-shipping profile in this pass, deliberately — the kata says diagnostic
-permissions must not be promoted into shipping configuration without review,
-and a document is the thing that gets reviewed.
+Nothing in sections 1-9 is a decision. When they were written there was no
+Dockerfile, no compose file and no shipping profile, deliberately — the kata
+says diagnostic permissions must not be promoted into shipping configuration
+without review, and a document is the thing that gets reviewed.
+
+The review chose option 4 (§8), and §10 records what the build measured. Where
+§10 and an earlier section disagree, §10 is what a machine did and the earlier
+section is what someone expected it to do; §10 wins and says so.
 
 ## 1. Method, and why it is the part that matters
 
@@ -53,7 +57,7 @@ privd serves five verbs, each executed as root. This is what each one does.
 | | jailer mount propagation | `mount --make-slave /` | `CAP_SYS_ADMIN` **and** an AppArmor mount exception |
 | | jailer chroot | `pivot_root(2)` | `CAP_SYS_ADMIN` **and** a seccomp exception |
 | | jailer drops privilege | `setuid`/`setgid` to the jail uid | `CAP_SETUID`, `CAP_SETGID` |
-| | firecracker | `/dev/kvm` | the kvm device node, openable by the **jailed** uid |
+| | firecracker | `/dev/kvm` | a kvm node the **jailed** uid owns — the jailer makes its own inside the chroot (§10) |
 | `signal_vm` | `pidfd_open` + `kill` across a uid boundary | — | `CAP_KILL` |
 | `release_vm` | `RemoveAll` of the jail dir | — | root in the mount namespace |
 
@@ -154,22 +158,24 @@ copied instead of re-measured.
 Naming these because a profile that boots `--version` is not a profile that
 boots a VM, and the difference is where the remaining risk lives.
 
-- **`/dev/kvm` ownership across the privilege drop.** In-container the node
-  appears as `crw-rw---- root:108`, gid 108 being the host's `kvm` group. The
-  jailer setuids to the jail uid (36000-based) before exec'ing firecracker, so
-  the *jailed* uid must be able to open it — container root's `DAC_OVERRIDE`
-  does not help a process that has already dropped to 36000. Untested; likely
-  needs `--group-add 108` or equivalent, and it is the next thing that breaks.
-- **A real boot.** No profile here started a VM: no kernel, no rootfs, no
-  guest, no `v.sock`, no guest authentication, no telemetry.
-- **Restart recovery and reconciliation**, which read `/proc` for jailed VMMs
-  across a container restart, where PID namespaces change the picture.
+Four of the six items this section carried before the build are now measured
+and have moved to §10, one of them with the opposite answer to the one
+predicted here. What is left:
+
+- **The AppArmor profile.** `deploy/apparmor/vmobs-jailer` is written and
+  shipped and has never been used. Loading a profile is root work on the host,
+  so every measurement in this document — §6's matrix and §10's alike — ran
+  with `apparmor=unconfined`, which is the one thing separating the measured
+  configuration from profile H in §8. Until `apparmor_parser -r` has loaded it
+  and a VM has booted under it, option 4 is built but half-proven, and
+  `scripts/vmobs-container start` prints a warning whenever it sees that value
+  rather than letting the weaker boundary pass for the shipped one.
 - **The acceptance gate.** AT-002 and the live integration suite have never
-  run in a container against v2.
-- **A narrow seccomp profile.** Only `seccomp=unconfined` was measured. The
-  narrow form — Docker's default profile plus `pivot_root` — is a small JSON
-  file and is very likely sufficient, but "very likely" is not a measurement
-  and should not be written into a profile as though it were.
+  run in a container against v2. §10's VMs were driven through the API by
+  hand — the gate's shape, not the gate.
+- **Anything past the VM lifecycle.** The measured runs created, started,
+  observed and deleted VMs and read their telemetry. No console PTY was opened
+  in a container.
 
 ## 8. The options, with what each costs
 
@@ -204,6 +210,115 @@ boundary worth having?** If yes, option 4 is the version to build and the
 narrow profiles are the work. If no, option 1 stands and `q4b2`'s
 implementation half should close as declined rather than sit open.
 
-A secondary decision, if option 4 proceeds: the `/dev/kvm` group question in
-§7 needs measuring before any profile is written down, because it is the
-difference between a profile that runs `jailer --version` and one that boots.
+The review answered yes and option 4 was built; §10 is the record. The
+secondary decision this section named — measure the `/dev/kvm` group question
+before writing a profile down — is settled, and the measurement inverted its
+premise rather than confirming it. What takes its place is the first item in
+§7: the AppArmor profile exists, ships, and has never run.
+
+## 10. Measured in the build: 2026-09-06
+
+Option 4, built and run on aibox03 against image `vmobs:fc56f1f-dirty` —
+revision `fc56f1f9a9ecbe9ba0d339dba0af80c3b3f09d71` plus the working tree that
+became commits `c494189` and `e57e3b7`. Everything below used
+`deploy/seccomp/vmobs-jailer.json` and `apparmor=unconfined`; see §7 for why
+the AppArmor half is still owed.
+
+### `/dev/kvm` needs no group at all
+
+§7 predicted `--group-add 108` and named the wrong layer. Three facts, read off
+a running VM:
+
+```
+the container's node:  crw-rw---- 0:108      /dev/kvm
+the jail's node:       crw------- 20000:36000  <jail>/root/dev/kvm
+firecracker:           Uid: 20000  Gid: 36000  Groups: (none)
+```
+
+The jailer never hands the host's device to the jailed process. While it is
+still root it `mknod`s its own `dev/kvm` inside the chroot and chowns it to the
+jail uid — likewise `dev/net/tun`, `dev/urandom` and `dev/userfaultfd` — and
+only then drops privilege. Firecracker opens it as its owner, holding no
+supplementary groups whatsoever. The host's `kvm` gid never reaches it, so
+`--group-add` would have been answering a question nobody asked.
+
+The gid does matter one layer out, for vmobsd's own `arch_kvm` preflight, which
+opens the container's node before any VM exists. `--group-add` cannot deliver
+it there either: the entrypoint drops to the `vmobs` user with
+`setpriv --init-groups`, which rebuilds the supplementary set from `/etc/group`
+and discards whatever docker granted. So `deploy/entrypoint.sh` reads the gid
+off the device node it was given and adds `vmobs` to that group *inside* the
+container, where the rebuild can find it.
+
+### A real boot, and a clean teardown
+
+Two VMs at the m1a gate's shape — 1 vCPU, 512 MiB, 4096 MiB root, 64 MiB
+workspace, template `standard` — created through the container's API:
+
+| | VM P | VM Q |
+|---|---|---|
+| reached `running` | 7 s | 7 s |
+| jail uid | 20000 | 20001 |
+| guest CID | 3 | 4 |
+| subnet | `10.190.0.0/30` | `10.190.0.4/30` |
+| telemetry at 45 s | `healthy`, 8 events | `healthy`, 7 events |
+| stopped, then deleted | 1 s, 1 s | 1 s, 1 s |
+
+Both emitted `guest.channel_established` and reported a guestd uptime, so the
+guest agent authenticated over `v.sock` inside the jail — the boundary's
+narrowest path, and the one §7 doubted hardest. Both rings were clean:
+capacity 1024, `dropped "0"`, queued 0.
+
+After the deletes: no firecracker, no runner, no netns, no jail directory, no
+stage directory, no ledger file, every reservation zero, and the host's veth
+and tap counts back where the run found them. The host's own `vmobs-privd`
+stayed `active` throughout and the host's `/srv/vmobs` was never touched — the
+container builds its whole tree on its own volume.
+
+### The fresh install found a bug the host had been hiding
+
+This was v2's first clean-slate install, and it caught one. privd created
+`<jail-base>/firecracker` with `MkdirAll(…, 0o750)` under its pinned `0002`
+umask, giving a `root:root` directory that the unprivileged daemon — which
+dials `v.sock` beneath it and stats the chroot to tear it down — could not
+traverse. Every launch timed out at stage `attached` naming nothing, and every
+delete returned 500. On aibox03's host the directory was already 0755 from the
+M0 root helper, and `MkdirAll` leaves an existing directory's mode alone, so
+the defect had never had a surface to appear on. Fixed in `c494189`, as
+`privd.EnsureJailBase`, called at startup as well as from the launch path:
+teardown reaches through that directory and creates nothing, so a repair that
+only ran while starting a VM would leave an install unable to delete the VMs it
+inherited and unable to launch its way out of holding their capacity.
+
+### A container restart strands every VM it was running
+
+Measured on purpose after hitting it by accident: one VM `running`, then
+`scripts/vmobs-container stop` and `start`.
+
+- **Every VMM dies.** The container has its own PID namespace, so the jailer's
+  daemonized firecracker goes with it. Zero survived.
+- **privd's ledger is empty.** It lives on `--tmpfs /run`, which the restart
+  discards.
+- **Reconcile marks the VM `failed`.** Correct — it is gone.
+- **The 1.7 GB chroot survives on the runtime volume and can no longer be
+  reclaimed.** `RealOps.ReleaseVM` is the only code that removes it and is
+  reachable only through a live ledger entry, so `DELETE` returns 500,
+  `runtime_operation_failed`, *"stopped, but its jail chroot could not be
+  reclaimed: privd: not_found: vm not in ledger"*. The row parks in `deleting`
+  for good, still holding the disk it reserved — and that reservation is what
+  refuses the next launch.
+
+This is not a containerization defect. The host install has it too, across a
+privd restart or a reboot; the container just reaches it in one command instead
+of one outage. It is filed as its own kata rather than fixed here, because the
+fix changes privd's release contract and nine tests pin that contract
+(`internal/jailer/release_orphan_linux_test.go`) — including the rule that
+`not_found` is an ordinary answer when nothing survives, which is exactly the
+answer that goes wrong when something does.
+
+### The narrow seccomp profile is sufficient
+
+§6 measured only `seccomp=unconfined`, and §7 called the narrow form — Docker's
+default profile plus `pivot_root` — "very likely sufficient" while refusing to
+write that down as a measurement. Every run above used the narrow profile and
+booted. It is a measurement now.

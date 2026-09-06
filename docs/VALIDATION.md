@@ -1,5 +1,36 @@
 # Specification Package Validation
 
+## Revision 25 (2026-09-06) — the boundary document stops predicting and starts reporting
+
+Kata `q4b2`, implementation half. `docs/design/container-boundary.md` gains §10, the
+record of what the built appliance actually did on aibox03, and §7 shrinks to what is
+genuinely still unmeasured. §0 and §9 are corrected: they described a document with no
+Dockerfile, no shipping profile and a pending review, and all three have moved.
+
+The correction worth reading is `/dev/kvm`. §7 predicted that the jailed uid would fail
+to open the device and that `--group-add 108` was the likely fix — "the next thing that
+breaks". It was wrong in its premise. The jailer `mknod`s its own `dev/kvm` inside the
+chroot while it is still root and chowns it to the jail uid, so firecracker opens a node
+it owns while holding no supplementary groups at all. The host's kvm gid does matter one
+layer out, for vmobsd's `arch_kvm` preflight, and `--group-add` cannot deliver it there
+either: `setpriv --init-groups` rebuilds the supplementary set from `/etc/group` and
+discards whatever docker granted. The prediction and its correction are both kept, in
+§7's pointer and §10's answer, because a document that quietly deletes its wrong guesses
+teaches nothing about which guesses to trust.
+
+Also moved from prediction to measurement: a real boot (two VMs to `running` in 7s each,
+authenticated guest channel, clean teardown with zero leaks), what a container restart
+does to a running VM (kills it, empties privd's tmpfs ledger, and strands its chroot
+permanently — filed as its own kata), and the narrow seccomp profile, which §7 had
+called "very likely sufficient" while declining to write that down as a fact.
+
+What §7 still owes is named rather than glossed: the AppArmor profile ships and has
+never been loaded, so every measurement in the document ran with `apparmor=unconfined`.
+AT-002 has not run in a container, and no console PTY has been opened in one.
+
+`deploy/README.md` gains the matching note on why no `--group-add` appears in the run
+line. Package checks: 47/47 passing, unchanged in count — no file was added or removed.
+
 ## Revision 24 (2026-09-06) — the container boundary is measured, not inherited
 
 Kata `q4b2`. `docs/design/container-boundary.md` names every privileged operation v2's
