@@ -14,6 +14,7 @@ The operator is usually an agent. `SPEC.md` sections 1.3–1.4 define the system
 | Implementing the agent operations layer | SPEC sections 1.3–1.4, 8.5–8.7, 12.7, 14 |
 | Writing or running tests | `ACCEPTANCE.md` — 102 mandatory V1 rows, all initially SPECIFIED / NOT RUN |
 | Judging what this package itself verified | `VALIDATION.md` — package checks only, no runtime claims |
+| Proposing agent-control API work | `design/agent-control-contract.md` — the v1/v2 gap map; a review artifact, not binding |
 | Changing any file in `docs/` | Re-run `uv run docs/validation/check.py`; record results in `VALIDATION.md` |
 
 ## Builder directive
@@ -38,6 +39,7 @@ Maintain acceptance evidence with stable IDs, accreted under `tests/acceptance-e
 - `examples/event.json`, `examples/launch.json`, `examples/launch-with-run.json`, `examples/run-report.json` — synthetic interface examples.
 - `examples/host-config.yaml` — proposed starting configuration, not an installer.
 - `validation/check.py` — canonical package check; validates schemas, examples, ID sequences, requirement/principle coverage and cross-references.
+- `design/agent-control-contract.md` — what v2's API has and lacks against v1's agent control protocol. A gap map for review; only `SPEC.md` binds.
 - `VALIDATION.md` — results of package checks, not runtime tests.
 
 The supplied payloads are synthetic. Template digests, IDs and policy names illustrate the contracts and are not existing resources.

@@ -182,7 +182,7 @@ def main() -> int:
     # Prose count consistency and file inventory.
     check("102" in readme and "102 rows" in acceptance, "Prose test counts state 102")
     check(not re.search(r"\b88 (rows|mandatory|V1)", acceptance + readme + spec), "No stale 88-test count remains")
-    listed = re.findall(r"`(schemas/[\w.-]+|examples/[\w.-]+|validation/check\.py)`", readme)
+    listed = re.findall(r"`(schemas/[\w.-]+|examples/[\w.-]+|design/[\w.-]+|validation/check\.py)`", readme)
     missing = [f for f in listed if not (DOCS / f).exists()]
     check(not missing, "Every file listed in README exists")
 

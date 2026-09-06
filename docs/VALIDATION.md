@@ -1,5 +1,32 @@
 # Specification Package Validation
 
+## Revision 23 (2026-09-06) — the agent-control gap map joins the package, and the inventory check reaches it
+
+Kata `3tn6`. `docs/design/agent-control-contract.md` maps v1's agent control protocol
+(`../observatory/docs/AGENT-PROTOCOL.md`, pinned at `d432cdc`) onto what v2's API actually
+serves: the nine v1 verbs against v2's twelve, v1 §5's objects against v2's tables and wire
+types, the vertical slice a cold agent can walk today, and seven ranked gaps. Every "v2 has
+this" row was read against the implementing code rather than against `SPEC.md`, and citations
+name a file and a symbol — a line number in a doc `check.py` never opens is a citation that
+rots in silence.
+
+It is a review artifact, not a contract. `SPEC.md` still binds, nothing here changes it, and
+every route the map proposes is marked unimplemented. Two of its findings are against v2's own
+rules: `handleMeta` builds `links` by hand while `features` comes from the route table, so a
+feature can be advertised with no path to reach it — against the builder directive in this
+package's own README — and `/situation` sheds `attention_head` and `changed_vms` by halving
+while reporting no omission count, discarding an `attention_open` the engine computes on every
+request. The map also records a trap: v1's AT-089..095 and v2's AT-089..095 are different
+tests wearing the same IDs, so its proposed scenarios are numbered AT-103 and later.
+
+One check changed. The README file inventory matched only `schemas/`, `examples/` and
+`validation/check.py`, so a README line naming any other path was never verified to exist.
+The pattern now covers `design/` as well; removing the new document drops the run to 46/47 on
+"Every file listed in README exists", which is the check doing its job. No schema, example, or
+acceptance row changed, and the acceptance sequence is still exactly 102 rows.
+
+47 checks, all passing.
+
 ## Revision 22 (2026-09-06) — privd enforces one instance, and the runbook says how to read the refusal
 
 Kata `c3f2`. `cmd/vmobs-privd/main_linux.go` removed the socket path before listening, and a unix
