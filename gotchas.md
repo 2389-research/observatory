@@ -286,3 +286,25 @@ and been reaped returns `os: process already finished` instead of hitting
 whatever inherited the pid. Take the descriptor *before* re-reading `/proc` for
 identity — that order closes the check/use window without needing the process
 to still be alive. `Release` the handle or the fd leaks.
+
+**The live M1a gate tests the *installed* privd, not the one you just built.**
+`/run/vmobs/privd.sock` is served by `/usr/local/sbin/vmobs-privd`, which
+`scripts/aibox03/setup.sh` builds and the systemd unit runs. `go test` on
+aibox03 builds the daemon and the runner from the working tree but never
+replaces that binary, so a privd change can go green through the whole gate
+while the gate is exercising a binary from days ago — check its mtime against
+your commits. Reinstalling needs root, so it is a Doctor Biz handoff:
+`ssh -t harper@100.64.0.100 'cd vmobs-build && sudo sh scripts/aibox03/setup.sh'`.
+
+**privd derives the stage directory, so two configs have to name the same
+path.** `StartVM` opens `<StageRoot>/<vm_id>` against its own `--stage-root`
+(unit: `/srv/vmobs/stage`) and does not resolve the request's `stage_dir`. The
+daemon's `Paths.StageRoot()` is `<Runtime>/stage`, so a `Paths.Runtime` other
+than `/srv/vmobs` — or an edited unit — fails every start with a `bad_request`
+naming the directory privd looked in. The request field survives only as a
+cross-check that its last component is the vm_id.
+
+**aibox03's shell is fish, so `$?` is a syntax error in `scripts/linux`.** Use
+`$status`. The failure is loud (`fish: $? is not the exit status`) but it comes
+after the command has already run, so a gate can execute and still report
+nothing.
