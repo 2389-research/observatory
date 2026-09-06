@@ -36,6 +36,22 @@ install -d -o root -g root -m 0755 /run/vmobs "$LEDGER"
 [ -d /srv/vmobs/stage ] || install -d -o "$VMOBS_UID" -g "$VMOBS_GID" -m 0755 /srv/vmobs/stage
 [ -d /srv/vmobs/jail ] || install -d -o root -g root -m 0755 /srv/vmobs/jail
 
+# init-auth is a one-shot: it mints the first operator credential into the
+# credential store and exits. It runs only when asked, because a config with
+# require_authentication: false has nothing to mint against.
+#
+# It answers here, above the kvm block and privd, because it needs neither and
+# scripts/vmobs-container runs it in a bare container -- no --cap-add, no
+# --device, only the state volume. Below privd it never ran at all: privd's jail
+# probe failed first and told the operator to add CAP_SYS_ADMIN to a command
+# that does not want it, leaving them with no credential and no way to log in.
+if [ "${1:-}" = "init-auth" ]; then
+    shift
+    log "minting the initial operator credential"
+    exec setpriv --reuid "$VMOBS_UID" --regid "$VMOBS_GID" --init-groups -- \
+        /usr/local/bin/vmobsd init-auth -config "$CONFIG" "$@"
+fi
+
 # vmobsd opens /dev/kvm itself, for the arch_kvm preflight, as uid 2389. The
 # device node keeps the host's ownership inside the container -- root and the
 # host's kvm gid -- and that gid has no name in this image, so setpriv
@@ -89,16 +105,6 @@ if [ ! -S "$SOCKET" ]; then
     log "vmobs-privd did not bind $SOCKET within 10s" >&2
     kill "$privd_pid" 2>/dev/null || true
     exit 1
-fi
-
-# init-auth is a one-shot: it mints the first operator credential into the
-# credential store and exits. It runs only when asked, because a config with
-# require_authentication: false has nothing to mint against.
-if [ "${1:-}" = "init-auth" ]; then
-    shift
-    log "minting the initial operator credential"
-    exec setpriv --reuid "$VMOBS_UID" --regid "$VMOBS_GID" --init-groups -- \
-        /usr/local/bin/vmobsd init-auth -config "$CONFIG" "$@"
 fi
 
 log "starting vmobsd as uid $VMOBS_UID"
