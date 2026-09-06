@@ -215,6 +215,15 @@ h2 {
   margin: 0 0 16px;
 }
 
+/* The typed cause reads as a chip beside the message, not as more sentence. */
+.alert .cause {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(248, 81, 73, 0.18);
+  font-size: 12px;
+}
+
 .remediation {
   display: block;
   color: var(--dim);

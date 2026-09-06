@@ -29,6 +29,29 @@ describe('OperationFailure', () => {
     expect(alert).toHaveTextContent('shows current reservations')
   })
 
+  // The message and the cause are two facts, and rendered flush they read as one
+  // mangled word. Measured 2026-09-06: a real refusal reached an operator as
+  // "name is requiredbody_invalid". <strong> and <code> are both inline, JSX
+  // drops the whitespace between elements, and `code` carries only a
+  // font-family -- so nothing anywhere put a gap between them.
+  it('separates the message from the cause code', () => {
+    render(
+      <OperationFailure
+        failure={
+          new ApiFailure(400, {
+            code: 'malformed_request',
+            message: 'name is required',
+            cause: 'body_invalid',
+            retryable: false,
+          })
+        }
+        fallback="The launch failed"
+      />,
+    )
+    const alert = screen.getByRole('alert')
+    expect(alert.textContent).toContain('name is required body_invalid')
+  })
+
   it('falls back to the status when the response carried no message', () => {
     render(<OperationFailure failure={new ApiFailure(502)} fallback="The launch failed" />)
     expect(screen.getByRole('alert')).toHaveTextContent('The launch failed (HTTP 502).')

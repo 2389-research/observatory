@@ -18,8 +18,12 @@ export function OperationFailure({ failure, fallback }: Props) {
           page is inert by construction (SPEC 13.3). */}
       <strong>
         {failure.error?.message ? neutralize(failure.error.message) : `${fallback} (HTTP ${failure.status}).`}
-      </strong>
-      {failure.error?.cause && <code>{neutralize(failure.error.cause)}</code>}
+      </strong>{' '}
+      {/* The space is written, not left to CSS. Both elements are inline and
+          JSX drops the whitespace between them, so without it the sentence and
+          the machine code arrive as one word -- and copied text and a screen
+          reader would carry the same mangling however the chip is painted. */}
+      {failure.error?.cause && <code className="cause">{neutralize(failure.error.cause)}</code>}
       {failure.error?.remediation && failure.error.remediation.length > 0 && (
         <ul className="remediation-list">
           {failure.error.remediation.map((r) => (
