@@ -131,6 +131,16 @@ def main() -> int:
     expected = [f"AT-{i:03d}" for i in range(1, 103)]
     check(sorted(at_ids) == expected, "Exactly 102 unique sequential acceptance IDs")
 
+    # internal/evidence refuses to publish a record for a row this document does
+    # not define, which only holds while its mirror of the row count agrees with
+    # the document. This document is the source of truth; the constant follows.
+    evidence_go = (DOCS.parent / "internal/evidence/evidence.go").read_text()
+    mirrored = re.search(r"^const acceptanceRows = (\d+)$", evidence_go, re.MULTILINE)
+    check(
+        mirrored is not None and int(mirrored.group(1)) == len(expected),
+        "internal/evidence acceptanceRows mirrors the acceptance row count",
+    )
+
     spec_reqs = re.findall(r"^\| (R-\d{2}) \|", spec, re.MULTILINE)
     check(spec_reqs == [f"R-{i:02d}" for i in range(1, 18)], "SPEC defines exactly R-01 through R-17")
     covered = set(re.findall(r"R-\d{2}", acceptance))
