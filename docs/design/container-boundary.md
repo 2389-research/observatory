@@ -310,7 +310,7 @@ Measured on purpose after hitting it by accident: one VM `running`, then
 
 This is not a containerization defect. The host install has it too, across a
 privd restart or a reboot; the container just reaches it in one command instead
-of one outage. It is filed as its own kata rather than fixed here, because the
+of one outage. It is filed as kata `7p8m` rather than fixed here, because the
 fix changes privd's release contract and nine tests pin that contract
 (`internal/jailer/release_orphan_linux_test.go`) — including the rule that
 `not_found` is an ordinary answer when nothing survives, which is exactly the
