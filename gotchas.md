@@ -358,3 +358,26 @@ this side computes from those same bytes, so without the lock comparison the
 chain agrees with itself no matter what is in the file. `config.ext4`,
 `workspace.ext4` and `fc-config.json` are generated per boot and have no pin.
 Kata `sd56`.
+
+**A gate on aibox03 cannot ask git what it is testing.** `scripts/linux` excludes
+`.git` from the rsync, so `git rev-parse HEAD` on the remote copy fails with no
+repository — and a real-host evidence record that cannot name its revision is a
+provenance claim nothing backs. `scripts/linux` therefore reads the revision and
+the dirty flag locally, before the transfer, and passes them as
+`VMOBS_SOURCE_REVISION` and `VMOBS_SOURCE_DIRTY` in front of the remote command.
+Anything else that needs to know which commit ran reads those, not git. Without
+them the gate publishes no records and says so in its transcript rather than
+guessing. Note the composition trap: the wrapper prefixes `env VAR=… <your
+command>`, so a remote command written as `a; b` gives the variables to `a`
+only — put the gate first. Kata `2jt1`.
+
+**Digests quoted by hand into docs go stale silently.** `docs/ACCEPTANCE.md`
+carried `rootfs c6a92bba…` as the M1a lock for two days after the rootfs was
+re-pinned twice (`e70224f`, `3ec51bf`), and revision 19 of `docs/VALIDATION.md`
+called a re-run "same runtime lock" three hours after the lock changed under it.
+Nothing was lying; both were read from the lock at some earlier moment and never
+re-read. The fix is structural, not editorial: `tests/integration/evidence/executions/`
+holds one record per acceptance row, and each carries the lock digest, the
+binary digests and the pinned artifact digests the run actually verified
+against. Never hand-write a digest into prose when a record can carry it. Kata
+`2jt1`.
