@@ -3,14 +3,9 @@
 package lock
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"os"
-	"path/filepath"
 )
 
 const schemaV1 = "vmobs.runtime_lock.v1"
@@ -98,9 +93,15 @@ type Mismatch struct {
 	Subject string
 	// Want is the pinned SHA-256 hex digest.
 	Want string
-	// Got is the computed SHA-256 hex digest, "absent" if the file was missing,
-	// or "unreadable" for any other read error.
+	// Got is the computed SHA-256 hex digest, or one of three labels: "absent"
+	// if the file was missing, "unsafe_path" if the artifact's placement was
+	// refused before its bytes were read, and "unreadable" for any other I/O
+	// error.
 	Got string
+	// Detail carries the refusal in words when Got is a label rather than a
+	// digest — which directory is writable, which component is a symlink. Empty
+	// when Got is a digest or "absent", where the label says everything.
+	Detail string
 }
 
 // Load parses the lock file at path. An unknown schema value is an error.
@@ -121,59 +122,60 @@ func Load(path string) (*Lock, error) {
 	return &l, nil
 }
 
-// hashErrorLabel returns "absent" when err signals a missing file, and
-// "unreadable" for any other I/O error (permissions, mid-stream failure, etc.).
-func hashErrorLabel(err error) string {
-	if errors.Is(err, os.ErrNotExist) {
-		return "absent"
-	}
-	return "unreadable"
-}
-
 // VerifyBinaries checks the SHA-256 of the installed firecracker and jailer
 // binaries against the pinned values. install_path values are used as-is
-// (absolute paths). A missing file yields a Mismatch with Got="absent"; any
-// other read error (permissions, mid-stream I/O) yields Got="unreadable".
-// An empty sha256 field is skipped — call Unpinned to enumerate those.
+// (absolute paths). A missing file yields a Mismatch with Got="absent", a
+// symlinked or non-regular install_path yields Got="unsafe_path", and any other
+// read error yields Got="unreadable". An empty sha256 field is skipped — call
+// Unpinned to enumerate those.
+//
+// The trusted-path walk OpenPinned applies to repo artifacts is deliberately not
+// applied here. install_path names a file on the operator's own filesystem,
+// under directories vmobs neither creates nor configures, so there is no root it
+// could assert the walk from: rooting it at / would refuse every install whose
+// binary sits under a world-writable ancestor, starting with the temporary
+// directories the tests and the gate use. What is checked is the file itself.
 func (l *Lock) VerifyBinaries() []Mismatch {
 	var out []Mismatch
 	check := func(subject, pinnedHash, path string) {
 		if pinnedHash == "" {
 			return // not yet pinned; Unpinned() handles reporting
 		}
-		got, err := sha256File(path)
+		f, err := openPinnedFile(path, pinnedHash)
 		if err != nil {
-			out = append(out, Mismatch{Subject: subject, Want: pinnedHash, Got: hashErrorLabel(err)})
+			got, detail := classify(err)
+			out = append(out, Mismatch{Subject: subject, Want: pinnedHash, Got: got, Detail: detail})
 			return
 		}
-		if got != pinnedHash {
-			out = append(out, Mismatch{Subject: subject, Want: pinnedHash, Got: got})
-		}
+		f.Close()
 	}
 	check("firecracker", l.Firecracker.SHA256, l.Firecracker.InstallPath)
 	check("jailer", l.Jailer.SHA256, l.Jailer.InstallPath)
 	return out
 }
 
-// VerifyArtifacts checks the SHA-256 of repo-relative artifacts (guest kernel
-// vmlinux and root image) against the pinned values. Paths are resolved
-// relative to repoRoot. An empty sha256 is skipped (see Unpinned).
-// A missing file yields Got="absent"; any other read error yields Got="unreadable".
+// VerifyArtifacts checks the pinned repo-relative artifacts (guest kernel
+// vmlinux and root image) against the lock, resolving each under repoRoot with
+// OpenPinned — so a refusal can be about the artifact's placement as well as its
+// bytes. An empty sha256 is skipped (see Unpinned).
+//
+// This is the report shape: the verified descriptors are closed on the way out.
+// A caller that is about to *use* the bytes calls OpenPinned itself and copies
+// from the descriptor, which is the only way the bytes it reads are the bytes
+// this verified.
 func (l *Lock) VerifyArtifacts(repoRoot string) []Mismatch {
 	var out []Mismatch
 	check := func(subject, pinnedHash, relPath string) {
 		if pinnedHash == "" {
 			return // not yet pinned
 		}
-		abs := filepath.Join(repoRoot, relPath)
-		got, err := sha256File(abs)
+		f, err := OpenPinned(repoRoot, relPath, pinnedHash)
 		if err != nil {
-			out = append(out, Mismatch{Subject: subject, Want: pinnedHash, Got: hashErrorLabel(err)})
+			got, detail := classify(err)
+			out = append(out, Mismatch{Subject: subject, Want: pinnedHash, Got: got, Detail: detail})
 			return
 		}
-		if got != pinnedHash {
-			out = append(out, Mismatch{Subject: subject, Want: pinnedHash, Got: got})
-		}
+		f.Close()
 	}
 	check("guest_kernel.vmlinux", l.GuestKernel.VmlinuxSHA256, l.GuestKernel.VmlinuxPath)
 	check("root_image", l.RootImage.SHA256, l.RootImage.Path)
@@ -198,19 +200,4 @@ func (l *Lock) Unpinned() []string {
 		out = append(out, "root_image")
 	}
 	return out
-}
-
-// sha256File reads the file at path and returns its lowercase hex SHA-256 digest.
-func sha256File(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", fmt.Errorf("hash %s: %w", path, err)
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
 }

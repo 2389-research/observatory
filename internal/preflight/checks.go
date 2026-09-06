@@ -63,7 +63,7 @@ func (r *Runner) checkFCBinaries() Check {
 		var evidence []string
 		var subjects []string
 		for _, m := range mismatches {
-			evidence = append(evidence, fmt.Sprintf("%s: want %s got %s", m.Subject, m.Want, m.Got))
+			evidence = append(evidence, m.Describe())
 			subjects = append(subjects, m.Subject)
 		}
 		return Check{

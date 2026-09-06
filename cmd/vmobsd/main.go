@@ -171,7 +171,7 @@ func verifyRuntimeLock(lockPath string, logger *slog.Logger) error {
 	}
 	var msgs []string
 	for _, m := range mismatches {
-		msgs = append(msgs, fmt.Sprintf("%s: want %s got %s", m.Subject, m.Want, m.Got))
+		msgs = append(msgs, m.Describe())
 	}
 	return fmt.Errorf("runtime lock verification failed: %s", strings.Join(msgs, "; "))
 }
