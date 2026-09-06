@@ -500,3 +500,43 @@ blocker.** `vmops.go:319` passes `--cgroup-version 2` with no `--cgroup` and
 no `--parent-cgroup`, and the jailer exits 0 against a read-only cgroup mount
 without creating a directory. Adding `--cgroup` limits later would reintroduce
 the requirement — that is a boundary change, not a tuning change. Kata `q4b2`.
+
+**Firecracker never opens the host's `/dev/kvm`, so `--group-add` answers
+nothing.** The jailer `mknod`s its own `dev/kvm`, `dev/net/tun`, `dev/urandom`
+and `dev/userfaultfd` inside the chroot while still root, chowns them to the
+jail uid, then drops privilege — measured, firecracker runs as `Uid 20000
+Gid 36000 Groups: (none)` against a `crw------- 20000:36000` node. The host kvm
+gid matters one layer out, for vmobsd's `arch_kvm` preflight, and `--group-add`
+cannot deliver it there either: `deploy/entrypoint.sh` drops with
+`setpriv --init-groups`, which rebuilds the supplementary set from `/etc/group`
+and discards what docker granted. The entrypoint reads the gid off the device
+node instead. When a jailed process cannot open something, look inside the
+chroot, not at the host node. `docs/design/container-boundary.md` §10.
+
+**Restarting privd strands every existing VM's jail chroot, permanently.** The
+ledger is on tmpfs and the chroot is on real disk, so the record dies and the
+thing it was the key to does not. `RealOps.ReleaseVM` is the only code that
+removes `<JailBase>/firecracker/<vm_id>` and is reachable only through a live
+ledger entry, so `DELETE` returns 500 `runtime_operation_failed` ("privd:
+not_found: vm not in ledger") and the row parks in `deleting` forever, still
+holding the reservation that then refuses the next launch. True of a host
+`systemctl restart vmobs-privd` or reboot, not just the container. Reclaiming
+needs root and `rm -rf`. Kata `7p8m` carries the fix's design constraints.
+
+**aibox03's host install hides fresh-install bugs; the container is the first
+clean slate.** Its directories were created by the M0 root helper under umask
+022 months ago, and `os.MkdirAll` leaves an existing directory's mode alone —
+so privd creating `<jail-base>/firecracker` at `0o750` under its pinned `0002`
+umask was invisible on the host and broke every launch and every delete in a
+fresh container. Test provisioning code against fresh volumes
+(`docker volume rm vmobs-state vmobs-runtime`), not the host. And make the
+repair reachable from teardown: teardown creates nothing, so a fix that only
+runs while starting a VM leaves an install unable to delete inherited VMs and
+unable to launch out of the capacity they hold. Fixed as
+`privd.EnsureJailBase` (`c494189`).
+
+**`scripts/check`'s web gates write their logs to `$TMPDIR/vmobs-check/`.**
+They used to discard output, so a flaky vitest run and a real regression
+printed the identical `FAIL web tests` line. The failure now names the file.
+One flake was observed 2026-09-06: one run failed, two later runs and a
+hand-run passed 214/214 with nothing kept to explain it.
