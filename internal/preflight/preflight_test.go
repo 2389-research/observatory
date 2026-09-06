@@ -3,15 +3,16 @@
 package preflight_test
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
-	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
-	"github.com/2389-research/observatory-v2/internal/lock"
 	"github.com/2389-research/observatory-v2/internal/preflight"
 )
 
@@ -168,88 +169,192 @@ func TestJSONFieldNames(t *testing.T) {
 
 // --- fc_binaries ---
 
-func TestFCBinariesNoLock(t *testing.T) {
-	r := preflight.New(preflight.Config{DataDir: t.TempDir()})
-	report := r.Run(t.Context())
-
-	fc := findCheck(report.Checks, "fc_binaries")
+// fcBinaries runs a full report and returns the fc_binaries check. Every
+// fixture below runs the whole report because that is how the daemon calls it:
+// the check reads the lock file itself, so what a test changes between two Run
+// calls is what an operator changed between two /host/status requests.
+func fcBinaries(t *testing.T, r *preflight.Runner) preflight.Check {
+	t.Helper()
+	fc := findCheck(r.Run(t.Context()).Checks, "fc_binaries")
 	if fc == nil {
 		t.Fatal("fc_binaries not in report")
 	}
+	return *fc
+}
+
+func evidenceMentions(c preflight.Check, want string) bool {
+	for _, ev := range c.Evidence {
+		if strings.Contains(ev, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestFCBinariesNoLock(t *testing.T) {
+	r := preflight.New(preflight.Config{DataDir: t.TempDir()})
+
+	fc := fcBinaries(t, r)
 	if fc.Status != preflight.StatusFail {
-		t.Errorf("fc_binaries with nil lock = %q, want fail", fc.Status)
+		t.Errorf("fc_binaries with no lock configured = %q, want fail", fc.Status)
 	}
 	if !strings.Contains(fc.Summary, "no runtime lock") {
 		t.Errorf("fc_binaries summary = %q, want 'no runtime lock'", fc.Summary)
 	}
+	if fc.Remediation == nil || fc.Remediation.Cause != "lock_absent" {
+		t.Errorf("fc_binaries remediation = %+v, want cause lock_absent", fc.Remediation)
+	}
 }
 
-func TestFCBinariesLockErr(t *testing.T) {
-	sentinel := errors.New("parse error: invalid json")
-	r := preflight.New(preflight.Config{DataDir: t.TempDir(), LockErr: sentinel})
-	report := r.Run(t.Context())
+// A configured path with no file behind it gets the same answer as no lock at
+// all — create one — and not the "the file is corrupt" answer. The daemon's
+// startup load used to turn a missing file into a load error, so an operator
+// who had never run setup.sh was told to re-pin a lock that did not exist.
+func TestFCBinariesLockFileMissing(t *testing.T) {
+	lockPath := filepath.Join(t.TempDir(), "runtime.lock.json")
+	r := preflight.New(preflight.Config{DataDir: t.TempDir(), LockPath: lockPath})
 
-	fc := findCheck(report.Checks, "fc_binaries")
-	if fc == nil {
-		t.Fatal("fc_binaries not in report")
-	}
+	fc := fcBinaries(t, r)
 	if fc.Status != preflight.StatusFail {
-		t.Errorf("fc_binaries with LockErr = %q, want fail", fc.Status)
+		t.Errorf("fc_binaries with a missing lock file = %q, want fail", fc.Status)
+	}
+	if fc.Remediation == nil || fc.Remediation.Cause != "lock_absent" {
+		t.Errorf("fc_binaries remediation = %+v, want cause lock_absent", fc.Remediation)
+	}
+	if !evidenceMentions(fc, lockPath) {
+		t.Errorf("fc_binaries evidence should name the path it looked at: %v", fc.Evidence)
+	}
+}
+
+func TestFCBinariesLockUnparseable(t *testing.T) {
+	lockPath := writeLock(t, `{"schema": "vmobs.runtime_lock.v1"`)
+	r := preflight.New(preflight.Config{DataDir: t.TempDir(), LockPath: lockPath})
+
+	fc := fcBinaries(t, r)
+	if fc.Status != preflight.StatusFail {
+		t.Errorf("fc_binaries with an unparseable lock = %q, want fail", fc.Status)
+	}
+	if fc.Remediation == nil || fc.Remediation.Cause != "lock_load_error" {
+		t.Errorf("fc_binaries remediation = %+v, want cause lock_load_error", fc.Remediation)
 	}
 }
 
 func TestFCBinariesUnpinned(t *testing.T) {
-	l := loadLock(t, `{
-		"schema": "vmobs.runtime_lock.v1",
-		"firecracker": {"sha256": "", "install_path": "/usr/bin/firecracker", "version": "v1", "release_url": ""},
-		"jailer": {"sha256": "", "install_path": "/usr/bin/jailer"},
-		"host_support": {"arch": "x86_64", "min_kernel": "5.10"},
-		"guest_kernel": {"version": "", "source_url": "", "source_sha256": "", "config_sha256": "", "vmlinux_sha256": "", "vmlinux_path": ""},
-		"root_image": {"sha256": "", "path": "", "base_image_ref": "", "apt_snapshot": "", "inventory": ""},
-		"guestd": {"protocol_version": 1}
-	}`)
-	r := preflight.New(preflight.Config{DataDir: t.TempDir(), Lock: l})
-	report := r.Run(t.Context())
+	lockPath := writeLock(t, lockJSON("", "/usr/bin/firecracker", "", "/usr/bin/jailer"))
+	r := preflight.New(preflight.Config{DataDir: t.TempDir(), LockPath: lockPath})
 
-	fc := findCheck(report.Checks, "fc_binaries")
-	if fc == nil {
-		t.Fatal("fc_binaries not in report")
-	}
-	if fc.Status != preflight.StatusWarn {
-		t.Errorf("fc_binaries with unpinned = %q, want warn", fc.Status)
+	if fc := fcBinaries(t, r); fc.Status != preflight.StatusWarn {
+		t.Errorf("fc_binaries with unpinned binaries = %q, want warn", fc.Status)
 	}
 }
 
 func TestFCBinariesMismatch(t *testing.T) {
 	// Pinned sha256s pointing at /nonexistent paths → Got="absent".
-	l := loadLock(t, `{
-		"schema": "vmobs.runtime_lock.v1",
-		"firecracker": {"sha256": "deadbeef", "install_path": "/nonexistent/firecracker", "version": "v1", "release_url": ""},
-		"jailer": {"sha256": "cafebabe", "install_path": "/nonexistent/jailer"},
-		"host_support": {"arch": "x86_64", "min_kernel": "5.10"},
-		"guest_kernel": {"version": "", "source_url": "", "source_sha256": "", "config_sha256": "", "vmlinux_sha256": "", "vmlinux_path": ""},
-		"root_image": {"sha256": "", "path": "", "base_image_ref": "", "apt_snapshot": "", "inventory": ""},
-		"guestd": {"protocol_version": 1}
-	}`)
-	r := preflight.New(preflight.Config{DataDir: t.TempDir(), Lock: l})
-	report := r.Run(t.Context())
+	lockPath := writeLock(t, lockJSON("deadbeef", "/nonexistent/firecracker", "cafebabe", "/nonexistent/jailer"))
+	r := preflight.New(preflight.Config{DataDir: t.TempDir(), LockPath: lockPath})
 
-	fc := findCheck(report.Checks, "fc_binaries")
-	if fc == nil {
-		t.Fatal("fc_binaries not in report")
-	}
+	fc := fcBinaries(t, r)
 	if fc.Status != preflight.StatusFail {
-		t.Errorf("fc_binaries with mismatch = %q, want fail", fc.Status)
+		t.Errorf("fc_binaries with a mismatch = %q, want fail", fc.Status)
 	}
-	// Evidence must name a subject.
-	nameFound := false
-	for _, ev := range fc.Evidence {
-		if strings.Contains(ev, "firecracker") || strings.Contains(ev, "jailer") {
-			nameFound = true
-		}
-	}
-	if !nameFound {
+	if !evidenceMentions(fc, "firecracker") && !evidenceMentions(fc, "jailer") {
 		t.Errorf("fc_binaries evidence should name the mismatch subject: %v", fc.Evidence)
+	}
+}
+
+// TestFCBinariesFollowsARepinWithoutARestart is why the check reads the file
+// itself. scripts/aibox03/setup.sh installs a firecracker release and re-pins
+// runtime.lock.json in one go; a runner holding the lock it parsed at startup
+// then hashes the new binary against the old pin and reports a mismatch that is
+// not there. It is not only a wrong doctor line — the jailer adapter turns any
+// failing check into an UnavailableError, so the daemon refuses every VM
+// creation until someone restarts it.
+func TestFCBinariesFollowsARepinWithoutARestart(t *testing.T) {
+	dir := t.TempDir()
+	fcPath := filepath.Join(dir, "firecracker")
+	jailerPath := filepath.Join(dir, "jailer")
+	lockPath := filepath.Join(dir, "runtime.lock.json")
+
+	fcSHA := writeBinary(t, fcPath, "firecracker v1.0")
+	jailerSHA := writeBinary(t, jailerPath, "jailer v1.0")
+	writeLockAt(t, lockPath, lockJSON(fcSHA, fcPath, jailerSHA, jailerPath))
+
+	r := preflight.New(preflight.Config{DataDir: t.TempDir(), LockPath: lockPath})
+	fc := fcBinaries(t, r)
+	if fc.Status != preflight.StatusPass {
+		t.Fatalf("fc_binaries on a freshly pinned host = %q (%s): %v", fc.Status, fc.Summary, fc.Evidence)
+	}
+	if !evidenceMentions(fc, lockPath) {
+		t.Errorf("pass evidence should name the lock it read: %v", fc.Evidence)
+	}
+
+	// The operator upgrades both binaries and re-pins. Nothing restarts.
+	fcSHA = writeBinary(t, fcPath, "firecracker v1.1")
+	jailerSHA = writeBinary(t, jailerPath, "jailer v1.1")
+	writeLockAt(t, lockPath, lockJSON(fcSHA, fcPath, jailerSHA, jailerPath))
+
+	fc = fcBinaries(t, r)
+	if fc.Status != preflight.StatusPass {
+		t.Errorf("fc_binaries after a repin = %q (%s), want pass; the check hashes the installed binaries live, so it has to read the pins live too: %v",
+			fc.Status, fc.Summary, fc.Evidence)
+	}
+}
+
+// The same file changing under the runner, in the failing direction: a repin to
+// a digest the installed binary does not have must fail on the new pin. A check
+// that reported the old pin's verdict would pass this host straight through.
+func TestFCBinariesFailsOnARepinTheBinaryDoesNotMatch(t *testing.T) {
+	dir := t.TempDir()
+	fcPath := filepath.Join(dir, "firecracker")
+	jailerPath := filepath.Join(dir, "jailer")
+	lockPath := filepath.Join(dir, "runtime.lock.json")
+
+	fcSHA := writeBinary(t, fcPath, "firecracker v1.0")
+	jailerSHA := writeBinary(t, jailerPath, "jailer v1.0")
+	writeLockAt(t, lockPath, lockJSON(fcSHA, fcPath, jailerSHA, jailerPath))
+
+	r := preflight.New(preflight.Config{DataDir: t.TempDir(), LockPath: lockPath})
+	if fc := fcBinaries(t, r); fc.Status != preflight.StatusPass {
+		t.Fatalf("fc_binaries on a freshly pinned host = %q (%s): %v", fc.Status, fc.Summary, fc.Evidence)
+	}
+
+	const wrongPin = "1111111111111111111111111111111111111111111111111111111111111111"
+	writeLockAt(t, lockPath, lockJSON(wrongPin, fcPath, jailerSHA, jailerPath))
+
+	fc := fcBinaries(t, r)
+	if fc.Status != preflight.StatusFail {
+		t.Fatalf("fc_binaries after a repin to a wrong digest = %q (%s), want fail", fc.Status, fc.Summary)
+	}
+	if !evidenceMentions(fc, wrongPin) {
+		t.Errorf("evidence should name the pin now in the file, not the one parsed earlier: %v", fc.Evidence)
+	}
+}
+
+// A lock that stops parsing while the daemon runs is a live fact too. Held from
+// startup, the doctor keeps answering from a copy of a file nobody can read.
+func TestFCBinariesSeesALockCorruptedAfterStartup(t *testing.T) {
+	dir := t.TempDir()
+	fcPath := filepath.Join(dir, "firecracker")
+	jailerPath := filepath.Join(dir, "jailer")
+	lockPath := filepath.Join(dir, "runtime.lock.json")
+
+	fcSHA := writeBinary(t, fcPath, "firecracker v1.0")
+	jailerSHA := writeBinary(t, jailerPath, "jailer v1.0")
+	writeLockAt(t, lockPath, lockJSON(fcSHA, fcPath, jailerSHA, jailerPath))
+
+	r := preflight.New(preflight.Config{DataDir: t.TempDir(), LockPath: lockPath})
+	if fc := fcBinaries(t, r); fc.Status != preflight.StatusPass {
+		t.Fatalf("fc_binaries on a freshly pinned host = %q (%s): %v", fc.Status, fc.Summary, fc.Evidence)
+	}
+
+	writeLockAt(t, lockPath, "half a lock file")
+
+	fc := fcBinaries(t, r)
+	if fc.Status != preflight.StatusFail {
+		t.Errorf("fc_binaries after the lock was corrupted = %q, want fail", fc.Status)
+	}
+	if fc.Remediation == nil || fc.Remediation.Cause != "lock_load_error" {
+		t.Errorf("fc_binaries remediation = %+v, want cause lock_load_error", fc.Remediation)
 	}
 }
 
@@ -541,16 +646,44 @@ func findCheck(checks []preflight.Check, id string) *preflight.Check {
 	return nil
 }
 
-func loadLock(t *testing.T, jsonContent string) *lock.Lock {
+// writeLock writes lock JSON under a fresh temp dir and returns the path.
+// Preflight takes a path, not a parsed lock, so a fixture is a real file — which
+// is also what lets a test change the lock under a running runner.
+func writeLock(t *testing.T, jsonContent string) string {
 	t.Helper()
-	dir := t.TempDir()
-	lockPath := filepath.Join(dir, "runtime.lock.json")
-	if err := os.WriteFile(lockPath, []byte(jsonContent), 0o644); err != nil {
-		t.Fatalf("write lock: %v", err)
+	path := filepath.Join(t.TempDir(), "runtime.lock.json")
+	writeLockAt(t, path, jsonContent)
+	return path
+}
+
+func writeLockAt(t *testing.T, path, jsonContent string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(jsonContent), 0o644); err != nil {
+		t.Fatalf("write lock %s: %v", path, err)
 	}
-	l, err := lock.Load(lockPath)
-	if err != nil {
-		t.Fatalf("load lock: %v", err)
+}
+
+// lockJSON renders a v1 lock pinning the two binaries. Every other section is
+// empty: fc_binaries reads the binary halves and nothing else.
+func lockJSON(fcSHA, fcPath, jailerSHA, jailerPath string) string {
+	return fmt.Sprintf(`{
+		"schema": "vmobs.runtime_lock.v1",
+		"firecracker": {"sha256": %q, "install_path": %q, "version": "v1", "release_url": ""},
+		"jailer": {"sha256": %q, "install_path": %q},
+		"host_support": {"arch": "x86_64", "min_kernel": "5.10"},
+		"guest_kernel": {"version": "", "source_url": "", "source_sha256": "", "config_sha256": "", "vmlinux_sha256": "", "vmlinux_path": ""},
+		"root_image": {"sha256": "", "path": "", "base_image_ref": "", "apt_snapshot": "", "inventory": ""},
+		"guestd": {"protocol_version": 1}
+	}`, fcSHA, fcPath, jailerSHA, jailerPath)
+}
+
+// writeBinary writes a stand-in binary and returns its sha256, so a fixture can
+// pin the bytes it just wrote.
+func writeBinary(t *testing.T, path, body string) string {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatalf("write %s: %v", path, err)
 	}
-	return l
+	sum := sha256.Sum256([]byte(body))
+	return hex.EncodeToString(sum[:])
 }

@@ -3,11 +3,9 @@
 package main
 
 import (
-	"errors"
 	"testing"
 
 	"github.com/2389-research/observatory-v2/internal/config"
-	"github.com/2389-research/observatory-v2/internal/lock"
 	"github.com/2389-research/observatory-v2/internal/runtime"
 )
 
@@ -30,11 +28,10 @@ func TestPreflightConfigCarriesGuestChannelFields(t *testing.T) {
 			Runtime:          "/srv/vmobs",
 			PrivilegedSocket: "/x/privd.sock",
 		},
+		Runtime: config.Runtime{LockFile: "/srv/vmobs/runtime.lock.json"},
 	}
-	pfLock := &lock.Lock{Schema: "vmobs.runtime-lock/1"}
-	pfLockErr := errors.New("lock load failed")
 
-	got := preflightConfig(cfg, pfLock, pfLockErr)
+	got := preflightConfig(cfg)
 
 	if got.PrivdSocket != "/x/privd.sock" {
 		t.Errorf("PrivdSocket = %q, want %q", got.PrivdSocket, "/x/privd.sock")
@@ -55,11 +52,11 @@ func TestPreflightConfigCarriesGuestChannelFields(t *testing.T) {
 	if !got.RequireAuth {
 		t.Error("RequireAuth = false, want true")
 	}
-	if got.Lock != pfLock {
-		t.Errorf("Lock = %v, want the lock passed in", got.Lock)
-	}
-	if !errors.Is(got.LockErr, pfLockErr) {
-		t.Errorf("LockErr = %v, want %v", got.LockErr, pfLockErr)
+	// The doctor reads the lock itself, so it must be pointed at the file a
+	// launch stages from. Hand it a different path — or none — and fc_binaries
+	// answers for a file nothing boots from.
+	if got.LockPath != cfg.Runtime.LockFile {
+		t.Errorf("LockPath = %q, want the jailer's %q", got.LockPath, cfg.Runtime.LockFile)
 	}
 }
 
@@ -75,7 +72,7 @@ func TestPreflightConfigFromExampleConfigHasGuestChannelPaths(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load %s: %v", exampleConfigPath, err)
 	}
-	pf := preflightConfig(cfg, nil, nil)
+	pf := preflightConfig(cfg)
 	if pf.PrivdSocket == "" {
 		t.Error("PrivdSocket is empty for the shipped example config; guest_channel would report not_configured")
 	}

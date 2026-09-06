@@ -3,36 +3,72 @@
 package preflight
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+
+	"github.com/2389-research/observatory-v2/internal/lock"
 )
 
 // --- fc_binaries ---
 
-func (r *Runner) checkFCBinaries() Check {
+// loadLock reads runtime.lock.json once per report, so every check that
+// consults it describes the same file at the same moment. Three answers:
+// (nil, nil) when no lock is configured or none is there, (nil, err) when one is
+// there and unreadable, and the lock otherwise. A path with nothing behind it is
+// the same operator answer as no lock at all — create one — and not the "this
+// file is damaged" answer, which would send them looking for a tampered host.
+func (r *Runner) loadLock() (*lock.Lock, error) {
+	if r.cfg.LockPath == "" {
+		return nil, nil
+	}
+	l, err := lock.Load(r.cfg.LockPath)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil, nil
+	case err != nil:
+		return nil, err
+	}
+	return l, nil
+}
+
+// checkFCBinaries verifies the installed firecracker and jailer against the
+// digests pinned in runtime.lock.json, reading that file on every run. The
+// pins and the binaries are read within microseconds of each other, so the
+// verdict is about one host at one moment. Holding a lock parsed at daemon
+// startup instead would report a mismatch for every legitimate re-pin —
+// scripts/aibox03/setup.sh installs a release and re-pins in one step — and the
+// jailer adapter turns any failing check into an UnavailableError, so the wrong
+// answer refuses every VM creation until someone restarts the daemon.
+func (r *Runner) checkFCBinaries(l *lock.Lock, loadErr error) Check {
 	id := "fc_binaries"
 
-	if r.cfg.LockErr != nil {
+	if loadErr != nil {
 		return Check{
 			ID:       id,
 			Status:   StatusFail,
 			Summary:  "runtime lock load error",
-			Evidence: []string{r.cfg.LockErr.Error()},
+			Evidence: []string{loadErr.Error()},
 			Remediation: &Remediation{
 				Cause:  "lock_load_error",
 				Action: "re-run scripts/aibox03/setup.sh to install firecracker and re-pin runtime.lock.json",
 			},
 		}
 	}
-	if r.cfg.Lock == nil {
+	if l == nil {
+		evidence := "runtime.lock.json absent or not configured"
+		if r.cfg.LockPath != "" {
+			evidence = "runtime.lock.json absent: " + r.cfg.LockPath
+		}
 		return Check{
 			ID:       id,
 			Status:   StatusFail,
 			Summary:  "no runtime lock",
-			Evidence: []string{"runtime.lock.json absent or not configured"},
+			Evidence: []string{evidence},
 			Remediation: &Remediation{
 				Cause:  "lock_absent",
 				Action: "run scripts/aibox03/setup.sh to install firecracker and create runtime.lock.json",
@@ -42,7 +78,7 @@ func (r *Runner) checkFCBinaries() Check {
 
 	// Check only binary components (fc + jailer) for unpinned; artifact pinning
 	// is a separate concern. lock.Unpinned() includes artifacts, so filter.
-	allUnpinned := r.cfg.Lock.Unpinned()
+	allUnpinned := l.Unpinned()
 	var binaryUnpinned []string
 	for _, u := range allUnpinned {
 		if u == "firecracker" || u == "jailer" {
@@ -58,7 +94,7 @@ func (r *Runner) checkFCBinaries() Check {
 		}
 	}
 
-	mismatches := r.cfg.Lock.VerifyBinaries()
+	mismatches := l.VerifyBinaries()
 	if len(mismatches) > 0 {
 		var evidence []string
 		var subjects []string
@@ -83,19 +119,20 @@ func (r *Runner) checkFCBinaries() Check {
 		Status:  StatusPass,
 		Summary: "firecracker and jailer binaries verified",
 		Evidence: []string{
-			"firecracker: " + r.cfg.Lock.Firecracker.InstallPath,
-			"jailer: " + r.cfg.Lock.Jailer.InstallPath,
+			"firecracker: " + l.Firecracker.InstallPath,
+			"jailer: " + l.Jailer.InstallPath,
+			"pinned by: " + r.cfg.LockPath,
 		},
 	}
 }
 
 // --- kernel_tuple ---
 
-func (r *Runner) checkKernelTuple() Check {
+func (r *Runner) checkKernelTuple(l *lock.Lock) Check {
 	id := "kernel_tuple"
 	release := kernelRelease()
 
-	if r.cfg.Lock == nil {
+	if l == nil {
 		return Check{
 			ID:       id,
 			Status:   StatusWarn,
@@ -104,7 +141,7 @@ func (r *Runner) checkKernelTuple() Check {
 		}
 	}
 
-	minKernel := r.cfg.Lock.HostSupport.MinKernel
+	minKernel := l.HostSupport.MinKernel
 	if minKernel == "" {
 		return Check{
 			ID:       id,

@@ -222,11 +222,12 @@ func managerConfig(cfg *config.Config, tpls map[string]runtime.Template, host ru
 
 // preflightConfig builds the doctor's config from the daemon config. PrivdSocket
 // and StageRoot must come from the same fields the jailer adapter launches with,
-// or the doctor reports a host it never looked at.
-func preflightConfig(cfg *config.Config, pfLock *lock.Lock, pfLockErr error) preflight.Config {
+// or the doctor reports a host it never looked at. LockPath is that same rule
+// applied to the lock: the doctor names the file a launch would stage from, and
+// reads it when asked rather than holding a copy from startup.
+func preflightConfig(cfg *config.Config) preflight.Config {
 	return preflight.Config{
-		Lock:        pfLock,
-		LockErr:     pfLockErr,
+		LockPath:    cfg.Runtime.LockFile,
 		DataDir:     filepath.Dir(cfg.Storage.Database),
 		APIMode:     cfg.Server.Mode,
 		RequireAuth: cfg.Auth.RequireAuthentication,
@@ -297,19 +298,7 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready f
 	}
 	logger.Info("host probed", "memory_mib", host.TotalMemoryMiB, "cpus", host.CPUCores, "disk_free_mib", host.StateDiskFreeMiB)
 
-	// Construct preflight runner. Load the lock again (verifyRuntimeLock already
-	// ran above, so if we reach here a mismatch is already fatal; this re-load
-	// is for the preflight config, not for binary verification).
-	var pfLock *lock.Lock
-	var pfLockErr error
-	if cfg.Runtime.LockFile != "" {
-		pfLock, pfLockErr = lock.Load(cfg.Runtime.LockFile)
-		if pfLockErr != nil {
-			logger.Warn("preflight: lock load error", "error", pfLockErr)
-			// pfLock stays nil; pfLockErr is passed to the runner.
-		}
-	}
-	pfRunner := preflight.New(preflightConfig(cfg, pfLock, pfLockErr))
+	pfRunner := preflight.New(preflightConfig(cfg))
 
 	// Run preflight once at startup; log a summary. This does not block serving.
 	{

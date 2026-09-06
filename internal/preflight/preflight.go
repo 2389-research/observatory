@@ -6,8 +6,6 @@ import (
 	"context"
 	"runtime"
 	"time"
-
-	"github.com/2389-research/observatory-v2/internal/lock"
 )
 
 // Status is the machine-readable verdict for a check or overall report.
@@ -47,12 +45,17 @@ type Report struct {
 
 // Config is the input to New: what the runner needs to run checks.
 type Config struct {
-	Lock        *lock.Lock // nil when lock is absent
-	LockErr     error      // non-nil means the lock file was present but failed to load
-	DataDir     string     // path to the state data directory (for disk/permissions checks)
-	ProcRoot    string     // root for /proc reads; defaults to "/proc" if empty
-	APIMode     string     // "loopback_only" or "https"
-	RequireAuth bool       // from config.Auth.RequireAuthentication
+	// LockPath is runtime.lock.json. Empty means no lock is configured, which
+	// fc_binaries reports as such. The path and not a parsed lock: fc_binaries
+	// hashes the installed binaries on every run, so it has to read the pins on
+	// every run too, or a re-pin turns a matching host into a reported mismatch
+	// until the daemon restarts. Same reason Manager.StagedImages reads it per
+	// call and the jailer's doStage reads it per launch.
+	LockPath    string
+	DataDir     string // path to the state data directory (for disk/permissions checks)
+	ProcRoot    string // root for /proc reads; defaults to "/proc" if empty
+	APIMode     string // "loopback_only" or "https"
+	RequireAuth bool   // from config.Auth.RequireAuthentication
 
 	// PrivdSocket is the unix socket path for vmobs-privd. Empty → guest_channel fails.
 	// On Linux, the guest_channel check connects (1s timeout) + closes to verify reachability.
@@ -81,8 +84,9 @@ func New(cfg Config) *Runner {
 func (r *Runner) Run(ctx context.Context) Report {
 	var checks []Check
 
-	checks = append(checks, r.checkFCBinaries())
-	checks = append(checks, r.checkKernelTuple())
+	lk, lkErr := r.loadLock()
+	checks = append(checks, r.checkFCBinaries(lk, lkErr))
+	checks = append(checks, r.checkKernelTuple(lk))
 	checks = append(checks, r.checkArchKVM())
 	checks = append(checks, r.checkCgroupV2())
 	checks = append(checks, r.checkNetPrereqs())
