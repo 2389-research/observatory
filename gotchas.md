@@ -97,9 +97,20 @@ stage now" must read the file, not a held copy: `Manager.StagedImages` does, and
 `/host/status` serves it. Anything recording what a VM *did* stage takes it from
 the launch that staged it (see the boot-images entry) — never from either copy.
 
-Preflight still verifies binaries against the startup parse (kata `f8f2`), so on
-a host repinned without a restart the `preflight` and `images` blocks in one
-`/host/status` response describe two different versions of the same file.
+Preflight now reads the file too (`Runner.loadLock`, one read per report shared
+by `fc_binaries` and `kernel_tuple`), so nothing in a served response answers
+from a startup parse any more. `verifyRuntimeLock` still parses once at startup
+and stays that way on purpose: it is tamper evidence at boot, not a live verdict.
+
+**A stale pin does not merely misreport — it refuses launches.**
+`Adapter.Availability` turns the first failing preflight check into a
+`runtime.UnavailableError`, which `/host/status` publishes as
+`runtime.available: false` and every `POST /vms` is refused against. A daemon
+holding startup pins would report a mismatch for each legitimate re-pin
+(`scripts/aibox03/setup.sh` installs a release and re-pins in one step) and keep
+refusing until someone restarted it — after the operator had already fixed the
+host. Any future cache in front of the preflight runner reintroduces exactly
+that; `TestDoctorFollowsTheLockWhileRunning` is the guard.
 
 ## Killing guestd, and what the host says about it
 
