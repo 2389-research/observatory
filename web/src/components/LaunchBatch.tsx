@@ -77,15 +77,16 @@ export function LaunchBatch({ host, templates, onLaunched }: Props) {
     e.preventDefault()
     if (reservationMode === '' || overCap) return
     // Same rule as the single launch: the key survives a failure so a retry is
-    // the daemon's replay, and is dropped only once the batch is accepted.
-    const idempotencyKey = idempotencyKeyFor(FORM_KEY)
+    // the daemon's replay, is bound to the batch that minted it so an edit is a
+    // new batch, and is dropped only once the batch is accepted.
+    const body = {
+      members: members.map(draftBody),
+      reservation_mode: reservationMode,
+      on_failure: onFailure,
+    }
+    const idempotencyKey = idempotencyKeyFor(FORM_KEY, body)
     const ok = await op.run(() =>
-      postJSON<BatchReply>('/vm-batches', {
-        members: members.map(draftBody),
-        reservation_mode: reservationMode,
-        on_failure: onFailure,
-        idempotency_key: idempotencyKey,
-      }),
+      postJSON<BatchReply>('/vm-batches', { ...body, idempotency_key: idempotencyKey }),
     )
     if (ok) {
       clearIdempotencyKey(FORM_KEY)

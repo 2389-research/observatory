@@ -17,20 +17,60 @@ export interface Operation<T> {
 
 const KEY_PREFIX = 'vmobs.idempotency.'
 
+/** What a form's storage entry holds: the key, and the request it was minted for. */
+interface StoredKey {
+  request: string
+  key: string
+}
+
 /**
- * The idempotency key for a form, stable until the operation finishes.
+ * The idempotency key for a form's current request.
  *
  * SPEC §13.7: "Refreshing a page does not repeat a launch." sessionStorage
  * survives a reload, so a resubmitted form carries the key the daemon already
  * saw and gets its idempotent replay instead of a second VM.
+ *
+ * The key is bound to the request that minted it, because the daemon binds it
+ * the same way: one (owner, kind, key) holds one request hash, and the same key
+ * arriving with a different body is refused as idempotency_key_reused. Editing
+ * the form after a submit therefore has to mint a new key -- otherwise the form
+ * is refused on every later submit, and reloading the page, the one move an
+ * operator has, keeps the wedged key instead of clearing it.
  */
-export function idempotencyKeyFor(formKey: string): string {
+export function idempotencyKeyFor(formKey: string, request: unknown): string {
   const storageKey = KEY_PREFIX + formKey
-  const existing = sessionStorage.getItem(storageKey)
-  if (existing) return existing
-  const fresh = crypto.randomUUID()
-  sessionStorage.setItem(storageKey, fresh)
-  return fresh
+  const fingerprint = JSON.stringify(request)
+  const stored = readStoredKey(storageKey)
+  if (stored && stored.request === fingerprint) return stored.key
+  const fresh: StoredKey = { request: fingerprint, key: crypto.randomUUID() }
+  sessionStorage.setItem(storageKey, JSON.stringify(fresh))
+  return fresh.key
+}
+
+/**
+ * The stored entry, or undefined when there is nothing this function can trust.
+ *
+ * A session that began on a build that stored the bare key leaves a string that
+ * is not this shape; so does anything else that writes to the slot. Either way
+ * the answer is the same as an empty slot -- mint a new key -- because a key we
+ * cannot tie to a request is exactly the key that wedges the form.
+ */
+function readStoredKey(storageKey: string): StoredKey | undefined {
+  const raw = sessionStorage.getItem(storageKey)
+  if (!raw) return undefined
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (
+      typeof parsed === 'object' && parsed !== null &&
+      typeof (parsed as StoredKey).request === 'string' &&
+      typeof (parsed as StoredKey).key === 'string'
+    ) {
+      return parsed as StoredKey
+    }
+  } catch {
+    // Not JSON at all. Same answer.
+  }
+  return undefined
 }
 
 /** Drop a form's key so the next submit is a new operation, not a replay. */

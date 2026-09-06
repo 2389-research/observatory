@@ -35,12 +35,14 @@ export function LaunchForm({ host, templates, onLaunched }: Props) {
 
   async function submit(e: FormEvent) {
     e.preventDefault()
-    // Minted here, stored, and dropped only once the daemon has accepted: a
-    // resubmit after a refresh or a failure carries the same key and lands as
-    // the daemon's replay instead of a second VM (SPEC §13.7).
-    const idempotencyKey = idempotencyKeyFor(FORM_KEY)
+    // Minted here against this exact body, stored, and dropped only once the
+    // daemon has accepted: a resubmit after a refresh or a failure carries the
+    // same key and lands as the daemon's replay instead of a second VM
+    // (SPEC §13.7), while an edited draft carries a new one.
+    const body = draftBody(draft)
+    const idempotencyKey = idempotencyKeyFor(FORM_KEY, body)
     const ok = await op.run(() =>
-      postJSON<CreateVMReply>('/vms', { ...draftBody(draft), idempotency_key: idempotencyKey }),
+      postJSON<CreateVMReply>('/vms', { ...body, idempotency_key: idempotencyKey }),
     )
     if (ok) {
       clearIdempotencyKey(FORM_KEY)
