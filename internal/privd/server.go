@@ -476,6 +476,10 @@ func (s *Server) handleReleaseVM(raw json.RawMessage) Response {
 
 // subnetHolder returns the vm_id already allocated cidr, or "" when it is free.
 //
+// An entry whose network was released carries an empty CIDR and cannot match
+// here, because handleAllocateNetwork refuses an empty cidr before reaching this
+// -- the same rule that keeps a released uid or CID from matching below.
+//
 // The scan includes the requesting VM and does not need to exclude it: the
 // caller reaches this only after ledger.get returned ErrNotExist, so the
 // requesting VM has no entry here to match.

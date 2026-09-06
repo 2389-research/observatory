@@ -101,6 +101,21 @@ func TestTwoDaemonsCollideLoudly(t *testing.T) {
 		VMID: secondID, UID: uid, GID: uid, CID: cid, StageDir: stageFor(secondID),
 	})
 	assertRefusedNaming(t, "daemon two start_vm", resp, firstID, "uid")
+
+	// A third daemon configured with its own jail_uid_base but the default
+	// cid_base -- the shape an operator produces by separating the uid ranges and
+	// believing that is enough. The uid claim now succeeds and the CID is the only
+	// thing left standing between two VMs on one vsock address.
+	const thirdID = "vm-daemon-three"
+
+	resp = call("allocate_network", privd.AllocateNetworkReq{VMID: thirdID, CIDR: "10.202.0.8/30"})
+	if !resp.OK {
+		t.Fatalf("daemon three allocate_network: cause=%q message=%q", resp.Cause, resp.Message)
+	}
+	resp = call("start_vm", privd.StartVMReq{
+		VMID: thirdID, UID: uid + 1, GID: uid + 1, CID: cid, StageDir: stageFor(thirdID),
+	})
+	assertRefusedNaming(t, "daemon three start_vm", resp, firstID, "cid")
 }
 
 // assertRefusedNaming fails unless resp is an invalid_state refusal whose message
