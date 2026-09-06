@@ -27,22 +27,24 @@ need_docker() {
     docker info >/dev/null 2>&1 || die "cannot talk to the docker daemon; is it running, and is this user in the docker group?"
 }
 
-# tag_for prints the image tag for the current checkout. A dirty tree tags as
-# such: an image built from uncommitted work must not claim a revision.
-tag_for() {
-    if ! git -C "$REPO" rev-parse HEAD >/dev/null 2>&1; then
-        echo "$IMAGE:local"
+# revision_for prints the commit this image is being built from, with "-dirty"
+# appended when the tree it was built from had uncommitted changes.
+#
+# The environment is asked before git, and that order is the point: this script
+# runs on the Linux host against a tree rsynced without .git (scripts/linux),
+# where git can answer nothing. That wrapper carries the answer across in
+# VMOBS_SOURCE_REVISION and VMOBS_SOURCE_DIRTY, the same pair the integration
+# gate binds its evidence to. With neither source the revision is "unknown" --
+# said out loud in the image, never guessed.
+revision_for() {
+    if [ -n "${VMOBS_SOURCE_REVISION:-}" ]; then
+        if [ "${VMOBS_SOURCE_DIRTY:-0}" = "1" ]; then
+            echo "$VMOBS_SOURCE_REVISION-dirty"
+        else
+            echo "$VMOBS_SOURCE_REVISION"
+        fi
         return
     fi
-    rev="$(git -C "$REPO" rev-parse --short HEAD)"
-    if [ -n "$(git -C "$REPO" status --porcelain)" ]; then
-        echo "$IMAGE:$rev-dirty"
-    else
-        echo "$IMAGE:$rev"
-    fi
-}
-
-revision_for() {
     if git -C "$REPO" rev-parse HEAD >/dev/null 2>&1; then
         rev="$(git -C "$REPO" rev-parse HEAD)"
         if [ -n "$(git -C "$REPO" status --porcelain)" ]; then
@@ -50,9 +52,20 @@ revision_for() {
         else
             echo "$rev"
         fi
-    else
-        echo "unknown"
+        return
     fi
+    echo "unknown"
+}
+
+# tag_for prints the image tag: the short revision, "-dirty" when the tree was
+# modified, and "local" when nothing can say what the tree is.
+tag_for() {
+    rev="$(revision_for)"
+    case "$rev" in
+        unknown) echo "$IMAGE:local" ;;
+        *-dirty) echo "$IMAGE:$(printf '%s' "${rev%-dirty}" | cut -c1-7)-dirty" ;;
+        *)       echo "$IMAGE:$(printf '%s' "$rev" | cut -c1-7)" ;;
+    esac
 }
 
 # require_guest_images fails before the docker build rather than 500 layers in.
@@ -89,7 +102,16 @@ preflight_host() {
   Check that KVM is enabled in firmware and the kvm module is loaded (lsmod | grep kvm)."
     [ -c /dev/net/tun ] || die "/dev/net/tun is missing — load the tun module (modprobe tun)."
     [ -f "$SECCOMP_PROFILE" ] || die "missing $SECCOMP_PROFILE"
-    [ -f "$REPO/deploy/apparmor/$APPARMOR_PROFILE" ] || die "missing deploy/apparmor/$APPARMOR_PROFILE"
+    # "unconfined" is docker's own reserved value for "no profile", so it names
+    # no file and the file check cannot pass for it. It is how the container comes
+    # up on a host where the profile has not been loaded yet -- loading it is root
+    # work, and root work is a step an operator takes deliberately. It drops the
+    # mount confinement, so cmd_start says so out loud rather than letting a
+    # weaker boundary pass quietly for the shipped one.
+    case "$APPARMOR_PROFILE" in
+        unconfined) ;;
+        *) [ -f "$REPO/deploy/apparmor/$APPARMOR_PROFILE" ] || die "missing deploy/apparmor/$APPARMOR_PROFILE" ;;
+    esac
 }
 
 cmd_start() {
@@ -102,6 +124,9 @@ cmd_start() {
     fi
 
     note "starting $NAME from $tag"
+    if [ "$APPARMOR_PROFILE" = unconfined ]; then
+        note "WARNING: apparmor=unconfined — the jailer's mounts are not confined"
+    fi
     # --init: firecracker is daemonized by the jailer, so every VMM reparents to
     #   PID 1. Without a reaper they linger as zombies, and a zombie answers
     #   kill(pid, 0) — the runtime's liveness check would call a dead VM alive.
@@ -112,7 +137,11 @@ cmd_start() {
     #   §5 exactly: SYS_ADMIN for setns and the jailer's mounts, NET_ADMIN plus
     #   /dev/net/tun for tap and veth, the AppArmor profile for mount, the seccomp
     #   profile for pivot_root.
-    if ! docker run --detach --name "$NAME" \
+    # stderr is captured, stdout (the container id) discarded. A run that fails
+    # inside the OCI runtime still leaves the container in Created state, so it
+    # is removed here -- otherwise the next start reports "already exists" and
+    # buries the real reason.
+    if ! err="$(docker run --detach --name "$NAME" \
         --init \
         --network host \
         --cap-add SYS_ADMIN \
@@ -125,12 +154,11 @@ cmd_start() {
         --volume "$STATE_VOLUME:/var/lib/vmobs" \
         --volume "$RUNTIME_VOLUME:/srv/vmobs" \
         --restart no \
-        "$tag" >/dev/null 2>"$REPO/.vmobs-run-error"
+        "$tag" 2>&1 >/dev/null)"
     then
-        err="$(cat "$REPO/.vmobs-run-error" 2>/dev/null || true)"
-        rm -f "$REPO/.vmobs-run-error"
+        docker rm -f "$NAME" >/dev/null 2>&1 || true
         case "$err" in
-            *apparmor*|*AppArmor*|*"profile"*)
+            *apparmor*|*AppArmor*)
                 die "docker refused the AppArmor profile:
   $err
   Load it once, as root:
@@ -140,7 +168,6 @@ cmd_start() {
   $err" ;;
         esac
     fi
-    rm -f "$REPO/.vmobs-run-error"
     note "started; the API is at http://$LISTEN"
     note "follow it with: scripts/vmobs-container logs"
 }

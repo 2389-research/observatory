@@ -36,6 +36,30 @@ install -d -o root -g root -m 0755 /run/vmobs "$LEDGER"
 [ -d /srv/vmobs/stage ] || install -d -o "$VMOBS_UID" -g "$VMOBS_GID" -m 0755 /srv/vmobs/stage
 [ -d /srv/vmobs/jail ] || install -d -o root -g root -m 0755 /srv/vmobs/jail
 
+# vmobsd opens /dev/kvm itself, for the arch_kvm preflight, as uid 2389. The
+# device node keeps the host's ownership inside the container -- root and the
+# host's kvm gid -- and that gid has no name in this image, so setpriv
+# --init-groups has nothing in /etc/group to pick up and `docker run
+# --group-add` is discarded by --init-groups anyway. Name the gid here and put
+# the vmobs user in it. Without this the daemon serves with a failing preflight,
+# which takes the host out of service for every launch.
+if [ -c /dev/kvm ]; then
+    kvm_gid="$(stat -c %g /dev/kvm)"
+    # `|| true`: getent exits 2 when no group has that gid, and pipefail would
+    # make that the assignment's status and set -e would end the script here.
+    kvm_group="$(getent group "$kvm_gid" | cut -d: -f1 || true)"
+    if [ -z "$kvm_group" ]; then
+        kvm_group=host-kvm
+        groupadd --gid "$kvm_gid" "$kvm_group"
+    fi
+    if ! id -nG vmobs | tr ' ' '\n' | grep -qx "$kvm_group"; then
+        usermod -aG "$kvm_group" vmobs
+        log "added vmobs to $kvm_group (gid $kvm_gid) so the arch_kvm preflight can open /dev/kvm"
+    fi
+else
+    log "/dev/kvm is absent; the arch_kvm preflight will fail and every launch with it" >&2
+fi
+
 # The probe inside privd measures the jailer's privileged operations before it
 # serves, so a container missing a flag dies here with the flag named.
 log "starting vmobs-privd"

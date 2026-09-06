@@ -27,13 +27,18 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 
-COPY . .
+# Only what the three binaries compile from. web/ carries dist/, which
+# web/embed.go embeds; the guest images and the docs never enter this stage.
+COPY cmd/ ./cmd/
+COPY internal/ ./internal/
+COPY web/ ./web/
 
 # CGO off: modernc.org/sqlite is pure Go, so the binaries are static and the
 # runtime stage needs no toolchain. -buildvcs=false because the build context
 # carries no .git; the revision arrives as a build argument instead and is
 # recorded in the image below.
-RUN CGO_ENABLED=0 go build -trimpath -buildvcs=false -o /out/vmobsd ./cmd/vmobsd \
+RUN mkdir -p /out \
+ && CGO_ENABLED=0 go build -trimpath -buildvcs=false -o /out/vmobsd ./cmd/vmobsd \
  && CGO_ENABLED=0 go build -trimpath -buildvcs=false -o /out/vmobs-runner ./cmd/vmobs-runner \
  && CGO_ENABLED=0 go build -trimpath -buildvcs=false -o /out/vmobs-privd ./cmd/vmobs-privd
 
@@ -56,8 +61,8 @@ RUN set -eu; \
     j="$(find /tmp -name "jailer-$ver-x86_64" -type f)"; \
     echo "$want_fc  $fc" | sha256sum -c -; \
     echo "$want_j  $j"  | sha256sum -c -; \
-    install -m 0755 "$fc" /out/firecracker; \
-    install -m 0755 "$j"  /out/jailer
+    install -D -m 0755 "$fc" /out/firecracker; \
+    install -D -m 0755 "$j"  /out/jailer
 
 # ---------------------------------------------------------------------------
 # Stage 3: the appliance.

@@ -1,6 +1,9 @@
-# Build context for deploy/Dockerfile. Note what is NOT here: images/dist/ is
-# gitignored but must reach the build — the pinned guest kernel and root image
-# are baked into the appliance image and checked against runtime.lock.json.
+# Build context for deploy/Dockerfile.
+#
+# images/ is excluded and then two files are put back: the pinned guest kernel
+# and root image, which the appliance stage bakes in. Everything else under
+# images/ is build scratch -- an unpacked rootfs tree and its logs -- and
+# shipping it to the daemon costs a gigabyte per build for nothing.
 
 .git
 .github
@@ -11,8 +14,14 @@
 .kata.local.toml
 
 bin/
+docs/
+tests/
 web/node_modules/
 web/tsconfig.tsbuildinfo
+
+images
+!images/dist/vmlinux
+!images/dist/rootfs.ext4
 
 *.sqlite
 *.sqlite-wal
