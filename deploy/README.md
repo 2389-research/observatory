@@ -1,0 +1,191 @@
+# Running vmobs in a container
+
+`vmobs` launches Firecracker microVMs. That is a privileged job on any host, and
+a container does not change it: the same three kernel gates apply, and the
+container has to be given the same three things a bare-metal install has. This
+directory holds the narrow profiles that grant exactly those and nothing more,
+plus the image that carries the pinned binaries.
+
+Everything here runs from a checkout:
+
+    scripts/vmobs-container build
+    scripts/vmobs-container start
+    scripts/vmobs-container status
+    scripts/vmobs-container logs -f
+    scripts/vmobs-container stop
+
+There is no installer. Nothing in `start` writes to the host outside Docker's
+own storage; the single root step is loading the AppArmor profile, below, and
+you run it yourself.
+
+## Host prerequisites
+
+| Requirement | Why | Check |
+| --- | --- | --- |
+| Linux with KVM | Firecracker is a KVM VMM | `test -c /dev/kvm` |
+| `/dev/net/tun` | one tap device per VM | `test -c /dev/net/tun`, else `modprobe tun` |
+| Docker with AppArmor enabled | the profile below has to load | `docker info \| grep apparmor` |
+| x86-64 | the lock pins `firecracker-<ver>-x86_64` | `uname -m` |
+| The guest kernel and root image | baked into the image | `ls images/dist/` |
+
+`scripts/vmobs-container start` checks the first two and refuses with the fix
+named. It does not check the rest, because Docker's own error is clearer.
+
+### The guest images
+
+`images/dist/vmlinux` and `images/dist/rootfs.ext4` are not in the checkout —
+they are built, and their digests are pinned in `runtime.lock.json`:
+
+    bash images/build-all.sh
+
+That needs Docker and a kernel build toolchain, and it takes a while. The
+appliance build copies both into the image and verifies all four pinned digests
+(firecracker, jailer, kernel, root image) in the final stage, so a build that
+succeeds cannot be shipping bytes nobody pinned.
+
+### The AppArmor profile — the one root command
+
+    sudo apparmor_parser -r -W deploy/apparmor/vmobs-jailer
+
+Once per host, and again whenever the profile changes. Without it `docker run`
+fails with a profile-not-found error and the script tells you this command.
+
+The profile is Docker's own `docker-default` template with one substitution.
+`docker-default` carries a blanket `deny mount,`, and an AppArmor `deny`
+overrides every allow regardless of order, so no amount of capability grants
+gets past it. In its place:
+
+    mount options=(rw, rslave) -> /,
+    mount options=(rw, rbind) /srv/vmobs/jail/** -> /srv/vmobs/jail/**,
+    pivot_root /srv/vmobs/jail/firecracker/*/root/,
+
+Three rules for the three things the jailer does: make its mount namespace
+slave, bind the chroot, pivot into it. Every other mount stays denied.
+
+## What `start` passes, and why
+
+    --init                     reap the daemonized VMMs
+    --network host             the API binds loopback; see below
+    --cap-add SYS_ADMIN        setns, and the jailer's mounts
+    --cap-add NET_ADMIN        tap and veth
+    --device /dev/kvm          the VMM
+    --device /dev/net/tun      the tap devices
+    --security-opt apparmor=vmobs-jailer
+    --security-opt seccomp=deploy/seccomp/vmobs-jailer.json
+    --tmpfs /run               privd's ledger lives for one privd
+    -v vmobs-state:/var/lib/vmobs
+    -v vmobs-runtime:/srv/vmobs
+
+The three gates, in the order the kernel applies them, are measured in
+`docs/design/container-boundary.md` §5. Short version:
+
+- **Capabilities.** `CAP_SYS_ADMIN` for `setns` and the jailer's mount work,
+  `CAP_NET_ADMIN` plus `/dev/net/tun` for the tap and veth pair.
+- **AppArmor.** `docker-default` denies `mount` outright; the profile above
+  replaces that with the three rules the jailer needs.
+- **Seccomp.** Docker's default profile does not list `pivot_root` in any allow
+  group, so it returns EPERM even with `CAP_SYS_ADMIN`.
+  `deploy/seccomp/vmobs-jailer.json` is Docker's default with `pivot_root`
+  added to the group already gated on `CAP_SYS_ADMIN` — the group that carries
+  `mount`, `setns`, `unshare` and `move_mount`. Nothing else differs.
+
+`vmobs-privd` measures all three at startup, in a throwaway mount and network
+namespace, before it binds its socket. A container missing one of these flags
+dies immediately naming the flag, instead of failing four stages into a launch
+after admission, network allocation and staging — which reads like a bug in
+vmobs and is not one.
+
+### `--init`
+
+The jailer daemonizes each Firecracker, so every VMM reparents to PID 1. With no
+reaper they stay as zombies, and a zombie answers `kill(pid, 0)` — the runtime's
+liveness check would call a dead VM alive.
+
+### `--network host`, and what it costs
+
+`server.mode: loopback_only` means the API binds `127.0.0.1` and is reachable
+only from this host; `config.Validate` refuses a non-loopback bind in that mode,
+and refuses to serve beyond loopback without TLS and authentication. Publishing
+a port from a bridge network would put an unauthenticated API on the host's
+external interfaces, so the container shares the host's network namespace
+instead and the mode's promise stays literally true.
+
+The cost, stated plainly: each VM's `veth-<id>` and its network namespace are
+created in the host's network namespace, not in one of the container's own. They
+are the same interfaces a bare-metal install creates, cleaned up by the same
+stop path, but `docker rm` is not what removes them — a VM deleted through the
+API is. Stopping the container with VMs still running leaves their interfaces
+behind; delete the VMs first.
+
+## Two processes in one container
+
+`vmobs-privd` runs as root and holds the capabilities that launch a VM.
+`vmobsd` — the process that talks to the network — runs as uid 2389 and has
+none of them. That split is the product's security boundary, so the entrypoint
+starts both rather than collapsing them to satisfy a one-process-per-container
+convention.
+
+`deploy/entrypoint.sh` exits as soon as either one does. A live daemon with a
+dead privd serves an API that refuses every launch.
+
+## State
+
+Two volumes, and they hold different things:
+
+- `vmobs-state` → `/var/lib/vmobs`: the SQLite database, artifacts, the
+  credential store. This is the data worth keeping.
+- `vmobs-runtime` → `/srv/vmobs`: staging directories and the jailer's chroots.
+  Scratch, recreated per VM.
+
+`/run` is a tmpfs on purpose. privd's ledger records which jail uid, guest CID
+and subnet each VM holds, and its lifetime is one privd instance — the same
+thing systemd's `RuntimeDirectory=` gives it on bare metal. An entry that
+outlived its privd would hold a slot no VM is using and the next launch would be
+refused as a collision, so the entrypoint clears it at start too.
+
+`stop` keeps both volumes. To discard them:
+
+    docker volume rm vmobs-state vmobs-runtime
+
+## Authentication
+
+The shipped config runs with `require_authentication: false`, which is legal
+only because the API is loopback-bound: the boundary is the host ACL. To require
+a credential, mount a config with `auth.require_authentication: true` and mint
+the first operator:
+
+    scripts/vmobs-container init-auth -username local_operator -password-stdin
+
+## Your own config
+
+The image never rewrites `/etc/vmobs/config.yaml`. Mount yours over it:
+
+    docker run ... -v /path/to/config.yaml:/etc/vmobs/config.yaml:ro ...
+
+Keep the paths: `/opt/vmobs/runtime.lock.json`, `/run/vmobs/privd.sock`,
+`/var/lib/vmobs`, `/srv/vmobs`, `/etc/vmobs/templates` are where the image puts
+things.
+
+## Provenance
+
+The image records the revision it was built from at `/opt/vmobs/SOURCE_REVISION`
+and in the `org.opencontainers.image.revision` label; `status` prints it. A
+build from a dirty tree is tagged and labelled `-dirty`, because an image built
+from uncommitted work must not claim a commit.
+
+Both base images are pinned by digest. The runtime base is the same Ubuntu
+digest `runtime.lock.json` pins for the guest root image.
+
+## When it does not work
+
+`scripts/vmobs-container logs` first — privd's probe failure names the missing
+flag. Then:
+
+| Symptom | Cause |
+| --- | --- |
+| `profile "vmobs-jailer" not found` | load the profile: `sudo apparmor_parser -r -W deploy/apparmor/vmobs-jailer` |
+| probe fails at `pivot_root` with EPERM | the seccomp profile is not being passed |
+| probe fails at any step with EACCES | the AppArmor profile is not being applied |
+| probe fails at `tap_create` with ENOENT | `--device /dev/net/tun` missing, or the module is not loaded |
+| probe fails with EPERM elsewhere | `--cap-add SYS_ADMIN` missing |
+| launches fail as a slot collision | a stale ledger; `/run` must be a tmpfs |

@@ -36,6 +36,13 @@ func applyProcessUmask() int {
 }
 
 func main() {
+	// The probe child re-enters this binary inside its own mount and network
+	// namespaces. Dispatched before flag parsing so its argv is never mistaken
+	// for an operator's, and never the other way round.
+	if dir, ok := privd.JailProbeChildArgs(os.Args[1:]); ok {
+		os.Exit(privd.RunJailProbeChild(dir, os.Stdout, os.Stderr))
+	}
+
 	flags, err := parseFlags(os.Args[1:])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "vmobs-privd: %v\n", err)
@@ -43,6 +50,14 @@ func main() {
 	}
 
 	applyProcessUmask()
+
+	// Measure the privileged operations the jailer performs before agreeing to
+	// serve. A container missing one flag would otherwise take a launch through
+	// admission, network allocation and staging before failing inside the
+	// jailer, and the operator would read that as a bug in vmobs.
+	if err := privd.ProbeJailSyscalls(); err != nil {
+		log.Fatalf("vmobs-privd: %v", err)
+	}
 
 	// Own the socket path and the ledger directory before touching either, and
 	// clear the stale socket a previous run left only once that hold proves

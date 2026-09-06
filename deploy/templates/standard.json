@@ -1,0 +1,7 @@
+{
+  "template_id": "standard",
+  "description": "Standard vmobs VM: the pinned guest kernel and root image from runtime.lock.json",
+  "guest_privilege_profiles": ["unprivileged"],
+  "sensors": ["fanotify"],
+  "protocol_versions": {"guestd": "1"}
+}

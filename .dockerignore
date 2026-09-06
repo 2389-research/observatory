@@ -1,0 +1,21 @@
+# Build context for deploy/Dockerfile. Note what is NOT here: images/dist/ is
+# gitignored but must reach the build — the pinned guest kernel and root image
+# are baked into the appliance image and checked against runtime.lock.json.
+
+.git
+.github
+.private-journal
+.superpowers
+.roborev
+.kata.toml
+.kata.local.toml
+
+bin/
+web/node_modules/
+web/tsconfig.tsbuildinfo
+
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+coverage.out
+.DS_Store
