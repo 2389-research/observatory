@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1388,6 +1389,14 @@ func TestM1aGate(t *testing.T) {
 	fmt.Fprintf(&evidence, "# paths.runtime: %s\n", daemon.runtimeDir)
 	fmt.Fprintf(&evidence, "# paths.state: %s\n", daemon.stateDir)
 
+	// One immutable record per acceptance row, bound to the revision, the
+	// binaries and the pinned artifacts that produced it (SPEC §17.2).
+	rec := newGateRecorder(t, "m1a", repoRoot, map[string]string{
+		"vmobsd":       daemonBin,
+		"vmobs-runner": runnerBin,
+		"gate_test":    os.Args[0],
+	})
+
 	// ── Subtest 1: Doctor pass ─────────────────────────────────────────────────
 	// GET /host/status → preflight.overall = "pass"
 	t.Run("doctor_pass", func(t *testing.T) {
@@ -1413,6 +1422,11 @@ func TestM1aGate(t *testing.T) {
 		if !rtAvail {
 			t.Errorf("runtime.available = false, reason: %v", rt["reason"])
 		}
+		// Not an acceptance row of its own: it is the host condition under which
+		// every row below ran, so it travels in each record's manifest.
+		rec.hostFact("preflight_overall", overall)
+		rec.hostFact("runtime_available", strconv.FormatBool(rtAvail))
+
 		evidenceSubtest(t, &evidence, "1_doctor_pass", fmt.Sprintf(
 			"GET /host/status: status=%d overall=%q runtime.available=%v",
 			status, overall, rtAvail,
@@ -1422,7 +1436,7 @@ func TestM1aGate(t *testing.T) {
 	// ── Subtest 2: AT-001 refusal ──────────────────────────────────────────────
 	// Second daemon with nonexistent privd socket → POST /vms refused with typed
 	// error naming "guest_channel" in its cause or details.
-	t.Run("at001_privd_refusal", func(t *testing.T) {
+	rec.row(t, &evidence, "AT-001", "at001_privd_refusal", func(t *testing.T, _ *rowEvidence) {
 		// Build dirs for the bad daemon without calling startDaemon (which uses the
 		// real privd socket — we want a daemon that uses /nonexistent/privd.sock).
 		badStateDir := filepath.Join(t.TempDir(), "bad-state")
@@ -1720,7 +1734,7 @@ performance_targets:
 	// create/start request (SPEC §14): it launches the VM, so there is no separate
 	// start action to issue.
 	var vmAID, vmBID string
-	t.Run("two_real_vms", func(t *testing.T) {
+	rec.row(t, &evidence, "AT-004", "two_real_vms", func(t *testing.T, row *rowEvidence) {
 		// No disposeSubtestVMs here on purpose: both VMs are meant to outlive this
 		// subtest. at011 owns vmA's disposal; vmB stays live to the end of the run so
 		// at011 can show A's stop left it alone, and the daemon teardown disposes it.
@@ -1794,6 +1808,10 @@ performance_targets:
 			cidBStr = fmt.Sprintf("cid=%d", mB.CID)
 		}
 
+		row.notMeasured("cgroup membership of each VMM (AT-004 names it; this row checks uid, cid and netns)")
+		row.notMeasured("jailer socket ownership (AT-004 names it; this row checks the pinned root image digest)")
+		row.says("two jailed VMs booted with distinct uid, cid and netns, both channels established")
+
 		evidenceSubtest(t, &evidence, "3_two_real_vms", fmt.Sprintf(
 			"vmA=%s %s %s netns=%s channel_established=true\nvmB=%s %s %s netns=%s channel_established=true\nroot_image sha256=%s reported by /host/status and vmA",
 			vmAID, uidAStr, cidAStr, nsA,
@@ -1803,7 +1821,7 @@ performance_targets:
 	})
 
 	// ── Subtest 4: AT-011 — graceful stop A while B lives ─────────────────────
-	t.Run("at011_graceful_stop", func(t *testing.T) {
+	rec.row(t, &evidence, "AT-011", "at011_graceful_stop", func(t *testing.T, row *rowEvidence) {
 		if vmAID == "" || vmBID == "" {
 			t.Skip("skipping: prior subtest did not produce vmAID/vmBID")
 		}
@@ -1937,6 +1955,10 @@ performance_targets:
 			t.Errorf("AT-011: vmB state = %q after vmA delete, want running", bStateAfter)
 		}
 
+		row.observedTerminal(fmt.Sprintf("vmm pid %d starttime %s (vm %s)", mA.VMMPID, mA.VMMStart, vmAID), "exited")
+		row.notMeasured("host inventory before and after (AT-018 makes that comparison; this row proves one stop)")
+		row.says("vmA stopped gracefully and its VMM left /proc; vmB stayed running through the stop and the delete")
+
 		evidenceSubtest(t, &evidence, "4_at011_graceful_stop", fmt.Sprintf(
 			"vmA stopped graceful_stop=%v; vmA vmm pid %d starttime %s gone from /proc=verified; "+
 				"host reserved %s -> %s (released %.0f MiB %.0f vcpu, vmA charged %.0f MiB %.0f vcpu; disk unchanged, a stop keeps it); "+
@@ -1948,7 +1970,7 @@ performance_targets:
 	})
 
 	// ── Subtest 5: AT-006 — idempotent replay + conflict ──────────────────────
-	t.Run("at006_idempotency", func(t *testing.T) {
+	rec.row(t, &evidence, "AT-006", "at006_idempotency", func(t *testing.T, _ *rowEvidence) {
 		daemon.disposeSubtestVMs(t)
 		iKey := fmt.Sprintf("m1a-gate-at006-%d", os.Getpid())
 		status1, body1 := daemon.apiPost(t, "/vms", map[string]any{
@@ -2019,7 +2041,7 @@ performance_targets:
 	})
 
 	// ── Subtest 6: AT-009 — four VMs with established channels ────────────────
-	t.Run("at009_four_concurrent_vms", func(t *testing.T) {
+	rec.row(t, &evidence, "AT-009", "at009_four_concurrent_vms", func(t *testing.T, _ *rowEvidence) {
 		// Creation IS the simultaneous launch AT-009 requires: POST /vms is the
 		// create/start request (SPEC §14) and drives the VM all the way to running,
 		// so four concurrent creates are four concurrent launches. One goroutine
@@ -2093,9 +2115,13 @@ performance_targets:
 	})
 
 	// ── Subtest 7: AT-018 — resource leak check ────────────────────────────────
-	t.Run("at018_no_resource_leaks", func(t *testing.T) {
+	rec.row(t, &evidence, "AT-018", "at018_no_resource_leaks", func(t *testing.T, row *rowEvidence) {
 		daemon.disposeSubtestVMs(t)
 		baseline := captureBaseline(t, daemon.stateDir, daemon.runtimeDir)
+		// This is the row that claims the host came back: its record carries both
+		// inventories and the terminal state of the VMM the force-delete killed.
+		row.claimsCleanup()
+		row.observedBefore(baseline)
 
 		for cycle := 0; cycle < 5; cycle++ {
 			id := daemon.createVM(t, fmt.Sprintf("at018-cycle-%d", cycle))
@@ -2184,6 +2210,7 @@ performance_targets:
 				t.Errorf("AT-018 force-delete: released %s, want %s (host reserved before=%s, after=%s)",
 					freed, charge, before, after)
 			}
+			row.observedTerminal(fmt.Sprintf("vmm pid %d starttime %s (vm %s, force-deleted)", mF.VMMPID, mF.VMMStart, id), "exited")
 			forceEvidence = fmt.Sprintf(
 				"force-delete vm=%s: vmm pid %d starttime %s gone from /proc=verified; "+
 					"host reserved %s -> %s (released %s, vm charged %s)",
@@ -2239,6 +2266,9 @@ performance_targets:
 				baseline.StageDirEntries, after.StageDirEntries, after.StageDirEntries-baseline.StageDirEntries)
 		}
 
+		row.observedAfter(after)
+		row.says("five graceful cycles and one force-delete returned all six host observables to baseline")
+
 		evidenceSubtest(t, &evidence, "7_at018_resource_leaks", fmt.Sprintf(
 			"baseline: netns=%d veth=%d jail=%d fc_procs=%d state_entries=%d stage_entries=%d\n"+
 				"after 5 graceful cycles + 1 force-delete: netns=%d veth=%d jail=%d fc_procs=%d state_entries=%d stage_entries=%d\n"+
@@ -2261,7 +2291,7 @@ performance_targets:
 	// ── Subtest 8: AT-007 — running not before channel_established ────────────
 	// For one VM: its running-transition timestamp must NOT be earlier than its
 	// guest.channel_established event timestamp. Both from the API.
-	t.Run("at007_ordering", func(t *testing.T) {
+	rec.row(t, &evidence, "AT-007", "at007_ordering", func(t *testing.T, _ *rowEvidence) {
 		daemon.disposeSubtestVMs(t)
 		vmID := daemon.createVM(t, "at007-order")
 
@@ -2350,6 +2380,8 @@ performance_targets:
 			vmID, runningAt, chanAt, runningNotBeforeChannel,
 		))
 	})
+
+	evidence.WriteString(rec.finish(t))
 
 	// Write evidence file (only when the gate actually ran).
 	evidencePath := filepath.Join(repoRoot, evidenceDir, fmt.Sprintf("m1a-gate-%s.txt", hostname))

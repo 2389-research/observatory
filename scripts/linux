@@ -10,4 +10,11 @@ cd "$(dirname "$0")/.."
 # P-rule: macOS openrsync does not honor ':- .gitignore' for --delete protection; protect remote build artifacts explicitly.
 rsync -az --delete --exclude .git --exclude .superpowers \
   --filter=':- .gitignore' --filter='P images/dist/' ./ "$HOST:$DEST/"
-exec ssh "$HOST" "cd '$DEST' && $*"
+# The remote copy arrives without .git, so a gate running there cannot ask git
+# which revision it is testing. Carry the answer across; the gate refuses to
+# record real-host evidence it cannot bind to a revision
+# (tests/integration/evidence_record_test.go).
+revision=$(git rev-parse HEAD)
+dirty=0
+if [ -n "$(git status --porcelain)" ]; then dirty=1; fi
+exec ssh "$HOST" "cd '$DEST' && env VMOBS_SOURCE_REVISION='$revision' VMOBS_SOURCE_DIRTY='$dirty' $*"
