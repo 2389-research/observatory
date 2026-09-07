@@ -173,6 +173,32 @@ Host kernel drift: aibox03 runs host kernel 6.8 (observed 6.8.0-138 at L0 close)
 
 ## Session log
 
+- 2026-09-07 (CI image build — PR #1 open, blocked on publishing the guest images)
+  - `.github/workflows/image.yml` builds `deploy/Dockerfile` and pushes to
+    `ghcr.io/2389-research/observatory`. Every action pinned to a commit SHA;
+    a pull request builds and stops, because the job holds `packages: write`.
+  - It fetches the guest images rather than building them. Measured on aibox03:
+    the kernel build is not reproducible — no `KBUILD_BUILD_TIMESTAMP`, no
+    `SOURCE_DATE_EPOCH`, an unpinned apt toolchain, a random container hostname
+    and a `.version` counter, all four visible in the banner. A rebuild cannot
+    match the pin and `images/lock-pins.sh` exits 1 on the difference, rightly.
+    Recorded in gotchas.md.
+  - `tests/deploy/workflow_test.go`: four properties, nine mutations, all dead.
+    The first version of that suite let "remove both `docker push` lines" live,
+    because `docker login` in the same step satisfied the counter — the two
+    verbs are counted separately now.
+  - Run 34152153144 failed at "Fetch the pinned guest images", exactly as
+    designed: `runtime.lock.json` pins no URLs. `scripts/publish-guest-images
+    --tag <T>` fills them in and is the whole remaining blocker.
+  - Ruling: publish the artifacts rather than teach CI to build them — the bytes
+    cannot be recreated, so a release is both the install path and their only
+    backup. Cost if wrong: a 1.5 GiB public release under 2389-research that
+    would have to be deleted. Verified the two digests on aibox03 match the lock
+    exactly before proposing it.
+  - Still owed: `sudo sh deploy/install-apparmor.sh` on aibox03; no LICENSE;
+    `compose.yaml` still defaults to `vmobs:latest` rather than ghcr.io; the
+    repo has no gate workflow at all (nothing runs `scripts/check` on a PR).
+
 - 2026-08-31 (session 1, compactions: 1) — Docs package agent-interface revision landed on `agent-ergonomics` (spec + acceptance + schemas + check.py, 46/46). Then P0+P1 built on `build-foundation` (branched off agent-ergonomics). Next: P2 situation/attention.
 - 2026-08-31 (session 2, compactions: 2) — Correction: session 1 logged P1 "done" before its commits existed. Now true: five commits on `build-foundation` land events/store/api/config/daemon/CLI; `scripts/check` fully green (gofmt, vet, golangci-lint via new `.golangci.yml`, go test, docs check); real-usage smoke passed (daemon on loopback, CLI exit codes 0/1/2/3 verified). Branch not pushed — merge is Doctor Biz's call. Next: P2 situation/attention.
 - 2026-08-31 (session 2 cont., compactions: 3) — P2 done on `build-foundation` (5 commits): registry kinds attention.raised/queue_overflow + annotation.created; `internal/redact` (policy rp1, applied to annotations and attention summaries before persistence); store attention queue (collapse by class+vm, durable idempotent ack, overflow refuses non-critical with a queue_overflow event, never refuses critical) + annotations (immutable, event+row in one tx) + engine cursors (advance in the raise's tx — crash cannot re-raise); `internal/situation` engine (lazy fold on read, telemetry_degraded only, active set = enabled∩implemented); API /situation (+since, byte-bound sheds head), /attention (+ack with rendered-at-serve ack action), /annotations (author assigned at boundary, client author refused); CLI situation/attention/attention-ack with --json parity. `scripts/check` fully green. Branch not pushed. Next: P3 (VM registry, operations, admission, runtime interface + fake runtime, lifecycle events).

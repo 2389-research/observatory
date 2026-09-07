@@ -711,3 +711,25 @@ which appears nowhere as a MAC: it is the EUI-64 suffix of three IPv6 addresses,
 where `00:11:22:33:44:55` becomes `…:211:22ff:fe33:4455`. Every address in both
 files is synthetic now. Renumber a captured fixture by what it *contains*, not
 by the field that made you look at it.
+
+## The guest kernel build is not reproducible, so the pinned bytes have one copy
+
+`images/kernel/build.sh` sets neither `KBUILD_BUILD_TIMESTAMP` nor
+`SOURCE_DATE_EPOCH`, and installs its toolchain with an unpinned `apt-get`.
+The banner in the vmlinux `runtime.lock.json` pins reads:
+
+    Linux version 6.1.186 (root@86c79b11d7c2) (gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1)
+    13.3.0, GNU ld ...) #2 SMP PREEMPT_DYNAMIC Tue Sep  1 14:43:49 UTC 2026
+
+Four components of that string vary between builds: the build container's
+random hostname, the toolchain version apt happened to serve, the `.version`
+counter, and the timestamp. So a rebuild produces a different sha256,
+`images/lock-pins.sh` compares it against the pin and exits 1, and it is right
+to — the lock is what an installer verifies its download against.
+
+Two consequences. CI cannot build the guest images; it can only fetch them
+(`.github/workflows/image.yml` does exactly that, and says why). And the bytes
+matching the current pins exist in exactly one place, `~/vmobs-build/images/dist/`
+on the host that built them — publishing them to a release is also their only
+backup. Repinning is the way to move to different bytes:
+`bash images/build-all.sh --repin`, then commit the lock.
