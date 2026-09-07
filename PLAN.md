@@ -173,7 +173,7 @@ Host kernel drift: aibox03 runs host kernel 6.8 (observed 6.8.0-138 at L0 close)
 
 ## Session log
 
-- 2026-09-07 (CI image build — PR #1 open, blocked on publishing the guest images)
+- 2026-09-07 (CI image build — merged, guest images published, ghcr image live)
   - `.github/workflows/image.yml` builds `deploy/Dockerfile` and pushes to
     `ghcr.io/2389-research/observatory`. Every action pinned to a commit SHA;
     a pull request builds and stops, because the job holds `packages: write`.
@@ -188,15 +188,31 @@ Host kernel drift: aibox03 runs host kernel 6.8 (observed 6.8.0-138 at L0 close)
     because `docker login` in the same step satisfied the counter — the two
     verbs are counted separately now.
   - Run 34152153144 failed at "Fetch the pinned guest images", exactly as
-    designed: `runtime.lock.json` pins no URLs. `scripts/publish-guest-images
-    --tag <T>` fills them in and is the whole remaining blocker.
+    designed: `runtime.lock.json` pins no URLs. Publishing them cleared it.
+  - `scripts/publish-guest-images --tag guest-images-6.1.186` ran for the first
+    time — its upload path had never touched a real release. It worked: both
+    digests checked before upload, GitHub's own recorded digest cross-checked
+    against the pin after, and the lock rewritten last. Unauthenticated range
+    requests against both URLs answer 206.
+  - Measured end to end on the runner: fetch 28s for 1.5 GiB, build 90s, image
+    1.78 GB. PR run built and skipped the push; the main run pushed
+    `ghcr.io/2389-research/observatory:{b5dc779,latest}`. The package inherited
+    the repo's public visibility, and an anonymous GHCR token pulls the manifest
+    — 18 layers, 384 MB compressed.
+  - `compose.yaml` now defaults to that image. `vmobs:latest` had no dot before
+    the first slash, so Docker resolved it to docker.io/library/vmobs — someone
+    else's name, and empty. A fresh anonymous clone resolves the file to the
+    published image, with both volumes explicitly named so the clone directory
+    cannot rename them.
   - Ruling: publish the artifacts rather than teach CI to build them — the bytes
     cannot be recreated, so a release is both the install path and their only
     backup. Cost if wrong: a 1.5 GiB public release under 2389-research that
     would have to be deleted. Verified the two digests on aibox03 match the lock
     exactly before proposing it.
-  - Still owed: `sudo sh deploy/install-apparmor.sh` on aibox03; no LICENSE;
-    `compose.yaml` still defaults to `vmobs:latest` rather than ghcr.io; the
+  - Not verified: nobody has run `docker compose up -d` from a clean host
+    against the published image. Everything above proves it resolves and pulls,
+    not that it boots a VM.
+  - Still owed: `sudo sh deploy/install-apparmor.sh` on aibox03; no LICENSE; the
     repo has no gate workflow at all (nothing runs `scripts/check` on a PR).
 
 - 2026-08-31 (session 1, compactions: 1) — Docs package agent-interface revision landed on `agent-ergonomics` (spec + acceptance + schemas + check.py, 46/46). Then P0+P1 built on `build-foundation` (branched off agent-ergonomics). Next: P2 situation/attention.
