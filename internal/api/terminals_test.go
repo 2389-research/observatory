@@ -14,13 +14,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/2389-research/observatory-v2/internal/api"
-	"github.com/2389-research/observatory-v2/internal/events"
-	"github.com/2389-research/observatory-v2/internal/guest/proto"
-	"github.com/2389-research/observatory-v2/internal/runner"
-	"github.com/2389-research/observatory-v2/internal/runtime/runtimetest"
-	"github.com/2389-research/observatory-v2/internal/store"
-	"github.com/2389-research/observatory-v2/internal/terminal"
+	"github.com/2389-research/observatory/internal/api"
+	"github.com/2389-research/observatory/internal/events"
+	"github.com/2389-research/observatory/internal/guest/proto"
+	"github.com/2389-research/observatory/internal/runner"
+	"github.com/2389-research/observatory/internal/runtime/runtimetest"
+	"github.com/2389-research/observatory/internal/store"
+	"github.com/2389-research/observatory/internal/terminal"
 )
 
 const testBootID = "3f2a1c4e-0000-4000-8000-00000000beef"

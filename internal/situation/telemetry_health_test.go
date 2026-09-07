@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/2389-research/observatory-v2/internal/events"
-	"github.com/2389-research/observatory-v2/internal/situation"
-	"github.com/2389-research/observatory-v2/internal/store"
+	"github.com/2389-research/observatory/internal/events"
+	"github.com/2389-research/observatory/internal/situation"
+	"github.com/2389-research/observatory/internal/store"
 )
 
 // runningVM creates a VM and walks it to running on a fresh boot, through the

@@ -16,9 +16,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/2389-research/observatory-v2/internal/privd"
-	"github.com/2389-research/observatory-v2/internal/runner"
-	"github.com/2389-research/observatory-v2/internal/runtime"
+	"github.com/2389-research/observatory/internal/privd"
+	"github.com/2389-research/observatory/internal/runner"
+	"github.com/2389-research/observatory/internal/runtime"
 )
 
 // scriptedPrivd is a privdClient whose signal and release answers the test

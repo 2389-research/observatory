@@ -14,7 +14,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/2389-research/observatory-v2/internal/privd"
+	"github.com/2389-research/observatory/internal/privd"
 )
 
 // TestMsgRoundTrip verifies WriteMsg/ReadMsg preserve a Request intact.

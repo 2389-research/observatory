@@ -9,7 +9,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/2389-research/observatory-v2/internal/runner"
+	"github.com/2389-research/observatory/internal/runner"
 )
 
 func main() {

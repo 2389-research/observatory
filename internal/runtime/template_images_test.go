@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/2389-research/observatory-v2/internal/runtime"
+	"github.com/2389-research/observatory/internal/runtime"
 )
 
 // TestLoadTemplatesRefusesImagePaths: `kernel_image` and `root_image` were

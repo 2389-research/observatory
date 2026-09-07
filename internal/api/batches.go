@@ -11,9 +11,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/2389-research/observatory-v2/internal/auth"
-	"github.com/2389-research/observatory-v2/internal/runtime"
-	"github.com/2389-research/observatory-v2/internal/store"
+	"github.com/2389-research/observatory/internal/auth"
+	"github.com/2389-research/observatory/internal/runtime"
+	"github.com/2389-research/observatory/internal/store"
 )
 
 // DefaultMaxBatchSize is SPEC §6.3's published batch size limit, applied when

@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/2389-research/observatory-v2/internal/durable"
+	"github.com/2389-research/observatory/internal/durable"
 )
 
 const (

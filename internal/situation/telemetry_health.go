@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/2389-research/observatory-v2/internal/events"
-	"github.com/2389-research/observatory-v2/internal/store"
+	"github.com/2389-research/observatory/internal/events"
+	"github.com/2389-research/observatory/internal/store"
 )
 
 // The telemetry health vocabulary (SPEC §133). A VM may be running while its

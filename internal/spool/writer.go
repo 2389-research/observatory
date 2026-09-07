@@ -14,7 +14,7 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/2389-research/observatory-v2/internal/events"
+	"github.com/2389-research/observatory/internal/events"
 )
 
 // crc32cTable is the Castagnoli polynomial table used for all CRC32C operations.

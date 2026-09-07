@@ -12,7 +12,7 @@ import (
 	"os/exec"
 	"testing"
 
-	"github.com/2389-research/observatory-v2/internal/network"
+	"github.com/2389-research/observatory/internal/network"
 )
 
 const (

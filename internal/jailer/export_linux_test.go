@@ -8,7 +8,7 @@ package jailer
 import (
 	"context"
 
-	"github.com/2389-research/observatory-v2/internal/runner"
+	"github.com/2389-research/observatory/internal/runner"
 )
 
 // PollRunnerPhase is the exported test alias of pollRunnerPhase.

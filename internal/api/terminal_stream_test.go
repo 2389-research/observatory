@@ -16,10 +16,10 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/2389-research/observatory-v2/internal/api"
-	"github.com/2389-research/observatory-v2/internal/guest/proto"
-	"github.com/2389-research/observatory-v2/internal/store"
-	"github.com/2389-research/observatory-v2/internal/terminal"
+	"github.com/2389-research/observatory/internal/api"
+	"github.com/2389-research/observatory/internal/guest/proto"
+	"github.com/2389-research/observatory/internal/store"
+	"github.com/2389-research/observatory/internal/terminal"
 )
 
 // newStreamServer is newTerminalServer with a chosen in-flight ceiling, so a

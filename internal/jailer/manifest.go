@@ -9,7 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/2389-research/observatory-v2/internal/durable"
+	"github.com/2389-research/observatory/internal/durable"
 )
 
 // ErrSlotsExhausted is returned by allocateSlot when no free slot < MaxSlots exists.

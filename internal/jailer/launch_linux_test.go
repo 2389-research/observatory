@@ -23,15 +23,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/2389-research/observatory-v2/internal/guest"
-	"github.com/2389-research/observatory-v2/internal/guest/proto"
-	"github.com/2389-research/observatory-v2/internal/jailer"
-	"github.com/2389-research/observatory-v2/internal/lock"
-	"github.com/2389-research/observatory-v2/internal/network"
-	"github.com/2389-research/observatory-v2/internal/preflight"
-	"github.com/2389-research/observatory-v2/internal/privd"
-	"github.com/2389-research/observatory-v2/internal/runtime"
-	"github.com/2389-research/observatory-v2/internal/spool"
+	"github.com/2389-research/observatory/internal/guest"
+	"github.com/2389-research/observatory/internal/guest/proto"
+	"github.com/2389-research/observatory/internal/jailer"
+	"github.com/2389-research/observatory/internal/lock"
+	"github.com/2389-research/observatory/internal/network"
+	"github.com/2389-research/observatory/internal/preflight"
+	"github.com/2389-research/observatory/internal/privd"
+	"github.com/2389-research/observatory/internal/runtime"
+	"github.com/2389-research/observatory/internal/spool"
 )
 
 // runnerBin is built once by TestMain and shared across all tests.
@@ -51,7 +51,7 @@ func TestMain(m *testing.M) {
 	}
 	bin := filepath.Join(tmp, "vmobs-runner")
 	cmd := exec.Command("go", "build", "-o", bin,
-		"github.com/2389-research/observatory-v2/cmd/vmobs-runner")
+		"github.com/2389-research/observatory/cmd/vmobs-runner")
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {

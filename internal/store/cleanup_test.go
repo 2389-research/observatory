@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/2389-research/observatory-v2/internal/store"
+	"github.com/2389-research/observatory/internal/store"
 )
 
 // TestCleanupFailureReasonIsRedacted: the reason is whatever the runtime said,

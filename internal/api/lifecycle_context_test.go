@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/2389-research/observatory-v2/internal/runtime/runtimetest"
-	"github.com/2389-research/observatory-v2/internal/store"
+	"github.com/2389-research/observatory/internal/runtime/runtimetest"
+	"github.com/2389-research/observatory/internal/store"
 )
 
 // mutationCtxServer builds the template server with middleware that publishes

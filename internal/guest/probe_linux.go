@@ -12,7 +12,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/2389-research/observatory-v2/internal/guest/proto"
+	"github.com/2389-research/observatory/internal/guest/proto"
 )
 
 func probeCapabilities() proto.CapabilityManifest {

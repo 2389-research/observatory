@@ -20,13 +20,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/2389-research/observatory-v2/internal/durable"
-	"github.com/2389-research/observatory-v2/internal/guest"
-	"github.com/2389-research/observatory-v2/internal/guest/proto"
-	"github.com/2389-research/observatory-v2/internal/lock"
-	"github.com/2389-research/observatory-v2/internal/privd"
-	"github.com/2389-research/observatory-v2/internal/runner"
-	"github.com/2389-research/observatory-v2/internal/runtime"
+	"github.com/2389-research/observatory/internal/durable"
+	"github.com/2389-research/observatory/internal/guest"
+	"github.com/2389-research/observatory/internal/guest/proto"
+	"github.com/2389-research/observatory/internal/lock"
+	"github.com/2389-research/observatory/internal/privd"
+	"github.com/2389-research/observatory/internal/runner"
+	"github.com/2389-research/observatory/internal/runtime"
 )
 
 // readyTimeout and readyBackoff mirror the M0 fixture's values (D5: the jailer package

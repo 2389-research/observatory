@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/2389-research/observatory-v2/internal/redact"
+	"github.com/2389-research/observatory/internal/redact"
 )
 
 // RecordCleanupFailure appends vm.cleanup_failed for a cleanup that did not

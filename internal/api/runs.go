@@ -9,9 +9,9 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/2389-research/observatory-v2/internal/auth"
-	"github.com/2389-research/observatory-v2/internal/runtime"
-	"github.com/2389-research/observatory-v2/internal/store"
+	"github.com/2389-research/observatory/internal/auth"
+	"github.com/2389-research/observatory/internal/runtime"
+	"github.com/2389-research/observatory/internal/store"
 )
 
 // RunGoalMaxBytes is the wire-layer limit on run goal text. 2048 bytes matches

@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/2389-research/observatory-v2/internal/redact"
+	"github.com/2389-research/observatory/internal/redact"
 )
 
 // Annotation bounds. The spec requires bounded text without naming a number;

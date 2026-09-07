@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/2389-research/observatory-v2/internal/runtime"
-	"github.com/2389-research/observatory-v2/internal/runtime/runtimetest"
+	"github.com/2389-research/observatory/internal/runtime"
+	"github.com/2389-research/observatory/internal/runtime/runtimetest"
 )
 
 // fakeStopMethod maps an action name to the Runtime method the fake records it

@@ -15,7 +15,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/2389-research/observatory-v2/internal/runner"
+	"github.com/2389-research/observatory/internal/runner"
 )
 
 // State is a session's lifecycle position as the host knows it.

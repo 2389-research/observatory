@@ -9,10 +9,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/2389-research/observatory-v2/internal/network"
-	"github.com/2389-research/observatory-v2/internal/preflight"
-	"github.com/2389-research/observatory-v2/internal/privd"
-	"github.com/2389-research/observatory-v2/internal/runtime"
+	"github.com/2389-research/observatory/internal/network"
+	"github.com/2389-research/observatory/internal/preflight"
+	"github.com/2389-research/observatory/internal/privd"
+	"github.com/2389-research/observatory/internal/runtime"
 )
 
 // privdClient is the package-local interface consumed by the adapter.

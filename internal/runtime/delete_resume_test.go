@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/2389-research/observatory-v2/internal/runtime/runtimetest"
+	"github.com/2389-research/observatory/internal/runtime/runtimetest"
 )
 
 // TestDeleteResumesARowParkedAtDeleting is the operator-facing half of the

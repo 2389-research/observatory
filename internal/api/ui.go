@@ -8,7 +8,7 @@ import (
 	"path"
 	"strings"
 
-	"github.com/2389-research/observatory-v2/web"
+	"github.com/2389-research/observatory/web"
 )
 
 // uiPrefix is the single path the UI owns. Keeping it to one prefix is what

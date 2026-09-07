@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/2389-research/observatory-v2/internal/events"
-	"github.com/2389-research/observatory-v2/internal/store"
+	"github.com/2389-research/observatory/internal/events"
+	"github.com/2389-research/observatory/internal/store"
 )
 
 // breakTelemetry provokes a real telemetry health event via the ingest

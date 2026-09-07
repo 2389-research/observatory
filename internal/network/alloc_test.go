@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/2389-research/observatory-v2/internal/network"
+	"github.com/2389-research/observatory/internal/network"
 )
 
 // Both fixtures are captured `ip -json route` output from the aibox03 host: the

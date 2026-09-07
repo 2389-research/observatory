@@ -1,4 +1,4 @@
-module github.com/2389-research/observatory-v2
+module github.com/2389-research/observatory
 
 go 1.26.6
 

@@ -170,8 +170,8 @@ func TestDoctorFollowsTheLockWhileRunning(t *testing.T) {
 	}
 
 	repoRoot := findRepoRoot(t)
-	daemonBin := buildBinary(t, "github.com/2389-research/observatory-v2/cmd/vmobsd")
-	runnerBin := buildBinary(t, "github.com/2389-research/observatory-v2/cmd/vmobs-runner")
+	daemonBin := buildBinary(t, "github.com/2389-research/observatory/cmd/vmobsd")
+	runnerBin := buildBinary(t, "github.com/2389-research/observatory/cmd/vmobs-runner")
 
 	root := lockOnlyRoot(t, repoRoot)
 	lockPath := filepath.Join(root, "runtime.lock.json")

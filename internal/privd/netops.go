@@ -14,7 +14,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/2389-research/observatory-v2/internal/network"
+	"github.com/2389-research/observatory/internal/network"
 )
 
 // RealOpsCfg holds the configuration for RealOps.

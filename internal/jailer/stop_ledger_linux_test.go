@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/2389-research/observatory-v2/internal/runtime"
+	"github.com/2389-research/observatory/internal/runtime"
 )
 
 // stopAdapterWithPrivd is stopOnlyAdapter with a jail base and a privd of the

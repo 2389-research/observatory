@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/2389-research/observatory-v2/internal/guest/proto"
-	"github.com/2389-research/observatory-v2/internal/runner"
+	"github.com/2389-research/observatory/internal/guest/proto"
+	"github.com/2389-research/observatory/internal/runner"
 )
 
 // runnerSocket is where the jailer puts a VM's runner control socket. The

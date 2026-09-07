@@ -5,7 +5,7 @@
 
 package runner
 
-import "github.com/2389-research/observatory-v2/internal/privd"
+import "github.com/2389-research/observatory/internal/privd"
 
 // PIDAliveFunc is the function used to check VMM process liveness.
 // Set to privd.PIDAlive on linux; replaceable in tests.

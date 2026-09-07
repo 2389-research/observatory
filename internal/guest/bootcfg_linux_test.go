@@ -12,7 +12,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/2389-research/observatory-v2/internal/guest"
+	"github.com/2389-research/observatory/internal/guest"
 )
 
 // Under systemd, /run is a fresh tmpfs: nothing pre-creates guestd's config

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/2389-research/observatory-v2/internal/terminal"
+	"github.com/2389-research/observatory/internal/terminal"
 )
 
 // testClock is a hand-wound clock. The lease's grace window is 30 seconds in

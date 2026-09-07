@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/2389-research/observatory-v2/internal/privd"
+	"github.com/2389-research/observatory/internal/privd"
 )
 
 // errUnreachablePrivd is what a verb answers when no root daemon is behind the

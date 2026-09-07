@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/2389-research/observatory-v2/internal/durable"
+	"github.com/2389-research/observatory/internal/durable"
 )
 
 // VMEntry holds the per-VM identity and resource record stored in the ledger.

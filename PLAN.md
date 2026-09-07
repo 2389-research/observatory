@@ -520,7 +520,7 @@ Host kernel drift: aibox03 runs host kernel 6.8 (observed 6.8.0-138 at L0 close)
   **Bug found and fixed: two shipped files still told operators to run `apparmor_parser -r`** — `scripts/vmobs-container`'s docker-refused branch and the profile's own header — weeks after `install-apparmor.sh` existed. `tests/deploy/remedy_lines_test.go` fails on any shipped file whose runnable text starts with `apparmor_parser`.
   **Bug found on aibox03, invisible on the Mac: `publish-guest-images` checked for `gh` before checking anything local**, so on a host without `gh` three of its four refusal tests failed for a reason none of them was testing. Reordered: `jq`, then the artifact digests, then `gh` where the upload uses it. The suite now passes on both platforms.
   **Handoff — still one root command, still not run:** `ssh -t "$VMOBS_LINUX_HOST" 'cd vmobs-build && sudo sh deploy/install-apparmor.sh'`. Measured 2026-09-07: `/etc/apparmor.d/vmobs-jailer` does not exist on aibox03. The profile there is loaded, not installed; one reboot removes it and the appliance will not start.
-  **Blocked on Doctor Biz:** there is no git remote and `2389-research/observatory-v2` does not exist on GitHub, so nothing can be published yet. The fetch path works the moment it does.
+  **Blocked on Doctor Biz:** there is no git remote and `2389-research/observatory` does not exist on GitHub, so nothing can be published yet. The fetch path works the moment it does.
   `env -u GOROOT mise exec -- ./scripts/check` green, all ten gates; `uv run docs/validation/check.py` 47/47; `tests/deploy` green on macOS and aibox03.
   Open katas unchanged: `7p8m` (P2, half fixed), `3tn6` (P3, pending review).
 

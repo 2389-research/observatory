@@ -13,12 +13,12 @@ import (
 	"os/exec"
 	"path/filepath"
 
-	"github.com/2389-research/observatory-v2/internal/config"
-	"github.com/2389-research/observatory-v2/internal/jailer"
-	"github.com/2389-research/observatory-v2/internal/network"
-	"github.com/2389-research/observatory-v2/internal/preflight"
-	"github.com/2389-research/observatory-v2/internal/privd"
-	"github.com/2389-research/observatory-v2/internal/runtime"
+	"github.com/2389-research/observatory/internal/config"
+	"github.com/2389-research/observatory/internal/jailer"
+	"github.com/2389-research/observatory/internal/network"
+	"github.com/2389-research/observatory/internal/preflight"
+	"github.com/2389-research/observatory/internal/privd"
+	"github.com/2389-research/observatory/internal/runtime"
 )
 
 // maxSlotsWiring is the MaxSlots constant for the jailer adapter. The allocator

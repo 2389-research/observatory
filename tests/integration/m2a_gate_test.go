@@ -88,8 +88,8 @@ func TestM2aGate(t *testing.T) {
 	}
 
 	repoRoot := findRepoRoot(t)
-	daemonBin := buildBinary(t, "github.com/2389-research/observatory-v2/cmd/vmobsd")
-	runnerBin := buildBinary(t, "github.com/2389-research/observatory-v2/cmd/vmobs-runner")
+	daemonBin := buildBinary(t, "github.com/2389-research/observatory/cmd/vmobsd")
+	runnerBin := buildBinary(t, "github.com/2389-research/observatory/cmd/vmobs-runner")
 
 	daemon := startDaemon(t, repoRoot, daemonBin, runnerBin, "m2a-primary",
 		withRequiredAuth(m1bOperator, m1bPassword))
@@ -431,8 +431,8 @@ func TestM2aGate(t *testing.T) {
 	// here is that the dead controller's runner is still executing that file —
 	// Linux answers ETXTBSY for a running executable opened for writing. Each
 	// buildBinary call answers a fresh temp dir, which is all it takes.
-	successorDaemonBin := buildBinary(t, "github.com/2389-research/observatory-v2/cmd/vmobsd")
-	successorRunnerBin := buildBinary(t, "github.com/2389-research/observatory-v2/cmd/vmobs-runner")
+	successorDaemonBin := buildBinary(t, "github.com/2389-research/observatory/cmd/vmobsd")
+	successorRunnerBin := buildBinary(t, "github.com/2389-research/observatory/cmd/vmobs-runner")
 	successor := startDaemon(t, repoRoot, successorDaemonBin, successorRunnerBin, "m2a-successor",
 		withRequiredAuth(m1bOperator, m1bPassword), withStateDir(daemon.stateDir))
 	// Teardown follows ownership: the VM belongs to whoever can still delete it.

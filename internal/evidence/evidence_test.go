@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/2389-research/observatory-v2/internal/evidence"
+	"github.com/2389-research/observatory/internal/evidence"
 )
 
 const (

@@ -135,7 +135,7 @@ VOLUME ["/var/lib/vmobs", "/srv/vmobs"]
 ARG SOURCE_REVISION=unknown
 RUN printf '%s\n' "$SOURCE_REVISION" > /opt/vmobs/SOURCE_REVISION
 LABEL org.opencontainers.image.title="vmobs appliance" \
-      org.opencontainers.image.source="https://github.com/2389-research/observatory-v2" \
+      org.opencontainers.image.source="https://github.com/2389-research/observatory" \
       org.opencontainers.image.revision="${SOURCE_REVISION}"
 
 # Root, because vmobs-privd is the process that holds the privileges. It drops to

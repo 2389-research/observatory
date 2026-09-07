@@ -16,9 +16,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/2389-research/observatory-v2/internal/config"
-	"github.com/2389-research/observatory-v2/internal/lock"
-	"github.com/2389-research/observatory-v2/internal/store"
+	"github.com/2389-research/observatory/internal/config"
+	"github.com/2389-research/observatory/internal/lock"
+	"github.com/2389-research/observatory/internal/store"
 )
 
 // CapacitySnapshot is the three-dimension capacity view served by /host/status

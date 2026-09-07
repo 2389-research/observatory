@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/2389-research/observatory-v2/internal/guest/telemetry"
+	"github.com/2389-research/observatory/internal/guest/telemetry"
 )
 
 func TestRingAssignsSeqAtEnqueue(t *testing.T) {

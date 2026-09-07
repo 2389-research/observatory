@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/2389-research/observatory-v2/internal/guest"
-	"github.com/2389-research/observatory-v2/internal/guest/proto"
+	"github.com/2389-research/observatory/internal/guest"
+	"github.com/2389-research/observatory/internal/guest/proto"
 )
 
 func readPush(t *testing.T, conn net.Conn) proto.TelemetryPush {

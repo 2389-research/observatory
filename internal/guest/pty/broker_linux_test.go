@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/2389-research/observatory-v2/internal/guest/pty"
+	"github.com/2389-research/observatory/internal/guest/pty"
 )
 
 // shell is the session program every test drives. §8.2 requires job control

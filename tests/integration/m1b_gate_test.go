@@ -25,7 +25,7 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/2389-research/observatory-v2/internal/auth"
+	"github.com/2389-research/observatory/internal/auth"
 )
 
 // The M1b gate runs with authentication required. AT-030's unauthenticated and
@@ -805,8 +805,8 @@ func TestM1bGate(t *testing.T) {
 	}
 
 	repoRoot := findRepoRoot(t)
-	daemonBin := buildBinary(t, "github.com/2389-research/observatory-v2/cmd/vmobsd")
-	runnerBin := buildBinary(t, "github.com/2389-research/observatory-v2/cmd/vmobs-runner")
+	daemonBin := buildBinary(t, "github.com/2389-research/observatory/cmd/vmobsd")
+	runnerBin := buildBinary(t, "github.com/2389-research/observatory/cmd/vmobs-runner")
 
 	daemon := startDaemon(t, repoRoot, daemonBin, runnerBin, "m1b-primary",
 		withRequiredAuth(m1bOperator, m1bPassword))

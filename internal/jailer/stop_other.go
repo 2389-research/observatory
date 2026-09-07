@@ -9,7 +9,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/2389-research/observatory-v2/internal/runtime"
+	"github.com/2389-research/observatory/internal/runtime"
 )
 
 // Stop is not supported on non-Linux hosts.

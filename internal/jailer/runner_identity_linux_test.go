@@ -11,7 +11,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/2389-research/observatory-v2/internal/privd"
+	"github.com/2389-research/observatory/internal/privd"
 )
 
 // TestReadRunnerStartMatchesProc: the value the spawn sites record must be the same

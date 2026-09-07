@@ -11,7 +11,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/2389-research/observatory-v2/internal/lock"
+	"github.com/2389-research/observatory/internal/lock"
 )
 
 // --- fc_binaries ---
