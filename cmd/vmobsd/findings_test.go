@@ -5,7 +5,7 @@ package main
 import (
 	"testing"
 
-	"github.com/2389-research/observatory-v2/internal/jailer"
+	"github.com/2389-research/observatory/internal/jailer"
 )
 
 func TestClassifyFindingsCarriesAnUnclassifiableVMAndItsReason(t *testing.T) {

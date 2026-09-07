@@ -11,7 +11,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/2389-research/observatory-v2/internal/guest/proto"
+	"github.com/2389-research/observatory/internal/guest/proto"
 )
 
 // CtlRequest is one command on the runner control socket. It is exported

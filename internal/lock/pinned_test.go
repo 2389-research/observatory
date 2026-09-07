@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/2389-research/observatory-v2/internal/lock"
+	"github.com/2389-research/observatory/internal/lock"
 )
 
 // pinnedFixture builds a trusted root holding images/dist/<name> and returns

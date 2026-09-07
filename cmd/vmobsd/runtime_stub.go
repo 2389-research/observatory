@@ -9,9 +9,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/2389-research/observatory-v2/internal/config"
-	"github.com/2389-research/observatory-v2/internal/preflight"
-	"github.com/2389-research/observatory-v2/internal/runtime"
+	"github.com/2389-research/observatory/internal/config"
+	"github.com/2389-research/observatory/internal/preflight"
+	"github.com/2389-research/observatory/internal/runtime"
 )
 
 // buildFirecrackerRuntime is unavailable on non-Linux platforms. Firecracker

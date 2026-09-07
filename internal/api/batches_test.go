@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/2389-research/observatory-v2/internal/api"
-	"github.com/2389-research/observatory-v2/internal/runtime"
+	"github.com/2389-research/observatory/internal/api"
+	"github.com/2389-research/observatory/internal/runtime"
 )
 
 // batchBody builds a valid minimal batch body for the named template.

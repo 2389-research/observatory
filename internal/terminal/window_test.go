@@ -5,7 +5,7 @@ package terminal_test
 import (
 	"testing"
 
-	"github.com/2389-research/observatory-v2/internal/terminal"
+	"github.com/2389-research/observatory/internal/terminal"
 )
 
 func TestWindowRefusesPastTheInflightBound(t *testing.T) {

@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/2389-research/observatory-v2/internal/lock"
-	"github.com/2389-research/observatory-v2/internal/runtime"
+	"github.com/2389-research/observatory/internal/lock"
+	"github.com/2389-research/observatory/internal/runtime"
 )
 
 // Call records one invocation of a runtime method.

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/2389-research/observatory-v2/internal/redact"
+	"github.com/2389-research/observatory/internal/redact"
 )
 
 func TestPolicyIDStable(t *testing.T) {

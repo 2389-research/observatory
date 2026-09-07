@@ -6,8 +6,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/2389-research/observatory-v2/internal/lock"
-	"github.com/2389-research/observatory-v2/internal/runtime/runtimetest"
+	"github.com/2389-research/observatory/internal/lock"
+	"github.com/2389-research/observatory/internal/runtime/runtimetest"
 )
 
 var errLaunchRefused = errors.New("firecracker: refused to start")

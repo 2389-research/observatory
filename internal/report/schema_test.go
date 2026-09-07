@@ -14,8 +14,8 @@ import (
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
-	"github.com/2389-research/observatory-v2/internal/report"
-	"github.com/2389-research/observatory-v2/internal/store"
+	"github.com/2389-research/observatory/internal/report"
+	"github.com/2389-research/observatory/internal/store"
 )
 
 func loadSchema(t *testing.T) *jsonschema.Schema {

@@ -12,10 +12,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/2389-research/observatory-v2/internal/auth"
-	"github.com/2389-research/observatory-v2/internal/lock"
-	"github.com/2389-research/observatory-v2/internal/runtime"
-	"github.com/2389-research/observatory-v2/internal/store"
+	"github.com/2389-research/observatory/internal/auth"
+	"github.com/2389-research/observatory/internal/lock"
+	"github.com/2389-research/observatory/internal/runtime"
+	"github.com/2389-research/observatory/internal/store"
 )
 
 // --- wire types ---

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/2389-research/observatory-v2/internal/redact"
-	"github.com/2389-research/observatory-v2/internal/store"
+	"github.com/2389-research/observatory/internal/redact"
+	"github.com/2389-research/observatory/internal/store"
 )
 
 func TestAnnotationCreateAndQueryByRef(t *testing.T) {

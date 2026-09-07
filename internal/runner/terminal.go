@@ -14,7 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/2389-research/observatory-v2/internal/guest/proto"
+	"github.com/2389-research/observatory/internal/guest/proto"
 )
 
 // streamPort is the guest vsock port carrying session byte streams. Control

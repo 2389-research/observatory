@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/2389-research/observatory-v2/internal/lock"
+	"github.com/2389-research/observatory/internal/lock"
 )
 
 // hashOf returns the SHA-256 hex digest of data.

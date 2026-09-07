@@ -6,8 +6,8 @@ import (
 	"fmt"
 	goruntime "runtime"
 
-	"github.com/2389-research/observatory-v2/internal/config"
-	"github.com/2389-research/observatory-v2/internal/store"
+	"github.com/2389-research/observatory/internal/config"
+	"github.com/2389-research/observatory/internal/store"
 )
 
 // HostResources are the raw measured totals of this host, probed once at

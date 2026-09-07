@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/2389-research/observatory-v2/internal/events"
+	"github.com/2389-research/observatory/internal/events"
 )
 
 // A reconnect must land in the same stream, or the guest's sequences fork and

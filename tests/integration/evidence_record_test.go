@@ -18,8 +18,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/2389-research/observatory-v2/internal/evidence"
-	"github.com/2389-research/observatory-v2/internal/lock"
+	"github.com/2389-research/observatory/internal/evidence"
+	"github.com/2389-research/observatory/internal/lock"
 )
 
 // gateRecorder turns each subtest of a real-host gate into one published

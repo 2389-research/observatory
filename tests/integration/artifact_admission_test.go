@@ -126,8 +126,8 @@ func TestArtifactAdmissionRejection(t *testing.T) {
 	}
 
 	repoRoot := findRepoRoot(t)
-	daemonBin := buildBinary(t, "github.com/2389-research/observatory-v2/cmd/vmobsd")
-	runnerBin := buildBinary(t, "github.com/2389-research/observatory-v2/cmd/vmobs-runner")
+	daemonBin := buildBinary(t, "github.com/2389-research/observatory/cmd/vmobsd")
+	runnerBin := buildBinary(t, "github.com/2389-research/observatory/cmd/vmobs-runner")
 
 	cases := []struct {
 		name string

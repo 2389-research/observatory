@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/2389-research/observatory-v2/internal/auth"
-	"github.com/2389-research/observatory-v2/internal/store"
+	"github.com/2389-research/observatory/internal/auth"
+	"github.com/2389-research/observatory/internal/store"
 )
 
 // wireAttention is the attention item exactly as SPEC §12.7 shows it. Count is

@@ -213,7 +213,7 @@ start() {
 
   echo
   echo "demo: up. From your laptop:"
-  echo "  ssh -N -L $PORT:127.0.0.1:$PORT harper@100.64.0.100"
+  echo "  ssh -N -L $PORT:127.0.0.1:$PORT $(id -un)@$(hostname)"
   echo "  open http://127.0.0.1:$PORT/ui/"
   echo "demo: log at $LOG"
 }

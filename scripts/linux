@@ -1,9 +1,15 @@
 #!/bin/sh
-# ABOUTME: Runs a command on the Linux KVM host (aibox03) against a rsynced
-# ABOUTME: copy of this working tree. Usage: scripts/linux 'go test ./...'
+# ABOUTME: Runs a command on the Linux KVM host named by VMOBS_LINUX_HOST,
+# ABOUTME: against a rsynced copy of this tree. Usage: scripts/linux 'go test ./...'
 # VMOBS_LINUX_DIR must not contain quotes or shell metacharacters (interpolated into the remote command).
 set -eu
-HOST="${VMOBS_LINUX_HOST:-harper@100.64.0.100}"
+HOST="${VMOBS_LINUX_HOST:-}"
+[ -n "$HOST" ] || {
+  echo "scripts/linux: set VMOBS_LINUX_HOST to your Linux KVM host, e.g." >&2
+  echo "  VMOBS_LINUX_HOST=user@host scripts/linux 'go test ./...'" >&2
+  echo "  fish: set -gx VMOBS_LINUX_HOST user@host" >&2
+  exit 3
+}
 DEST="${VMOBS_LINUX_DIR:-vmobs-build}"
 [ $# -ge 1 ] || { echo "usage: scripts/linux '<command>'" >&2; exit 3; }
 cd "$(dirname "$0")/.."

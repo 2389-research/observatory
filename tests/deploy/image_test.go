@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/2389-research/observatory-v2/internal/config"
-	vmruntime "github.com/2389-research/observatory-v2/internal/runtime"
+	"github.com/2389-research/observatory/internal/config"
+	vmruntime "github.com/2389-research/observatory/internal/runtime"
 )
 
 const (

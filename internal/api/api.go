@@ -11,12 +11,12 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/2389-research/observatory-v2/internal/events"
-	"github.com/2389-research/observatory-v2/internal/preflight"
-	"github.com/2389-research/observatory-v2/internal/runtime"
-	"github.com/2389-research/observatory-v2/internal/situation"
-	"github.com/2389-research/observatory-v2/internal/store"
-	"github.com/2389-research/observatory-v2/internal/terminal"
+	"github.com/2389-research/observatory/internal/events"
+	"github.com/2389-research/observatory/internal/preflight"
+	"github.com/2389-research/observatory/internal/runtime"
+	"github.com/2389-research/observatory/internal/situation"
+	"github.com/2389-research/observatory/internal/store"
+	"github.com/2389-research/observatory/internal/terminal"
 )
 
 // PreflightFunc is the preflight runner hook type. nil means no preflight

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/2389-research/observatory-v2/internal/network"
+	"github.com/2389-research/observatory/internal/network"
 )
 
 func TestNamespaceName(t *testing.T) {

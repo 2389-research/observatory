@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/2389-research/observatory-v2/internal/guest/proto"
-	"github.com/2389-research/observatory-v2/internal/runner"
-	"github.com/2389-research/observatory-v2/internal/terminal"
+	"github.com/2389-research/observatory/internal/guest/proto"
+	"github.com/2389-research/observatory/internal/runner"
+	"github.com/2389-research/observatory/internal/terminal"
 )
 
 // fakeGuest stands in for the guest end of a session byte stream. It is not a

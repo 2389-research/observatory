@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/2389-research/observatory-v2/internal/runner"
-	"github.com/2389-research/observatory-v2/internal/runtime"
+	"github.com/2389-research/observatory/internal/runner"
+	"github.com/2389-research/observatory/internal/runtime"
 )
 
 // TestDoStopWarnsOnCtlTransportFailure: when the ctl exchange itself fails the

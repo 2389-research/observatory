@@ -14,8 +14,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/2389-research/observatory-v2/internal/events"
-	"github.com/2389-research/observatory-v2/internal/guest/proto"
+	"github.com/2389-research/observatory/internal/events"
+	"github.com/2389-research/observatory/internal/guest/proto"
 )
 
 // telemetrySensor names the producer on every envelope this loop spools. The

@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/2389-research/observatory-v2/internal/lock"
+	"github.com/2389-research/observatory/internal/lock"
 )
 
 // testImageLock is a lock with both image entries filled in. Only the image

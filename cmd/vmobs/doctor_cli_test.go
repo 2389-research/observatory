@@ -10,13 +10,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/2389-research/observatory-v2/internal/api"
-	"github.com/2389-research/observatory-v2/internal/config"
-	"github.com/2389-research/observatory-v2/internal/preflight"
-	"github.com/2389-research/observatory-v2/internal/runtime"
-	"github.com/2389-research/observatory-v2/internal/runtime/runtimetest"
-	"github.com/2389-research/observatory-v2/internal/situation"
-	"github.com/2389-research/observatory-v2/internal/store"
+	"github.com/2389-research/observatory/internal/api"
+	"github.com/2389-research/observatory/internal/config"
+	"github.com/2389-research/observatory/internal/preflight"
+	"github.com/2389-research/observatory/internal/runtime"
+	"github.com/2389-research/observatory/internal/runtime/runtimetest"
+	"github.com/2389-research/observatory/internal/situation"
+	"github.com/2389-research/observatory/internal/store"
 )
 
 // newDoctorServer builds a test server with the preflight hook wired.

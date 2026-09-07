@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/2389-research/observatory-v2/internal/events"
+	"github.com/2389-research/observatory/internal/events"
 )
 
 // CountEventsForReport counts events in the run window (after < event_id <= until)

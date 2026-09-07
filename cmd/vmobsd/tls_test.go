@@ -21,8 +21,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/2389-research/observatory-v2/internal/auth"
-	"github.com/2389-research/observatory-v2/internal/config"
+	"github.com/2389-research/observatory/internal/auth"
+	"github.com/2389-research/observatory/internal/config"
 )
 
 // writeSelfSigned generates a P-256 ECDSA key and a self-signed x509

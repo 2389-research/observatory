@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/2389-research/observatory-v2/internal/api"
+	"github.com/2389-research/observatory/internal/api"
 )
 
 // TestOperationEventNamesTheOperationTheAPIPublishes pins the identifier in an

@@ -3,7 +3,7 @@
 package guest
 
 import (
-	"github.com/2389-research/observatory-v2/internal/guest/proto"
+	"github.com/2389-research/observatory/internal/guest/proto"
 )
 
 // capabilitySchema is the fixed schema identifier for the manifest.

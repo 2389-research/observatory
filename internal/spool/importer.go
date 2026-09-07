@@ -13,8 +13,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/2389-research/observatory-v2/internal/events"
-	"github.com/2389-research/observatory-v2/internal/store"
+	"github.com/2389-research/observatory/internal/events"
+	"github.com/2389-research/observatory/internal/store"
 )
 
 // ImportStats reports what one ImportOnce cycle did.

@@ -7,7 +7,7 @@ package guest
 import (
 	"runtime"
 
-	"github.com/2389-research/observatory-v2/internal/guest/proto"
+	"github.com/2389-research/observatory/internal/guest/proto"
 )
 
 // allFeatureIDs lists every capability this system knows how to probe on linux.

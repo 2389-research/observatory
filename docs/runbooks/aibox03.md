@@ -2,20 +2,20 @@
 
 ## Host facts
 
-- **Address:** `harper@100.64.0.100` (Tailscale)
+- **Address:** private; named by `VMOBS_LINUX_HOST` (see below). Reached over Tailscale.
 - **Hardware:** bare metal, x86_64, Intel VT-x (`kvm_intel` loaded)
 - **OS:** Ubuntu 24.04.4 LTS, kernel 6.8.0-x-generic
 - **Resources:** 32 vCPUs, 62 GiB RAM, ~60 GiB free on `/`
 - **SSH:** key auth, `BatchMode` non-interactive
 - **Go:** 1.27.0 via mise
 - **Firecracker:** `v1.16.1` pinned in `runtime.lock.json`
-- **KVM device:** `/dev/kvm` (root:kvm 0660); after `setup.sh`, harper is in the `kvm` group
+- **KVM device:** `/dev/kvm` (root:kvm 0660); after `setup.sh`, the operator is in the `kvm` group
 
 ## Env vars
 
 | Var | Default | Purpose |
 |-----|---------|---------|
-| `VMOBS_LINUX_HOST` | `harper@100.64.0.100` | Override the SSH target for `scripts/linux` |
+| `VMOBS_LINUX_HOST` | none — required | SSH target for `scripts/linux`, e.g. `user@host`. The script exits 3 when it is unset. |
 | `VMOBS_LINUX_DIR` | `vmobs-build` | Remote working-tree path on the host |
 | `VMOBS_FIXTURE` | (unset) | Set to `1` inside tests that exercise the real fixture path |
 
@@ -28,27 +28,32 @@
 **This script requires password sudo and is run by the operator, not by any automation.**
 
 ```
-scripts/linux 'true'   # sync first
-ssh harper@100.64.0.100 'cd vmobs-build && sudo sh scripts/aibox03/setup.sh'
+scripts/linux 'true'                # sync first
+ssh "$VMOBS_LINUX_HOST" 'cd vmobs-build && sudo sh scripts/aibox03/setup.sh'
 ```
+
+Everything the script grants — group membership, the sudoers rule, the fixture
+directory owner — names the **operator**: the user who invoked `sudo`, read from
+`$SUDO_USER`. The script refuses to run when that is unset, so a bare root shell
+cannot silently grant the wrong account.
 
 What it does, step by step:
 
 1. **Installs host tools** — `jq` (used by setup.sh itself to parse `runtime.lock.json`) and `e2fsprogs` (for `mkfs.ext4` in Task 6 image builds).
 
-2. **KVM and fixture group** — adds `harper` to the `kvm` group so the jailer can open `/dev/kvm` without root. Creates group `vmobs-fixture` at fixed GID 36000. The GID is fixed (not `--system`) because the root helper validates gid arguments in the range [10000, 59999]; a `--system` group would land below 1000 and be rejected at `jail-start`.
+2. **KVM and fixture group** — adds the operator to the `kvm` group so the jailer can open `/dev/kvm` without root. Creates group `vmobs-fixture` at fixed GID 36000. The GID is fixed (not `--system`) because the root helper validates gid arguments in the range [10000, 59999]; a `--system` group would land below 1000 and be rejected at `jail-start`.
 
 3. **Firecracker and jailer** — reads `runtime.lock.json` from the rsynced tree, downloads the pinned tarball, verifies both binary SHA-256 hashes, installs to `/usr/local/bin/`. The lock is the single source of truth; setup.sh cannot install a version other than what is recorded there.
 
-4. **Root helper + sudoers** — installs `vmobs-root-helper` to `/usr/local/sbin/` (root-owned, 0755) and the sudoers fragment to `/etc/sudoers.d/vmobs-fixture`, granting `harper` passwordless sudo for exactly that path and nothing else. Runs `visudo -c` to verify the fragment before returning.
+4. **Root helper + sudoers** — installs `vmobs-root-helper` to `/usr/local/sbin/` (root-owned, 0755) and the sudoers fragment to `/etc/sudoers.d/vmobs-fixture`, granting the operator passwordless sudo for exactly that path and nothing else. The fragment on disk carries an `__OPERATOR__` placeholder; setup.sh substitutes the real name and runs `visudo -c` on the substituted copy before installing it.
 
-5. **Fixture directories** — creates `/srv/vmobs/fixture` (harper:vmobs-fixture 0775, harper-writable) and `/srv/vmobs/jail` (root:root 0755, root-only).
+5. **Fixture directories** — creates `/srv/vmobs/fixture` (operator:vmobs-fixture 0775, operator-writable) and `/srv/vmobs/jail` (root:root 0755, root-only).
 
 Re-login is required after setup.sh completes for group membership to take effect.
 
 ## Root-equivalence caveat (L0-R2)
 
-harper's existing `docker` group membership is already root-equivalent on this box, so the helper's marginal exposure is approximately zero. The narrow helper shape is still right because it is the pattern the product ships. `vmobs-root-helper` is replaced by `vmobs-privd` in M1.
+The operator's existing `docker` group membership is already root-equivalent on this box, so the helper's marginal exposure is approximately zero. The narrow helper shape is still right because it is the pattern the product ships. `vmobs-root-helper` is replaced by `vmobs-privd` in M1.
 
 ## `vmobs-root-helper` — verbs
 
@@ -80,8 +85,8 @@ Handles all root-required operations the non-root runner needs: `allocate_networ
 Re-running `setup.sh` is the full upgrade path:
 
 ```
-scripts/linux 'true'   # sync the latest tree to aibox03
-ssh -t harper@100.64.0.100 'cd vmobs-build && sudo sh scripts/aibox03/setup.sh'
+scripts/linux 'true'   # sync the latest tree to the host
+ssh -t "$VMOBS_LINUX_HOST" 'cd vmobs-build && sudo sh scripts/aibox03/setup.sh'
 ```
 
 setup.sh builds `cmd/vmobs-privd` on aibox03, installs the binary to `/usr/local/sbin/vmobs-privd`, writes `/etc/systemd/system/vmobs-privd.service` (with the operator's uid/gid substituted from `$SUDO_UID`/`$SUDO_GID`), and restarts the unit. The build step resolves `go` from root's PATH first; if absent, it falls back to the operator's mise-managed go under `/home/$SUDO_USER/.local/share/mise/installs/go/`.

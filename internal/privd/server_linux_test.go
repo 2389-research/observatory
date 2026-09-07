@@ -20,7 +20,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/2389-research/observatory-v2/internal/privd"
+	"github.com/2389-research/observatory/internal/privd"
 )
 
 // recordingBackend implements OpsBackend, capturing every call made by the server.

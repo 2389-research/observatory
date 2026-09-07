@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/2389-research/observatory-v2/internal/preflight"
+	"github.com/2389-research/observatory/internal/preflight"
 )
 
 // TestArchKVMHonest asserts the EITHER-real-outcome contract mandated by the

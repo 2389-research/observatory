@@ -15,8 +15,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/2389-research/observatory-v2/internal/auth"
-	"github.com/2389-research/observatory-v2/internal/events"
+	"github.com/2389-research/observatory/internal/auth"
+	"github.com/2389-research/observatory/internal/events"
 )
 
 // SessionCookieName is the cookie name used for browser sessions.

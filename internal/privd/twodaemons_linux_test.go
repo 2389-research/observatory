@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/2389-research/observatory-v2/internal/privd"
+	"github.com/2389-research/observatory/internal/privd"
 )
 
 // twoDaemonFixture starts one privd over a real socket and returns its path plus

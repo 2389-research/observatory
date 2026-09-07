@@ -10,8 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/2389-research/observatory-v2/internal/lock"
-	"github.com/2389-research/observatory-v2/internal/store"
+	"github.com/2389-research/observatory/internal/lock"
+	"github.com/2389-research/observatory/internal/store"
 )
 
 // ptr returns a pointer to v; used to set optional fields inline.

@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/2389-research/observatory-v2/internal/store"
+	"github.com/2389-research/observatory/internal/store"
 )
 
 func raiseInput(class string, vm *string) store.RaiseInput {

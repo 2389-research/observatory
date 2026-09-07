@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/2389-research/observatory-v2/internal/config"
+	"github.com/2389-research/observatory/internal/config"
 )
 
 const minimalConfig = `config_version: 1

@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/2389-research/observatory-v2/internal/events"
-	"github.com/2389-research/observatory-v2/internal/spool"
-	"github.com/2389-research/observatory-v2/internal/store"
+	"github.com/2389-research/observatory/internal/events"
+	"github.com/2389-research/observatory/internal/spool"
+	"github.com/2389-research/observatory/internal/store"
 )
 
 // openTestStore creates a real SQLite store in a temp file, returning it and a

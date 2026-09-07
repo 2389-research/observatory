@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/2389-research/observatory-v2/internal/events"
+	"github.com/2389-research/observatory/internal/events"
 )
 
 // makeEnvelopeInternal builds a minimal valid Envelope for white-box tests.

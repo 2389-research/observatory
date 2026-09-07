@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/2389-research/observatory-v2/internal/guest"
-	"github.com/2389-research/observatory-v2/internal/guest/proto"
+	"github.com/2389-research/observatory/internal/guest"
+	"github.com/2389-research/observatory/internal/guest/proto"
 )
 
 // makeTestAgent builds an Agent with a known token and a simple manifest.

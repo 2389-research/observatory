@@ -31,7 +31,7 @@ Copied from SPEC/CLAUDE.md; every task's requirements include these.
 
 ## Ground truth (verified 2026-09-01)
 
-- aibox03 = `harper@100.64.0.100`. Go 1.27.0 (mise), rsync, docker (harper in `docker` group). NOT installed: firecracker, jailer, jq. harper NOT in `kvm` group. `sudo` requires a password — nothing root-level runs non-interactively.
+- aibox03 = `$VMOBS_LINUX_HOST`. Go 1.27.0 (mise), rsync, docker (harper in `docker` group). NOT installed: firecracker, jailer, jq. harper NOT in `kvm` group. `sudo` requires a password — nothing root-level runs non-interactively.
 - `/dev/kvm` exists, `root:kvm` 0660. Kernel 6.8.0-138 (drifted from the 6.8.0-134 recorded in PLAN.md — doctor reads the tuple at runtime; recorded docs are never evidence).
 - 32 CPUs, 63 GiB free on `/`, x86_64.
 - The repo has no git remote. Code reaches aibox03 by rsync, not git push.
@@ -81,7 +81,7 @@ Copied from SPEC/CLAUDE.md; every task's requirements include these.
 # ABOUTME: Runs a command on the Linux KVM host (aibox03) against a rsynced
 # ABOUTME: copy of this working tree. Usage: scripts/linux 'go test ./...'
 set -eu
-HOST="${VMOBS_LINUX_HOST:-harper@100.64.0.100}"
+HOST="${VMOBS_LINUX_HOST:?set it to user@host}"
 DEST="${VMOBS_LINUX_DIR:-vmobs-build}"
 [ $# -ge 1 ] || { echo "usage: scripts/linux '<command>'" >&2; exit 3; }
 cd "$(dirname "$0")/.."
@@ -297,7 +297,7 @@ echo "setup complete: kvm+vmobs-fixture groups (re-login needed), firecracker $v
 
 ```
 scripts/linux 'true'   # sync first
-ssh harper@100.64.0.100 'cd vmobs-build && sudo sh scripts/aibox03/setup.sh'
+ssh "$VMOBS_LINUX_HOST" 'cd vmobs-build && sudo sh scripts/aibox03/setup.sh'
 ```
 
 - [ ] **Step 7: Validate scripts and docs**

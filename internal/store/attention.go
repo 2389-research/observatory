@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/2389-research/observatory-v2/internal/redact"
+	"github.com/2389-research/observatory/internal/redact"
 )
 
 // Severity has three levels only (SPEC §12.7): grade by whether and when the

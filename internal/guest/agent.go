@@ -13,9 +13,9 @@ import (
 	"os/exec"
 	"time"
 
-	"github.com/2389-research/observatory-v2/internal/guest/proto"
-	"github.com/2389-research/observatory-v2/internal/guest/pty"
-	"github.com/2389-research/observatory-v2/internal/guest/telemetry"
+	"github.com/2389-research/observatory/internal/guest/proto"
+	"github.com/2389-research/observatory/internal/guest/pty"
+	"github.com/2389-research/observatory/internal/guest/telemetry"
 )
 
 const (

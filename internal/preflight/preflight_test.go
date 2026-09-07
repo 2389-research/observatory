@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/2389-research/observatory-v2/internal/preflight"
+	"github.com/2389-research/observatory/internal/preflight"
 )
 
 // isLinux reports whether the current build target is Linux.

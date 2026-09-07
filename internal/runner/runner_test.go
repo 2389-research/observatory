@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/2389-research/observatory-v2/internal/runner"
+	"github.com/2389-research/observatory/internal/runner"
 )
 
 // shortSockDir creates a temp dir with a short path (avoids macOS sun_path limit).

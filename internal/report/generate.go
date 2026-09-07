@@ -11,8 +11,8 @@ import (
 	"sort"
 	"strconv"
 
-	"github.com/2389-research/observatory-v2/internal/events"
-	"github.com/2389-research/observatory-v2/internal/store"
+	"github.com/2389-research/observatory/internal/events"
+	"github.com/2389-research/observatory/internal/store"
 )
 
 // Generate builds a canonical run report from durable store records.

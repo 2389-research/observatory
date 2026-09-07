@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/2389-research/observatory-v2/internal/durable"
+	"github.com/2389-research/observatory/internal/durable"
 )
 
 // What these tests prove, and what they do not.

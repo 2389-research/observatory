@@ -13,9 +13,9 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/2389-research/observatory-v2/internal/auth"
-	"github.com/2389-research/observatory-v2/internal/events"
-	"github.com/2389-research/observatory-v2/internal/terminal"
+	"github.com/2389-research/observatory/internal/auth"
+	"github.com/2389-research/observatory/internal/events"
+	"github.com/2389-research/observatory/internal/terminal"
 )
 
 const (

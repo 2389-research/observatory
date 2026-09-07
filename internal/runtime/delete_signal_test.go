@@ -6,9 +6,9 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/2389-research/observatory-v2/internal/runtime"
-	"github.com/2389-research/observatory-v2/internal/runtime/runtimetest"
-	"github.com/2389-research/observatory-v2/internal/store"
+	"github.com/2389-research/observatory/internal/runtime"
+	"github.com/2389-research/observatory/internal/runtime/runtimetest"
+	"github.com/2389-research/observatory/internal/store"
 )
 
 // verbsSince returns the ordered method names the fake recorded against vmID

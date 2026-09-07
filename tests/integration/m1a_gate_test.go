@@ -27,8 +27,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/2389-research/observatory-v2/internal/auth"
-	"github.com/2389-research/observatory-v2/internal/lock"
+	"github.com/2389-research/observatory/internal/auth"
+	"github.com/2389-research/observatory/internal/lock"
 )
 
 // m1aPrivdSock is the socket path installed by scripts/aibox03/setup.sh.
@@ -1374,8 +1374,8 @@ func TestM1aGate(t *testing.T) {
 	repoRoot := findRepoRoot(t)
 
 	// Build vmobsd and vmobs-runner binaries (one build, shared by all subtests).
-	daemonBin := buildBinary(t, "github.com/2389-research/observatory-v2/cmd/vmobsd")
-	runnerBin := buildBinary(t, "github.com/2389-research/observatory-v2/cmd/vmobs-runner")
+	daemonBin := buildBinary(t, "github.com/2389-research/observatory/cmd/vmobsd")
+	runnerBin := buildBinary(t, "github.com/2389-research/observatory/cmd/vmobs-runner")
 
 	// Start the primary daemon (runtime.mode=firecracker).
 	daemon := startDaemon(t, repoRoot, daemonBin, runnerBin, "m1a-primary")

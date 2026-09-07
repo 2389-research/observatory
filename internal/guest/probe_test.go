@@ -7,7 +7,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/2389-research/observatory-v2/internal/guest"
+	"github.com/2389-research/observatory/internal/guest"
 )
 
 func TestProbeCapabilitiesReturnsManifest(t *testing.T) {

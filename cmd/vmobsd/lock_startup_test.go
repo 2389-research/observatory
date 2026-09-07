@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/2389-research/observatory-v2/internal/config"
-	"github.com/2389-research/observatory-v2/internal/lock"
+	"github.com/2389-research/observatory/internal/config"
+	"github.com/2389-research/observatory/internal/lock"
 )
 
 // writeLockFile serializes l to dir/runtime.lock.json and returns the path.

@@ -305,7 +305,7 @@ aibox03 builds the daemon and the runner from the working tree but never
 replaces that binary, so a privd change can go green through the whole gate
 while the gate is exercising a binary from days ago — check its mtime against
 your commits. Reinstalling needs root, so it is a Doctor Biz handoff:
-`ssh -t harper@100.64.0.100 'cd vmobs-build && sudo sh scripts/aibox03/setup.sh'`.
+`ssh -t "$VMOBS_LINUX_HOST" 'cd vmobs-build && sudo sh scripts/aibox03/setup.sh'`.
 
 **privd derives the stage directory, so two configs have to name the same
 path.** `StartVM` opens `<StageRoot>/<vm_id>` against its own `--stage-root`
