@@ -21,7 +21,7 @@
     "config_sha256": "dfe94fab204973d13c8bdaebe32153f1ea62cb7301a30a1a24f13ae61036b780",
     "vmlinux_sha256": "b606768652b4ecf5d8a2651d258e70d8f1892fca9f74c6b5fc2c9031a50ddd31",
     "vmlinux_path": "images/dist/vmlinux",
-    "vmlinux_url": ""
+    "vmlinux_url": "https://github.com/2389-research/observatory/releases/download/guest-images-6.1.186/vmlinux"
   },
   "root_image": {
     "sha256": "0d970896b92f5b4000f45074ba56a754efd1e43992c4ac0826275aaaa6d08858",
@@ -29,7 +29,7 @@
     "base_image_ref": "ubuntu@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517",
     "apt_snapshot": "20260820T000000Z",
     "inventory": "images/dist/rootfs.inventory.txt",
-    "url": ""
+    "url": "https://github.com/2389-research/observatory/releases/download/guest-images-6.1.186/rootfs.ext4"
   },
   "guestd": {
     "protocol_version": 1
