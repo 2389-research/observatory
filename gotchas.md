@@ -733,3 +733,24 @@ matching the current pins exist in exactly one place, `~/vmobs-build/images/dist
 on the host that built them — publishing them to a release is also their only
 backup. Repinning is the way to move to different bytes:
 `bash images/build-all.sh --repin`, then commit the lock.
+
+## setup.sh reinstates host privd, so stopping the service does not stick
+
+`scripts/aibox03/setup.sh` stops `vmobs-privd.service`, installs the binary and
+starts it again — the whole cycle inside one second, which reads in the journal
+like the service never went away:
+
+    03:37:35  sudo ... COMMAND=/usr/bin/sh scripts/aibox03/setup.sh
+    03:37:36  Stopped vmobs-privd.service.
+    03:37:37  Started vmobs-privd.service.
+
+The service is also left `enabled`, so a plain `systemctl stop` does not survive
+a reboot either. To retire the host install on a machine that now runs the
+appliance in a container, `systemctl disable --now vmobs-privd.service` — and do
+not re-run setup.sh afterwards, because it will put it back.
+
+Two privds can coexist without colliding: the container gets its own mount
+namespace and its own `/run` tmpfs, so the host socket at `/run/vmobs/privd.sock`
+is invisible to it, and the container's `/srv/vmobs` is a docker volume rather
+than the host directory. The reason to retire the host one is that it is stale,
+not that it fights.
