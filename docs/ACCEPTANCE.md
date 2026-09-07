@@ -409,7 +409,7 @@ evidence.
 That browser run was then done separately, and it is the record for §18's "storage and stop
 actions" clause. On 2026-09-04 a real Chrome (agent-browser, 1440x900) loaded /ui/ from a real
 vmobsd on aibox03 serving three VMs at 1 vCPU / 512 MiB / 2048 MiB root / 1024 MiB workspace,
-launched by scripts/aibox03/demo. Storage: the fleet page's capacity panel read `Disk 9216 /
+launched by the demo script of the day, scripts/aibox03/demo — since replaced by scripts/vmobs-demo, which drives the same API against the containerized appliance. Storage: the fleet page's capacity panel read `Disk 9216 /
 35966 MiB, 26750 MiB free` and each VM row read `2048 MiB root / 1024 MiB workspace`, both
 matching GET /api/v1/host/status. Stop: demo-3's own Stop button was clicked, and the API then
 reported that VM `stopped/stopped rev 5` with `op-000005 succeeded`; its Start button, disabled

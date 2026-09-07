@@ -15,78 +15,15 @@ NAME="${VMOBS_CONTAINER_NAME:-vmobs}"
 IMAGE="${VMOBS_IMAGE:-vmobs}"
 STATE_VOLUME="${VMOBS_STATE_VOLUME:-vmobs-state}"
 RUNTIME_VOLUME="${VMOBS_RUNTIME_VOLUME:-vmobs-runtime}"
-APPARMOR_PROFILE="${VMOBS_APPARMOR_PROFILE:-vmobs-jailer}"
-SECCOMP_PROFILE="$REPO/deploy/seccomp/vmobs-jailer.json"
 LISTEN="${VMOBS_LISTEN:-127.0.0.1:8787}"
 
-die() { printf 'vmobs-container: %s\n' "$*" >&2; exit 1; }
-note() { printf '%s\n' "$*"; }
-
-need_docker() {
-    command -v docker >/dev/null 2>&1 || die "docker is not on PATH; see deploy/README.md"
-    docker info >/dev/null 2>&1 || die "cannot talk to the docker daemon; is it running, and is this user in the docker group?"
-}
-
-# revision_for prints the commit this image is being built from, with "-dirty"
-# appended when the tree it was built from had uncommitted changes.
-#
-# The environment is asked before git, and that order is the point: this script
-# runs on the Linux host against a tree rsynced without .git (scripts/linux),
-# where git can answer nothing. That wrapper carries the answer across in
-# VMOBS_SOURCE_REVISION and VMOBS_SOURCE_DIRTY, the same pair the integration
-# gate binds its evidence to. With neither source the revision is "unknown" --
-# said out loud in the image, never guessed.
-revision_for() {
-    if [ -n "${VMOBS_SOURCE_REVISION:-}" ]; then
-        if [ "${VMOBS_SOURCE_DIRTY:-0}" = "1" ]; then
-            echo "$VMOBS_SOURCE_REVISION-dirty"
-        else
-            echo "$VMOBS_SOURCE_REVISION"
-        fi
-        return
-    fi
-    if git -C "$REPO" rev-parse HEAD >/dev/null 2>&1; then
-        rev="$(git -C "$REPO" rev-parse HEAD)"
-        if [ -n "$(git -C "$REPO" status --porcelain)" ]; then
-            echo "$rev-dirty"
-        else
-            echo "$rev"
-        fi
-        return
-    fi
-    echo "unknown"
-}
-
-# tag_for prints the image tag: the short revision, "-dirty" when the tree was
-# modified, and "local" when nothing can say what the tree is.
-tag_for() {
-    rev="$(revision_for)"
-    case "$rev" in
-        unknown) echo "$IMAGE:local" ;;
-        *-dirty) echo "$IMAGE:$(printf '%s' "${rev%-dirty}" | cut -c1-7)-dirty" ;;
-        *)       echo "$IMAGE:$(printf '%s' "$rev" | cut -c1-7)" ;;
-    esac
-}
-
-# require_guest_images fails before the docker build rather than 500 layers in.
-# The guest kernel and root image are not in the checkout: they are downloaded
-# against the digests in runtime.lock.json, or built from source when nothing has
-# been published. `up` does that step; `build` names it rather than doing it
-# behind your back.
-require_guest_images() {
-    for rel in images/dist/vmlinux images/dist/rootfs.ext4; do
-        [ -f "$REPO/$rel" ] || die "missing $rel — get the guest images first:
-    scripts/fetch-guest-images
-  That downloads them and checks each against its pin in runtime.lock.json. If
-  nothing has been published it says so and names images/build-all.sh, which
-  compiles the guest kernel from source and takes a while."
-    done
-}
+PROG=vmobs-container
+. "$REPO/scripts/lib/container.sh"
 
 cmd_build() {
     need_docker
     require_guest_images
-    tag="$(tag_for)"
+    tag="$(tag_for "$IMAGE")"
     note "building $tag"
     docker build \
         --file "$REPO/deploy/Dockerfile" \
@@ -97,67 +34,10 @@ cmd_build() {
     note "built $tag"
 }
 
-# preflight_host checks what docker cannot report clearly on its own. Each
-# failure names the one thing to change; none of them is fixed silently.
-preflight_host() {
-    [ -c /dev/kvm ] || die "/dev/kvm is missing — this host cannot run VMs.
-  Check that KVM is enabled in firmware and the kvm module is loaded (lsmod | grep kvm)."
-    [ -c /dev/net/tun ] || die "/dev/net/tun is missing — load the tun module (modprobe tun)."
-    [ -f "$SECCOMP_PROFILE" ] || die "missing $SECCOMP_PROFILE"
-    # "unconfined" is docker's own reserved value for "no profile", so it names
-    # no file and the file check cannot pass for it. It is how the container comes
-    # up on a host where the profile has not been loaded yet -- loading it is root
-    # work, and root work is a step an operator takes deliberately. It drops the
-    # mount confinement, so cmd_start says so out loud rather than letting a
-    # weaker boundary pass quietly for the shipped one.
-    case "$APPARMOR_PROFILE" in
-        unconfined) ;;
-        *) preflight_apparmor ;;
-    esac
-}
-
-# preflight_apparmor checks the two things docker's own error cannot separate:
-# a host with no AppArmor at all, and a host whose loaded profile is older than
-# the repo's.
-#
-# What the kernel actually holds is not readable here --
-# /sys/kernel/security/apparmor/profiles is 0444 root-only -- so the comparison
-# is against /etc/apparmor.d/<name>, the copy the host loads at boot. That is
-# the honest check, and it catches the failure that costs the most: docker
-# accepts any loaded profile by name, so a stale one starts cleanly and then
-# denies a mount in the middle of a launch, minutes later and nowhere near the
-# cause.
-preflight_apparmor() {
-    src="$REPO/deploy/apparmor/$APPARMOR_PROFILE"
-    dest="/etc/apparmor.d/$APPARMOR_PROFILE"
-    [ -f "$src" ] || die "missing deploy/apparmor/$APPARMOR_PROFILE"
-
-    enabled=""
-    [ -r /sys/module/apparmor/parameters/enabled ] && enabled="$(cat /sys/module/apparmor/parameters/enabled)"
-    if [ "$enabled" != "Y" ]; then
-        die "this host has no AppArmor enabled, so the profile cannot load.
-  Enable AppArmor, or accept the weaker boundary and start with:
-    VMOBS_APPARMOR_PROFILE=unconfined scripts/vmobs-container start
-  (that drops the mount confinement; seccomp and the capabilities still apply.)"
-    fi
-
-    if [ ! -f "$dest" ]; then
-        die "$APPARMOR_PROFILE is not installed at $dest, so this host does not load it at boot.
-  Install and load it once, as root:
-    sudo sh deploy/install-apparmor.sh"
-    fi
-    if ! cmp -s "$src" "$dest"; then
-        die "the profile installed at $dest differs from deploy/apparmor/$APPARMOR_PROFILE.
-  docker would accept the installed one by name and the difference would surface
-  later, as a denied mount in the middle of a launch. Reload it, as root:
-    sudo sh deploy/install-apparmor.sh"
-    fi
-}
-
 cmd_start() {
     need_docker
     preflight_host
-    tag="${1:-$(tag_for)}"
+    tag="${1:-$(tag_for "$IMAGE")}"
     docker image inspect "$tag" >/dev/null 2>&1 || die "image $tag not built — run: scripts/vmobs-container build"
     if docker container inspect "$NAME" >/dev/null 2>&1; then
         die "container $NAME already exists — run: scripts/vmobs-container stop"
@@ -280,7 +160,7 @@ cmd_logs() {
 cmd_init_auth() {
     need_docker
     docker container inspect "$NAME" >/dev/null 2>&1 && die "stop $NAME first: init-auth writes the credential store the running daemon owns"
-    tag="$(tag_for)"
+    tag="$(tag_for "$IMAGE")"
     docker run --rm -i \
         --volume "$STATE_VOLUME:/var/lib/vmobs" \
         "$tag" init-auth "$@"

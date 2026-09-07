@@ -1,5 +1,5 @@
 // ABOUTME: M1b gate test: real guest terminals over the browser WebSocket relay.
-// ABOUTME: Requires VMOBS_FIXTURE=1 and scripts/aibox03/setup.sh (incl. vmobs-privd).
+// ABOUTME: Requires the gate container: run this suite with scripts/vmobs-gate.
 
 //go:build linux
 

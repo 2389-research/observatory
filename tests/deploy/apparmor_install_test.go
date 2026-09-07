@@ -8,8 +8,7 @@ import (
 )
 
 const (
-	installScriptPath   = "../../deploy/install-apparmor.sh"
-	containerScriptPath = "../../scripts/vmobs-container"
+	installScriptPath = "../../deploy/install-apparmor.sh"
 	// Where AppArmor looks at boot. A profile loaded with apparmor_parser and
 	// nothing else lives only in the running kernel.
 	profileInstallDir = "/etc/apparmor.d/"
@@ -62,6 +61,42 @@ func shellCode(s string) string {
 	return strings.Join(code, "\n")
 }
 
+// operatorScripts are the two commands an operator runs to start a container:
+// the appliance and the acceptance gate. Both hand docker the same profile, so
+// both owe the operator the same refusals when the host's copy is wrong.
+var operatorScripts = []string{
+	"../../scripts/vmobs-container",
+	"../../scripts/vmobs-gate",
+}
+
+// readShellUnit returns a script together with the text of the libraries it
+// sources, because that is what runs. Asserting against the entry point alone
+// would call a check missing the moment it moved into scripts/lib/, and asserting
+// against the library alone would miss a script that never sources it.
+func readShellUnit(t *testing.T, path string) string {
+	t.Helper()
+	body := readFile(t, path)
+	var parts []string
+	parts = append(parts, body)
+	for _, line := range strings.Split(shellCode(body), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || (fields[0] != "." && fields[0] != "source") {
+			continue
+		}
+		// The only form these scripts use: . "$REPO/scripts/lib/<name>"
+		ref := strings.Trim(fields[1], `"`)
+		rel, ok := strings.CutPrefix(ref, "$REPO/")
+		if !ok {
+			t.Fatalf("%s sources %q, which this test cannot resolve", path, ref)
+		}
+		parts = append(parts, readFile(t, "../../"+rel))
+	}
+	if len(parts) == 1 {
+		t.Fatalf("%s sources nothing; the shared preflight lives in scripts/lib/", path)
+	}
+	return strings.Join(parts, "\n")
+}
+
 // TestStartChecksTheInstalledProfileMatchesTheRepo: a stale profile is the
 // expensive failure, because it is silent. docker accepts any loaded profile by
 // name, so the container starts, privd's probe passes whatever the old rules
@@ -73,15 +108,18 @@ func shellCode(s string) string {
 // is 0444 root-only, so what the kernel actually holds is not observable here.
 // The message has to say which of the two it compared.
 func TestStartChecksTheInstalledProfileMatchesTheRepo(t *testing.T) {
-	s := readFile(t, containerScriptPath)
+	for _, path := range operatorScripts {
+		s := readShellUnit(t, path)
 
-	if !strings.Contains(s, profileInstallDir) {
-		t.Fatalf("%s never looks at %s; a stale loaded profile starts fine and fails mid-launch",
-			containerScriptPath, profileInstallDir)
-	}
-	if !strings.Contains(s, "install-apparmor.sh") {
-		t.Errorf("%s does not name deploy/install-apparmor.sh; the refusal has to carry the command that fixes it",
-			containerScriptPath)
+		if !strings.Contains(s, profileInstallDir) {
+			t.Errorf("%s never looks at %s; a stale loaded profile starts fine and fails mid-launch",
+				path, profileInstallDir)
+			continue
+		}
+		if !strings.Contains(s, "install-apparmor.sh") {
+			t.Errorf("%s does not name deploy/install-apparmor.sh; the refusal has to carry the command that fixes it",
+				path)
+		}
 	}
 }
 
@@ -91,16 +129,18 @@ func TestStartChecksTheInstalledProfileMatchesTheRepo(t *testing.T) {
 // about a profile it cannot find -- which reads like a missing profile rather
 // than a kernel that has no AppArmor at all.
 func TestStartSaysSoWhenTheHostHasNoAppArmor(t *testing.T) {
-	s := readFile(t, containerScriptPath)
+	for _, path := range operatorScripts {
+		s := readShellUnit(t, path)
 
-	const enabledFlag = "/sys/module/apparmor/parameters/enabled"
-	if !strings.Contains(s, enabledFlag) {
-		t.Errorf("%s never reads %s; it cannot tell a host without AppArmor from an unloaded profile",
-			containerScriptPath, enabledFlag)
-	}
-	// The escape hatch has to be named, or the only advice is "install AppArmor".
-	if !strings.Contains(s, "VMOBS_APPARMOR_PROFILE=unconfined") {
-		t.Errorf("%s does not name VMOBS_APPARMOR_PROFILE=unconfined; an operator on a host without AppArmor is left with no way to run at all",
-			containerScriptPath)
+		const enabledFlag = "/sys/module/apparmor/parameters/enabled"
+		if !strings.Contains(s, enabledFlag) {
+			t.Errorf("%s never reads %s; it cannot tell a host without AppArmor from an unloaded profile",
+				path, enabledFlag)
+		}
+		// The escape hatch has to be named, or the only advice is "install AppArmor".
+		if !strings.Contains(s, "VMOBS_APPARMOR_PROFILE=unconfined") {
+			t.Errorf("%s does not name VMOBS_APPARMOR_PROFILE=unconfined; an operator on a host without AppArmor is left with no way to run at all",
+				path)
+		}
 	}
 }

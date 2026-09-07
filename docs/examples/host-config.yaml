@@ -30,7 +30,7 @@ paths:
   state: "/var/lib/vmobs"
   # The daemon derives its staging dir (<runtime>/stage) and the jailer chroot
   # base (<runtime>/jail) from this root, and both must match the --stage-root
-  # and --jail-base flags in scripts/aibox03/vmobs-privd.service. Jail chroots
+  # and --jail-base flags privd is started with (deploy/entrypoint.sh). Jail chroots
   # hold rootfs images, so this root does not belong on a tmpfs.
   runtime: "/srv/vmobs"
   approved_templates: "/var/lib/vmobs/templates"

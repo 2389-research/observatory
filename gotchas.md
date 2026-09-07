@@ -32,9 +32,9 @@ Distilled working knowledge for agents and collaborators in this repo. Append en
 - **`require_authentication: false` is loopback-only dev mode.** Config validation rejects it with any non-loopback `server.mode`. The smoke runs with `require_authentication: true`; the example config's `false` is the dev default, not a production option.
 - **`scripts/linux` rsyncs via SSH then runs a command remotely.** Usage: `scripts/linux '<shell command>'`. It excludes `.git` and `.superpowers` from the transfer. The `--filter='P images/dist/'` rule protects build artifacts in gitignored dirs from `--delete` — macOS openrsync ignores `:- .gitignore` for deletion protection. Setting `VMOBS_LINUX_HOST` or `VMOBS_LINUX_DIR` overrides the defaults.
 - **Anything a remote run writes inside the tree dies at the next `scripts/linux` call.** The rsync is one-way with `--delete`, and it runs *before* every command, so the local copy wins. A gate that writes `tests/integration/evidence/m1a-gate-aibox03.txt` remotely has it silently replaced by the stale local file the next time you ssh in to read it — and the md5s then match, which reads like the run wrote nothing. Copy artifacts to `/tmp` in the same `scripts/linux` invocation that produces them, then fetch from there.
-- **Sudo on aibox03 requires a password.** Agents never sudo. The only NOPASSWD grant is `/usr/local/sbin/vmobs-root-helper`, installed by `scripts/aibox03/setup.sh` (which Doctor Biz must run by hand with password sudo). Any step that needs root on aibox03 before setup.sh has run is a Doctor Biz handoff.
+- **Sudo on aibox03 requires a password.** Agents never sudo. The one root step on the host is loading the AppArmor profile (`sudo sh deploy/install-apparmor.sh`), which Doctor Biz runs by hand. Everything else runs in a container. The M0 fixture's NOPASSWD grant for `/usr/local/sbin/vmobs-root-helper` exists only inside the gate container, which writes it for itself and throws it away.
 - **`mkfs.ext4 -d <dir>` builds ext4 filesystems rootless.** No mounts, no root required. Used for both rootfs and config disk assembly in the image pipeline and the fixture. The `-d` flag populates the filesystem from a directory tree at creation time.
-- **Fixture gate: `//go:build linux` + `VMOBS_FIXTURE=1` env var.** `tests/integration/boot_test.go` and `tests/integration/fixture/fixture.go` are linux-only; the integration test additionally requires `VMOBS_FIXTURE=1` to run. Unset → skip with a printed reason naming `scripts/aibox03/setup.sh`. Never claim the gate passed without running it.
+- **Fixture gate: `//go:build linux` + `VMOBS_FIXTURE=1` env var.** `tests/integration/boot_test.go` and `tests/integration/fixture/fixture.go` are linux-only; the integration test additionally requires `VMOBS_FIXTURE=1` to run. `scripts/vmobs-gate` sets it inside the gate container; unset → skip with a printed reason naming that script. Never claim the gate passed without running it.
 - **`ip -json route` shows the main table only — VPN routes are invisible.** On aibox03, tailscale routes live in routing table 52 (policy routing). Use `ip -json route show table all` to see all routes. ParseIPRoutes filters out non-transit entries (type=local/broadcast/multicast) by the "type" field. The blessed invocation is the table-all form everywhere §10.1 collision detection is needed.
 - **Find a jailed firecracker by its pid file, never by `pgrep`.** Jailer writes the child PID to `$JAIL_BASE/firecracker/<id>/root/firecracker.pid` under `--daemonize`; that is the documented handle, and `jail-stop` uses it. `pgrep -f <id>` over-matches — every path under the jail carries the VM id, so it also hits a runner dialing that jail's `v.sock`. A pattern that pins the flag instead bets on jailer's exact argv spelling: v1.16.1 execs `--id` and the id as two *separate* elements (`.args(["--id", &self.id])` in `src/jailer/src/env.rs`), with argv[0] the in-jail path `/firecracker`. The pid file bets on nothing.
 - **Jailer chmods its chroot root to 0700 mid-startup — after the helper's own chown.** With `--daemonize` the tightening can land after `jail-start` returns, so a post-jailer `chmod` must wait for firecracker to bind `v.sock` (which strictly follows jailer's chroot prep) before reopening the dir to `0750`. Without that, the fixture uid can never traverse to the socket and every dial is EACCES.
@@ -65,7 +65,7 @@ Distilled working knowledge for agents and collaborators in this repo. Append en
 - **The linux-only suites do run from a Mac — in a container, as a non-root user.** `internal/jailer`'s and `internal/privd`'s `//go:build linux` files never compile on darwin, so `scripts/check` proves nothing about them; a `golang:1.26` container with the repo mounted at `/src` runs them for real. Four traps. Run as a non-root uid (`--user 1000:1000`) or the chmod-based injection subtests fail outright — root's `MkdirAll` ignores a 0555 directory, and `TestInject/state_dir_mkdir_failure` says so rather than skipping — and give the build cache a volume that uid can write. A bind-mounted macOS directory is not that volume: `GOCACHE` on one fails `permission denied` under `--user 1000:1000`; use docker-managed volumes `chown`ed to the uid. Stock `golang:1.26` also has no `mkfs.ext4` — ten `internal/jailer` tests build real ext4 images and fail without it, which is easy to misread as a code failure; run them on a `FROM golang:1.26` + `apt-get install -y e2fsprogs` derivative. What the container still cannot prove: it is whatever arch your Mac is (arm64, not the amd64 the host runs), there is no KVM, and `tests/integration` needs a real Firecracker. A green container run is evidence about logic, never about the host.
 - **The M1a gate needs ~21 GB free on `/`, and running short of it looks exactly like a code regression.** `at009_four_concurrent_vms` creates four VMs at once, each reserving 4160 MiB of disk (16640 MiB), and it does not start from an empty host: `disposeSubtestVMs` registers a `t.Cleanup`, so it schedules deletion of the VMs created *after* the call — it frees nothing that came before. Earlier subtests' VMs are alive throughout at009, and stopping one releases its memory and CPU but never its disk (the rootfs is still there), so the real floor is 16640 MiB plus whatever is still live. Below it the admission controller answers a truthful `409 insufficient_capacity` — `disk: need 4160 MiB, only N MiB free (usable U, reserved R)`, where `usable = StateDiskFreeMiB − ReserveInspectorScratchMiB` (`internal/runtime/admission.go`) — and the gate fails on whichever create lost the race, which reads like whatever you just changed. Two numbers tell them apart: `reserved` is a multiple of 4160 that counts the VMs already holding disk, and a run at the merge-base costs ~100s and settles it — main failing identically is proof the host is the variable. On aibox03 the space went to gate-run debris rather than anything the product wrote: 31 hand-made `~/vmobs-at002-*` diagnostic workspaces (6.5 GB; nothing in the repo creates or cleans them) and 778 MB of `~/.cache/go-build` from `scripts/linux` runs. Check `df -m /` before blaming a diff.
 - **An action states its intent on its FIRST transition, not only its last.** `desired_state` is the operator's stated wish and `observed_state` is what is true; the fleet page flags the gap between them, so a wish nobody updated is a false alarm. It was written once at create and never again, so every VM the operator deliberately stopped read `stopped` / `want running` — the page's headline signal, inverted. `start`/`stop`/`force_stop`, `Delete`, `Reconcile`'s `deleting` finalize, and a run's `on_completion=stop` now each declare their end state on the first `TransitionVM` they make and carry it through the tail, which is what makes an action interrupted mid-way (`rt.Stop` fails, row sticks at `stopping`) still read as unfinished work rather than a state nobody asked for. Same rule as the revision pin above, opposite reason: the pin rides the first transition because it is a precondition, the intent rides it because a wish recorded only on success is not a record of what was wanted. The mirror case is just as load-bearing: `NotifyVMMExit`, `failLaunch`, Reconcile's crash recovery and the batch rollback's stop wave must **never** write it — a guest that shut itself down while the operator wanted it running is precisely the drift the flag exists to report, and a system-initiated rollback is not the operator saying stop.
-- **`set -euo pipefail` plus a `grep` whose no-match IS the answer kills the script on the assignment line, silently.** `left=$(curl … | grep -o '"vm_id"' | wc -l)` counts live VMs; grep exits 1 when it finds none; `pipefail` promotes that to the pipeline's status, the assignment inherits it, and `set -e` ends the script right there — before the next line, with no message and no trace beyond `+ left=0`. `scripts/aibox03/demo stop` therefore exited the instant its drain loop succeeded, leaving the daemon running every time the teardown otherwise worked. `wc -l` at the tail does not save you: it succeeds, but pipefail reports the *first* nonzero, not the last. Wrap the grep — `| { grep -o … || true; } |` — wherever an empty match is a legitimate count. The one-line reproduction: `bash -c 'set -euo pipefail; n=$(echo hi | grep -o nope | wc -l); echo reached'` prints nothing and exits 1.
+- **`set -euo pipefail` plus a `grep` whose no-match IS the answer kills the script on the assignment line, silently.** `left=$(curl … | grep -o '"vm_id"' | wc -l)` counts live VMs; grep exits 1 when it finds none; `pipefail` promotes that to the pipeline's status, the assignment inherits it, and `set -e` ends the script right there — before the next line, with no message and no trace beyond `+ left=0`. The demo script's teardown therefore exited the instant its drain loop succeeded, leaving the daemon running every time the teardown otherwise worked. `wc -l` at the tail does not save you: it succeeds, but pipefail reports the *first* nonzero, not the last. Wrap the grep — `| { grep -o … || true; } |` — wherever an empty match is a legitimate count. The one-line reproduction: `bash -c 'set -euo pipefail; n=$(echo hi | grep -o nope | wc -l); echo reached'` prints nothing and exits 1.
 - **Reconcile adopts a live VM only when the runtime names it; the delete that follows no longer strands it.** `Manager.Reconcile` leaves a `running`/`paused` row exactly as it found it when `ManagerConfig.AdoptedVMs` names that VM, and writes `failed` over it otherwise. The map is filled in `cmd/vmobsd/main.go` from the jailer adapter's startup scan, before `NewManager` — `Reconcile` runs inside it, so the verdicts have to be in hand first, not applied to the rows afterwards. Adoption is the *absence* of a write: no transition, no revision bump, no `ReleaseCompute`, because `running → running` is not a §5.2 edge and a bump would invalidate every operator's `If-Match` pin across a restart they should not have noticed. A runner counts as this VM's only when its own argv says so (`--vm-id <id>` or `--vm-id=<id>`; both spawn sites pass it), which `runnerAlive` folds in as a three-valued check — an argv naming another VM vetoes a pid+starttime match, an argv naming this one supplies the identity an empty `RunnerStart` lacks, and an unreadable argv is no evidence either way. That last case is load-bearing: a zombie has a `/proc` entry and an empty cmdline, and reading it as "not ours" would push `doStop` past the graceful path. Adoption asks the lifecycle question only — `telemetry_health` is a separate §138 dimension, and gating on it would turn a guestd outage into a fleet outage. A runtime that supplies no findings still gets the old answer, so on a host without that scan read `failed` as "state unknown, VMM probably up", never as "dead". What used to make that unreapable was `Delete` inferring the *resource* from the *row*: its `liveStates` map lists the states worth force-stopping, `failed` and `stopped` are not among them, so a delete went straight to `Release` and privd answered `invalid_state` "vm process is still alive; signal first". The row parked at `deleting`, and Reconcile's `deleting` retry — the only retry there is, and it runs at startup only — released without signalling either, so every restart reproduced the refusal. The route out was the sanctioned helper (`sudo -n /usr/local/sbin/vmobs-root-helper jail-stop <id>` then `net-teardown <id>`). Both call sites now signal before releasing, at most once per delete. Three details are load-bearing. **`failed` cannot join `liveStates`**: `failed → deleting` is its only edge in §5.2, so routing it through the `stopping`/`stopped` walk would ride two silently-tolerated invalid transitions; the signal belongs next to `Release`, not inside the live-state walk. **The signal runs after the transition to `deleting`, not before** — that transition is the atomic guard, so a `stopped` VM someone restarted under us fails it and keeps its process, and the caller's revision pin is still checked before anything is destroyed. **`stopped` carries the same lie as `failed`** and is covered by the same guard: `doStop`'s forced path drops its `SignalVM` errors and writes `stopped` regardless, and Reconcile settles a `stopping` row without observing anything. A `ForceStop` returning nil is still not proof of death — the forced path drops those errors — so this narrows the window rather than closing it; what it removes is the case where nobody asked at all. Kata `ffxv`: delete half fixed at `54455bb`, adoption half on branch `m2a-guest-telemetry`. See also [[vexd]]: a row already parked at `deleting` answers later DELETEs with success and does nothing.
 - **A `deleting` row is unfinished work, not an answer — the retry the error asks for must resume it.** `Delete` returned early for both `deleted` and `deleting`. For `deleted` that is correct idempotency: the row and its resources went together. For `deleting` it answered every retry `200 OK` with the netns, the jail chroot and privd's ledger entry still on the host, and `ErrReleaseFailed` was meanwhile telling operators over the API that the fault was `retryable: true` and to `DELETE` again — a remediation that could not work. Reconcile's `deleting` case ran at startup only, so restarting the daemon was the whole retry story. Now a `deleting` row is resumed: the transition is skipped, the signal and the release are not. Two things make that safe. **A resume consumes no revision pin, and cannot**: `deleting → deleted` is the only edge out of that state and only `TransitionVM` bumps a row's revision (`internal/store/vms.go`), so a caller's stale pin on a `deleting` row can only mean the row already reached `deleted` — which the `deleted` early return answers first. **The row's own state cannot tell an in-flight delete from a stalled one** — both read `deleting` — and the two want opposite answers, so `Manager` keeps an in-flight set (`beginDelete`/`endDelete`) and "in progress" now means an actual running call. Without it a second DELETE arriving during the first one's ForceStop-plus-Release window (up to ~55s on the real jailer) duplicates the host work and loses the transition race. Kata `vexd`, fixed at `5b45de9`.
 - **A terminal restore flushes the pty's input queue — anything typed behind the quit key goes with it.** `vi` and `top` both restore termios on exit with `TCSAFLUSH`, which discards whatever is already queued. A probe typed immediately after the quit key is discarded even though the program painted, quit and left the prompt on screen — it reads exactly like a wedged terminal. Retype the probe until it is answered (`tests/integration/m1b_gate_test.go`, `runFullScreen`).
@@ -106,11 +106,12 @@ and stays that way on purpose: it is tamper evidence at boot, not a live verdict
 `Adapter.Availability` turns the first failing preflight check into a
 `runtime.UnavailableError`, which `/host/status` publishes as
 `runtime.available: false` and every `POST /vms` is refused against. A daemon
-holding startup pins would report a mismatch for each legitimate re-pin
-(`scripts/aibox03/setup.sh` installs a release and re-pins in one step) and keep
-refusing until someone restarted it — after the operator had already fixed the
-host. Any future cache in front of the preflight runner reintroduces exactly
-that; `TestDoctorFollowsTheLockWhileRunning` is the guard.
+holding startup pins would report a mismatch for each legitimate re-pin — an
+image carries the lock and the binaries it pins together, so an upgrade moves
+both at once — and keep refusing until someone restarted it, after the operator
+had already fixed the host. Any future
+cache in front of the preflight runner reintroduces exactly that;
+`TestDoctorFollowsTheLockWhileRunning` is the guard.
 
 ## Killing guestd, and what the host says about it
 
@@ -298,14 +299,15 @@ whatever inherited the pid. Take the descriptor *before* re-reading `/proc` for
 identity — that order closes the check/use window without needing the process
 to still be alive. `Release` the handle or the fd leaks.
 
-**The live M1a gate tests the *installed* privd, not the one you just built.**
-`/run/vmobs/privd.sock` is served by `/usr/local/sbin/vmobs-privd`, which
-`scripts/aibox03/setup.sh` builds and the systemd unit runs. `go test` on
-aibox03 builds the daemon and the runner from the working tree but never
-replaces that binary, so a privd change can go green through the whole gate
-while the gate is exercising a binary from days ago — check its mtime against
-your commits. Reinstalling needs root, so it is a Doctor Biz handoff:
-`ssh -t "$VMOBS_LINUX_HOST" 'cd vmobs-build && sudo sh scripts/aibox03/setup.sh'`.
+**A gate that dials someone else's privd is testing someone else's privd.**
+When the gate ran against a host install, `go test` built the daemon and the
+runner from the working tree but never replaced `/usr/local/sbin/vmobs-privd`,
+so a privd change could go green through the whole gate while the socket was
+served by a binary from days ago. `deploy/gate-entrypoint.sh` closes it by
+building `cmd/vmobs-privd` from the mounted source and starting that, every run.
+The shape to watch for anywhere else: a test that reaches a daemon through a
+socket proves nothing about the code in your tree unless something in the run
+put your code behind that socket.
 
 **privd derives the stage directory, so two configs have to name the same
 path.** `StartVM` opens `<StageRoot>/<vm_id>` against its own `--stage-root`
@@ -734,31 +736,37 @@ on the host that built them — publishing them to a release is also their only
 backup. Repinning is the way to move to different bytes:
 `bash images/build-all.sh --repin`, then commit the lock.
 
-## setup.sh reinstates host privd, so stopping the service does not stick
+## The gate outlived the thing it gated
 
-`scripts/aibox03/setup.sh` stops `vmobs-privd.service`, installs the binary and
-starts it again — the whole cycle inside one second, which reads in the journal
-like the service never went away:
+The appliance moved into a container on 2026-09-06. The acceptance gate had been
+written five days earlier against bare metal: `tests/integration/m1a_gate_test.go`
+dialed `/run/vmobs/privd.sock` on the host and skipped with a message naming the
+host installer. So the way to run the gate was to install vmobs onto the host —
+apt packages, firecracker and a root helper in /usr/local, /etc/sudoers.d, a
+/srv/vmobs tree, a kvm group edit, and privd in a systemd unit — which is exactly
+what the container was built to stop doing. Running the gate put a second privd
+under the machine and the journal read like it had always been there:
 
-    03:37:35  sudo ... COMMAND=/usr/bin/sh scripts/aibox03/setup.sh
+    03:37:35  sudo ... COMMAND=/usr/bin/sh <installer>
     03:37:36  Stopped vmobs-privd.service.
     03:37:37  Started vmobs-privd.service.
 
-The service is also left `enabled`, so a plain `systemctl stop` does not survive
-a reboot either. To retire the host install on a machine that now runs the
-appliance in a container, `systemctl disable --now vmobs-privd.service` — and do
-not re-run setup.sh afterwards, because it will put it back.
+Stop-install-start inside one second, and the unit left `enabled`, so a plain
+`systemctl stop` did not survive a reboot either. The installer is deleted;
+`scripts/vmobs-gate` provisions all of it inside a `docker run --rm` container.
+`tests/deploy/gate_test.go` fails if the name comes back, and checks the gate
+container's capabilities, devices and security profiles still match
+`compose.yaml` — a gate holding privileges no user has proves nothing.
 
-setup.sh is the bare-metal installer from before the container: it apt-installs
-packages, drops firecracker, jailer and a root helper into /usr/local, writes
-/etc/sudoers.d/vmobs-fixture, creates /srv/vmobs, adds the operator to the kvm
-group, and builds privd into a systemd unit. The container needs none of it —
-only the AppArmor profile, which is its own script. The one thing still chaining
-the two together is the live gate: `tests/integration/m1a_gate_test.go` dials
-`/run/vmobs/privd.sock` and skips by naming setup.sh.
+On a machine that ran the old installer, `systemctl disable --now
+vmobs-privd.service` retires the leftover. Nothing puts it back.
 
-Two privds can coexist without colliding: the container gets its own mount
-namespace and its own `/run` tmpfs, so the host socket at `/run/vmobs/privd.sock`
+Two privds could coexist without colliding: the container gets its own mount
+namespace and its own `/run` tmpfs, so a host socket at `/run/vmobs/privd.sock`
 is invisible to it, and the container's `/srv/vmobs` is a docker volume rather
-than the host directory. The reason to retire the host one is that it is stale,
-not that it fights.
+than the host directory. The reason to retire the host one was that it was
+stale, not that it fought.
+
+The general shape: when a product changes how it is installed, its tests carry
+the old install in their skip messages and prerequisites, and nothing fails.
+Grep the test tree for the old path as part of the move.

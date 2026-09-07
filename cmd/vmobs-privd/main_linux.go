@@ -18,7 +18,7 @@ import (
 
 const (
 	// uidMin and uidMax mirror the root helper's uid policy ([10000,59999] inclusive,
-	// i.e. [10000,60000) half-open). See scripts/aibox03/vmobs-root-helper line 21.
+	// i.e. [10000,60000) half-open). See valid_uid in tests/integration/fixture/vmobs-root-helper.
 	uidMin = 10000
 	uidMax = 60000
 )
@@ -30,7 +30,8 @@ const (
 // uid 20000+slot, gid 36000, mode 0777 & ~umask; the daemon's own uid is a member of
 // gid 36000 but never the owner, so v.sock must be group-writable or every connect()
 // from the daemon fails with EACCES. This mirrors the M0 root helper's own
-// `umask 0002` (scripts/aibox03/vmobs-root-helper:97).
+// `umask 0002`, set in jail-start before it execs the jailer
+// (tests/integration/fixture/vmobs-root-helper).
 func applyProcessUmask() int {
 	return syscall.Umask(0o002)
 }

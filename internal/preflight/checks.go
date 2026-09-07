@@ -40,8 +40,8 @@ func (r *Runner) loadLock() (*lock.Lock, error) {
 // digests pinned in runtime.lock.json, reading that file on every run. The
 // pins and the binaries are read within microseconds of each other, so the
 // verdict is about one host at one moment. Holding a lock parsed at daemon
-// startup instead would report a mismatch for every legitimate re-pin —
-// scripts/aibox03/setup.sh installs a release and re-pins in one step — and the
+// startup instead would report a mismatch for every legitimate re-pin — a
+// firecracker upgrade installs a release and re-pins in one step — and the
 // jailer adapter turns any failing check into an UnavailableError, so the wrong
 // answer refuses every VM creation until someone restarts the daemon.
 func (r *Runner) checkFCBinaries(l *lock.Lock, loadErr error) Check {
@@ -55,7 +55,7 @@ func (r *Runner) checkFCBinaries(l *lock.Lock, loadErr error) Check {
 			Evidence: []string{loadErr.Error()},
 			Remediation: &Remediation{
 				Cause:  "lock_load_error",
-				Action: "re-run scripts/aibox03/setup.sh to install firecracker and re-pin runtime.lock.json",
+				Action: "runtime.lock.json is unreadable; reinstall the appliance image (docker compose pull) or repair the lock in the checkout",
 			},
 		}
 	}
@@ -71,7 +71,7 @@ func (r *Runner) checkFCBinaries(l *lock.Lock, loadErr error) Check {
 			Evidence: []string{evidence},
 			Remediation: &Remediation{
 				Cause:  "lock_absent",
-				Action: "run scripts/aibox03/setup.sh to install firecracker and create runtime.lock.json",
+				Action: "no runtime.lock.json beside the artifacts; reinstall the appliance image (docker compose pull)",
 			},
 		}
 	}
@@ -109,7 +109,7 @@ func (r *Runner) checkFCBinaries(l *lock.Lock, loadErr error) Check {
 			Evidence: evidence,
 			Remediation: &Remediation{
 				Cause:  "binary_mismatch",
-				Action: "run scripts/aibox03/setup.sh to reinstall the pinned firecracker release",
+				Action: "the installed firecracker does not match its pin; reinstall the appliance image (docker compose pull)",
 			},
 		}
 	}

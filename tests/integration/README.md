@@ -4,46 +4,61 @@
 
 - `netns_test.go` — Task 7: network namespace setup/teardown via the root helper.
 - `boot_test.go` — Task 8 (M0 gate): jailed two-VM boot, vsock handshake, capability report, disk ownership, teardown.
-- `fixture/` — Helper package for building and managing fixture VMs.
+- `m1a_gate_test.go`, `m1b_gate_test.go`, `m2a_gate_test.go` — the milestone gates.
+- `fixture/` — Helper package for building and managing fixture VMs, plus the
+  narrow root helper the M0 network tests exec through `sudo`.
 - `evidence/` — Evidence files written by the gate test when it runs (committed; never fabricated).
 
-## Prerequisites
+## How to run
 
-All of these are installed by `scripts/aibox03/setup.sh` (run once by the host operator with password sudo):
+```sh
+scripts/vmobs-gate                                              # the whole suite
+scripts/vmobs-gate go test ./tests/integration/ -run TestM1aGate -v
+```
 
-- `/usr/local/sbin/vmobs-root-helper` — the narrow root helper
-- `/srv/vmobs/` — the directory tree used by the helper
-- `/usr/local/bin/firecracker` and `/usr/local/bin/jailer`
-- The `vmobs-fixture` group and `harper` added to it and the `kvm` group
+That builds a throwaway image on top of the appliance image and runs the suite
+inside it under the same capabilities, devices, seccomp profile and AppArmor
+profile the appliance runs under — `docs/design/container-boundary.md` §5. A gate
+holding privileges no user has would prove nothing about what users can do, so
+`tests/deploy/gate_test.go` fails if the two ever drift apart.
 
-Until `scripts/aibox03/setup.sh` has been run, tests skip with a message naming the script.
+Nothing is installed on the host. The container creates the `vmobs-fixture`
+group, the root helper's sudoers grant and the `/srv/vmobs` tree for itself, and
+`docker run --rm` throws all of it away.
+
+### Host prerequisites
+
+The same ones anybody installing vmobs already has:
+
+- Docker, and a user in the `docker` group
+- `/dev/kvm` and `/dev/net/tun`
+- The AppArmor profile loaded: `sudo sh deploy/install-apparmor.sh`
+
+On a host with no AppArmor at all, `VMOBS_APPARMOR_PROFILE=unconfined` runs the
+suite without it. That is a weaker boundary than the appliance ships, so say so
+in anything you claim from such a run.
+
+### Running on a remote Linux host
+
+`scripts/linux` rsyncs this tree to `$VMOBS_LINUX_HOST` and runs a command there:
+
+```sh
+scripts/linux 'scripts/vmobs-gate'
+```
+
+It carries the revision across, because the copy it sends arrives without `.git`
+and a gate that cannot name its source publishes no evidence.
 
 ## Environment variables
 
 | Variable | Effect |
 |---|---|
-| `VMOBS_FIXTURE=1` | Enable root-gated tests. Without this, all integration tests skip. |
+| `VMOBS_FIXTURE=1` | Enable root-gated tests. Set by the gate container; without it every integration test skips. |
 | `VMOBS_SOURCE_REVISION` | The 40-character commit the tree under test came from. `scripts/linux` sets it, because the copy it rsyncs to the host arrives without `.git`. Without it a gate records no evidence and says why. |
 | `VMOBS_SOURCE_DIRTY=1` | The tree under test differs from that commit. `scripts/linux` sets it from `git status --porcelain`. |
-| `VMOBS_EVIDENCE_ROOT` | Where execution records are published. Default `<tmpdir>/vmobs-evidence` — deliberately outside the repository, because `scripts/linux` rsyncs with `--delete`. |
-
-## How to run
-
-Remote execution via the rsync bridge:
-
-```sh
-# Skip gate (fast; safe to run any time):
-scripts/linux 'go test ./tests/integration/ -v'
-
-# Honest skip after setup.sh is installed:
-scripts/linux 'env VMOBS_FIXTURE=1 go test ./tests/integration/ -v'
-
-# Full M0 gate run (requires setup.sh to have been run on aibox03):
-scripts/linux 'env VMOBS_FIXTURE=1 go test ./tests/integration/ -v -timeout 600s'
-```
-
-The remote login shell is fish, where a bare `VAR=value command` prefix is a
-syntax error. Pass environment through `env`, as above.
+| `VMOBS_EVIDENCE_ROOT` | Where execution records are published. `scripts/vmobs-gate` sets it to a mounted host directory, because a `--rm` container deletes its own filesystem the moment the run finishes. |
+| `VMOBS_GATE_EVIDENCE_DIR` | The host side of that mount. Default `${TMPDIR:-/tmp}/vmobs-evidence` — outside the checkout, because `scripts/linux` rsyncs with `--delete`. |
+| `VMOBS_IMAGE` | The appliance image the gate builds on. Default is the published one, so a plain run tests the artifacts a stranger installs. |
 
 ## Evidence
 
@@ -63,7 +78,8 @@ The evidence file is bounded (≤200 lines) and contains:
 - Host-stat ownership lines for rootfs.ext4 in each chroot
 - Teardown proof (no m0-* entries remain in jail or netns)
 
-**The evidence file is only written when the gate actually runs.** No placeholder exists before setup.sh lands. Fabricated evidence is the one unforgivable defect in this codebase.
+**The evidence file is only written when the gate actually runs.** Fabricated
+evidence is the one unforgivable defect in this codebase.
 
 ### Execution records
 
@@ -75,8 +91,9 @@ artifacts the lock names, the host's identity and preflight verdict, and the
 digest of the transcript the subtest wrote. A record is written once under a
 name that cannot be reused.
 
-Records land in `$VMOBS_EVIDENCE_ROOT` (default `<tmpdir>/vmobs-evidence`), so
-they survive the next `scripts/linux` rsync. To bring a run's records back:
+Records land in the directory `scripts/vmobs-gate` mounts — by default
+`/tmp/vmobs-evidence` on the host that ran it. To bring a remote run's records
+back:
 
 ```sh
 scripts/linux 'tar -C /tmp/vmobs-evidence -czf - . | base64 -w0' | tail -1 | base64 -d | tar -xzf - -C <dest>
@@ -89,10 +106,15 @@ so a run can be matched to its records without guessing.
 
 If a VM fails to boot:
 
-1. Serial console output is Firecracker's log, which lands in the jailer chroot. After a failed run, check:
+1. Serial console output is Firecracker's log, which lands in the jailer chroot.
+   That chroot is inside the gate container, which `--rm` deletes — so to keep it,
+   run the suite with a shell instead and poke around before exiting:
+   ```sh
+   scripts/vmobs-gate sh -c 'go test ./tests/integration/ -run TestM0Boot -v; ls /srv/vmobs/jail/firecracker/*/root/'
    ```
-   /srv/vmobs/jail/firecracker/<id>/root/
-   ```
-2. The vsock readiness timeout is 60 seconds. If the guest never answers, the kernel panic log is in the Firecracker log file inside the chroot.
-3. Run `scripts/linux 'dmesg | tail -40'` to check for KVM or kernel errors on the host.
-4. Verify `vmobs-fixture` group gid matches what the helper expects: `getent group vmobs-fixture`.
+2. The vsock readiness timeout is 60 seconds. If the guest never answers, the
+   kernel panic log is in the Firecracker log file inside the chroot.
+3. `scripts/linux 'dmesg | tail -40'` checks for KVM or kernel errors on the host.
+   KVM errors surface on the host, not in the container.
+4. `scripts/vmobs-gate getent group vmobs-fixture` shows the gid the container
+   made, which must match the one the root helper accepts.

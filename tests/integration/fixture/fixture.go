@@ -28,7 +28,8 @@ import (
 )
 
 const (
-	// helperPath is the privileged root helper installed by scripts/aibox03/setup.sh.
+	// helperPath is the privileged root helper. deploy/Dockerfile.gate installs it
+	// into the gate container from tests/integration/fixture/vmobs-root-helper.
 	helperPath = "/usr/local/sbin/vmobs-root-helper"
 
 	// stageBase is where the helper expects per-VM staging directories.
@@ -85,12 +86,12 @@ func PrepareVM(t *testing.T, repoRoot, id string, n int, alloc *network.Allocato
 	t.Helper()
 
 	uid := 20000 + n
-	// GID is the shared vmobs-fixture group (gid 36000, created by scripts/aibox03/setup.sh).
+	// GID is the shared vmobs-fixture group (gid 36000, created in the appliance image).
 	// The root helper sets umask 0002 so sockets come out group-writable by this gid;
 	// harper's shell session must be in this group to connect to VM sockets.
 	grp, err := user.LookupGroup("vmobs-fixture")
 	if err != nil {
-		t.Fatalf("PrepareVM %s: vmobs-fixture group not found (run scripts/aibox03/setup.sh): %v", id, err)
+		t.Fatalf("PrepareVM %s: vmobs-fixture group not found (run this suite with scripts/vmobs-gate): %v", id, err)
 	}
 	gid, err := strconv.Atoi(grp.Gid)
 	if err != nil {
@@ -150,7 +151,7 @@ func (v *VM) Start(t *testing.T) {
 	t.Cleanup(func() { v.Stop(t) })
 
 	// Stage the four required files into /srv/vmobs/fixture/<id>/staging/.
-	// /srv/vmobs/fixture is harper:vmobs-fixture 0775 (setup.sh:44) — no sudo needed.
+	// /srv/vmobs/fixture belongs to the gate uid, group vmobs-fixture, 0775 — no sudo needed.
 	// Staging sources: vmlinux + rootfs.ext4 from images/dist/; others from buildDir.
 	stageSources := map[string]string{
 		"vmlinux":        filepath.Join(v.repoRoot, "images", "dist", "vmlinux"),
@@ -386,7 +387,7 @@ func BuildVMConfig(repoRoot, id string, cid uint32, outDir string) (*guest.BootC
 // Private helpers
 // ------------------------------------------------------------------
 
-// stageFiles creates stagingDir (harper owns /srv/vmobs/fixture per setup.sh) and
+// stageFiles creates stagingDir (the gate uid owns /srv/vmobs/fixture) and
 // copies each named file into it. Real copies only — the root helper refuses staging
 // files with hardlink count >1 or any symlink anywhere in staging.
 func stageFiles(stagingDir string, sources map[string]string) error {

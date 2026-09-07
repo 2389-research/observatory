@@ -81,8 +81,9 @@ RUN apt-get update -qq \
 # readable by the next. 2389 sits below the jail uid range the root helper
 # accepts ([10000,59999]), so it can never collide with a VM's uid. The
 # vmobs-fixture group is gid 36000 because firecracker binds each VM's v.sock as
-# that group and the daemon has to traverse it -- the same fixed gid
-# scripts/aibox03/setup.sh creates on a bare-metal host.
+# that group and the daemon has to traverse it. The gid is fixed rather than
+# allocated because the root helper the M0 fixture drives rejects a gid outside
+# [10000,59999], and a --system group would land below 1000.
 RUN groupadd --gid 36000 vmobs-fixture \
  && groupadd --gid 2389 vmobs \
  && useradd --uid 2389 --gid 2389 --groups vmobs-fixture --home-dir /var/lib/vmobs \

@@ -157,8 +157,11 @@ func TestGuestChannelPassWithLiveTempSocket(t *testing.T) {
 	}
 }
 
-// TestGuestChannelFailWhenSocketAbsent verifies that guest_channel fails with
-// remediation naming setup.sh when the privd socket does not exist.
+// TestGuestChannelFailWhenSocketAbsent verifies that guest_channel fails with a
+// remediation naming vmobs-privd when the socket does not exist. The operator
+// reading this line is looking at a container whose privd died at startup, so
+// the remedy has to point at the process and its logs rather than at a command
+// to run.
 func TestGuestChannelFailWhenSocketAbsent(t *testing.T) {
 	r := preflight.New(preflight.Config{
 		DataDir:     t.TempDir(),
@@ -177,8 +180,8 @@ func TestGuestChannelFailWhenSocketAbsent(t *testing.T) {
 	if gc.Remediation == nil {
 		t.Fatal("guest_channel fail: remediation must be set")
 	}
-	if !strings.Contains(gc.Remediation.Action, "setup.sh") {
-		t.Errorf("remediation must name setup.sh: %q", gc.Remediation.Action)
+	if !strings.Contains(gc.Remediation.Action, "vmobs-privd") {
+		t.Errorf("remediation must name vmobs-privd: %q", gc.Remediation.Action)
 	}
 }
 

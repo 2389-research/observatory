@@ -1,5 +1,5 @@
 // ABOUTME: M1a gate test: real Firecracker runtime slice — privd, jailer, runner, guestd.
-// ABOUTME: Requires VMOBS_FIXTURE=1 and scripts/aibox03/setup.sh (incl. vmobs-privd) to have run.
+// ABOUTME: Requires the gate container: run this suite with scripts/vmobs-gate.
 
 //go:build linux
 
@@ -31,7 +31,8 @@ import (
 	"github.com/2389-research/observatory/internal/lock"
 )
 
-// m1aPrivdSock is the socket path installed by scripts/aibox03/setup.sh.
+// m1aPrivdSock is the socket path the gate container's privd binds
+// (deploy/gate-entrypoint.sh), the same one the appliance uses.
 const m1aPrivdSock = "/run/vmobs/privd.sock"
 
 // m1aRuntimeRoot is the primary gate daemon's Paths.Runtime. It must be exactly
@@ -41,7 +42,7 @@ const m1aPrivdSock = "/run/vmobs/privd.sock"
 // <JailBase>/firecracker/<id>/root/v.sock from it (internal/jailer/launch.go:179,196;
 // internal/jailer/stop.go:368) and dial it host-side. privd creates the real chroot
 // under ITS OWN --jail-base, which the installed unit sets to /srv/vmobs/jail
-// (scripts/aibox03/vmobs-privd.service); its --stage-root is /srv/vmobs/stage. So
+// (deploy/gate-entrypoint.sh); its --stage-root is /srv/vmobs/stage. So
 // /srv/vmobs is the only Paths.Runtime that satisfies both derivations against the
 // installed privd.
 const m1aRuntimeRoot = "/srv/vmobs"
@@ -120,16 +121,17 @@ const (
 // Call AFTER gateSkipChecks.
 func m1aSkipChecks(t *testing.T) {
 	t.Helper()
-	// vmobs-privd socket installed by setup.sh.
+	// vmobs-privd socket, bound by the gate container's entrypoint.
 	if _, err := os.Stat(m1aPrivdSock); os.IsNotExist(err) {
-		t.Skipf("privd socket absent at %s; run scripts/aibox03/setup.sh to install vmobs-privd", m1aPrivdSock)
+		t.Skipf("privd socket absent at %s; run this suite with scripts/vmobs-gate", m1aPrivdSock)
 	}
-	// Stage dir and jail base are created and owned by the operator by setup.sh.
+	// Stage dir and jail base are created by the gate container's entrypoint and
+	// owned by the uid the gate runs as.
 	// Both derive from m1aRuntimeRoot (one source of truth) and are checked once
 	// here; startDaemon relies on this check instead of repeating it.
 	for _, d := range []string{m1aStageBaseDir, m1aJailBase} {
 		if _, err := os.Stat(d); os.IsNotExist(err) {
-			t.Skipf("dir absent at %s; run scripts/aibox03/setup.sh to create it", d)
+			t.Skipf("dir absent at %s; run this suite with scripts/vmobs-gate", d)
 		}
 	}
 }
@@ -277,7 +279,7 @@ func startDaemon(t *testing.T, repoRoot, daemonBin, runnerBin, label string, opt
 	// "/jail") matches privd's real --jail-base. See the m1aRuntimeRoot doc comment.
 	runtimeDir := m1aRuntimeRoot
 
-	// /srv/vmobs/stage and /srv/vmobs/jail are provisioned by scripts/aibox03/setup.sh,
+	// /srv/vmobs/stage and /srv/vmobs/jail are provisioned by the gate container,
 	// not by this test: /srv/vmobs/jail is root:root 0755 (traversable, not writable by
 	// this test's uid), and MkdirAll-ing the stage dir here would risk it silently
 	// diverging from the production layout. m1aSkipChecks already verified both exist

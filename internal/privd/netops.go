@@ -1,5 +1,5 @@
 // ABOUTME: RealOps network half: AllocateNetwork and ReleaseNetwork as argv execs.
-// ABOUTME: Ports net-setup/net-teardown from scripts/aibox03/vmobs-root-helper, command for command.
+// ABOUTME: Ports net-setup/net-teardown from the M0 fixture's vmobs-root-helper, command for command.
 
 //go:build linux
 

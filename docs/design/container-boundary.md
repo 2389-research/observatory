@@ -64,8 +64,9 @@ privd serves five verbs, each executed as root. This is what each one does.
 Sources: `internal/privd/netops.go:203-212` (the verb sequence verbatim),
 `internal/privd/vmops.go:310-323` (the jailer argv),
 `internal/privd/vmops.go:659-697` (signal and release),
-`scripts/aibox03/vmobs-root-helper:39-141` (the same sequence in the
-sudo-gated helper).
+the `net-setup` and `jail-start` verbs of
+`tests/integration/fixture/vmobs-root-helper` (the same sequence in the
+sudo-gated M0 helper).
 
 **The guest channel needs no device.** `internal/runner/runner.go:52` and
 `:226` dial a **unix socket** — `<JailBase>/firecracker/<id>/root/v.sock` —

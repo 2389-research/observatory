@@ -1,0 +1,133 @@
+#!/bin/sh
+# ABOUTME: Fills a running vmobs appliance with a few live microVMs so the fleet
+# ABOUTME: page at /ui/ has something on it. Usage: scripts/vmobs-demo up|down|status
+#
+# Not a test. It proves nothing on its own; it makes the product visible.
+#
+# It talks to the API and nothing else. The appliance already is the daemon --
+# `scripts/vmobs-container up` starts it with the pinned firecracker, the pinned
+# guest images and the `standard` template all inside the image -- so a demo that
+# built its own binaries and wrote its own config would be showing you a second
+# vmobs rather than the one you installed.
+set -eu
+
+API="http://${VMOBS_LISTEN:-127.0.0.1:8787}/api/v1"
+COUNT="${VMOBS_DEMO_VMS:-3}"
+PREFIX=demo-
+
+# Small VMs: three of these fit well clear of the gate's ~21 GB disk floor
+# (gotchas.md). A demo that leaks disk takes the host out of service.
+VCPU=1
+MEM_MIB=512
+ROOT_DISK_MIB=2048
+WORKSPACE_DISK_MIB=1024
+
+die() { echo "vmobs-demo: $*" >&2; exit 1; }
+
+command -v curl >/dev/null 2>&1 || die "curl is not installed"
+command -v jq   >/dev/null 2>&1 || die "jq is not installed; this script reads the API's JSON"
+
+api() {
+    # --fail-with-body: a 4xx must be a failure, and the typed body is the only
+    # thing that says why. Plain -sS reports a refusal as success.
+    curl -sS --fail-with-body "$@"
+}
+
+require_api() {
+    api "$API/meta" >/dev/null 2>&1 || die "no API at $API.
+  Start the appliance first:
+    scripts/vmobs-container up
+  or point this at another one:
+    VMOBS_LISTEN=host:port scripts/vmobs-demo $1"
+}
+
+# The API is the list of demo VMs. Keeping a file of the ids this script created
+# would go stale the moment anyone deleted one by hand, and then teardown would
+# report a failure for a VM that is already gone.
+#
+# Only VMs still holding resources count: a deleted VM keeps its row for ever
+# (SPEC §5.4), so an unfiltered list never drains. `stopped` and `failed` are in
+# both lists because stopping a VM releases its memory and vCPU but not its
+# disk, and a failed VM holds everything until someone deletes it -- a teardown
+# that ignored those two would report success with 6 GB still gone.
+DELETABLE='state=provisioning&state=starting&state=running&state=paused&state=stopping&state=stopped&state=failed'
+LIVE="$DELETABLE&state=deleting"
+
+demo_ids() {
+    api "$API/vms?$1" | jq -r --arg p "$PREFIX" '.vms[] | select(.name | startswith($p)) | .vm_id'
+}
+
+cmd_up() {
+    require_api up
+    echo "vmobs-demo: creating $COUNT VMs"
+    i=1
+    while [ "$i" -le "$COUNT" ]; do
+        body="$(api -X POST "$API/vms" -H 'content-type: application/json' -d "{
+            \"name\": \"$PREFIX$i\",
+            \"template_id\": \"standard\",
+            \"vcpu_count\": $VCPU,
+            \"memory_mib\": $MEM_MIB,
+            \"root_disk_mib\": $ROOT_DISK_MIB,
+            \"workspace_disk_mib\": $WORKSPACE_DISK_MIB
+        }")" || { echo "vmobs-demo:   $PREFIX$i failed: $body" >&2; i=$((i+1)); continue; }
+        echo "vmobs-demo:   $PREFIX$i = $(printf '%s' "$body" | jq -r .vm_id)"
+        i=$((i+1))
+    done
+
+    echo
+    echo "vmobs-demo: up. From your laptop:"
+    echo "  ssh -N -L 8787:${VMOBS_LISTEN:-127.0.0.1:8787} $(id -un)@$(hostname)"
+    echo "  open http://127.0.0.1:8787/ui/"
+    echo "vmobs-demo: the daemon's log is: scripts/vmobs-container logs"
+}
+
+cmd_down() {
+    require_api down
+    for id in $(demo_ids "$DELETABLE"); do
+        echo "vmobs-demo: deleting $id"
+        # force=true: the API refuses to delete a live VM without it, and every
+        # VM this script creates is live. Without force the teardown reports
+        # success while leaving firecracker processes and their disk behind.
+        if ! err="$(api -X DELETE "$API/vms/$id?force=true" 2>&1)"; then
+            echo "vmobs-demo:   delete $id failed: $err" >&2
+        fi
+    done
+
+    # Deletion is asynchronous. Wait for release to land, so `down` returning
+    # means the disk is actually back.
+    left=""
+    n=0
+    while [ "$n" -lt 60 ]; do
+        # The body is checked before it is counted. Piping a failed request
+        # straight into jq gives a count of zero, which reads exactly like a
+        # teardown that finished.
+        if ! body="$(api "$API/vms?$LIVE")"; then
+            echo "vmobs-demo:   the API stopped answering during teardown: $body" >&2
+            left=""
+            break
+        fi
+        left="$(printf '%s' "$body" | jq --arg p "$PREFIX" '[.vms[] | select(.name | startswith($p))] | length')"
+        [ "$left" = "0" ] && break
+        sleep 1
+        n=$((n+1))
+    done
+    [ "${left:-0}" = "0" ] || echo "vmobs-demo:   $left VM(s) still live after 60s" >&2
+    echo "vmobs-demo: down"
+}
+
+cmd_status() {
+    require_api status
+    api "$API/host/status" | jq '{runtime: .runtime, vms: .vms}'
+    echo "--- demo VMs ---"
+    api "$API/vms?$LIVE" | jq -r --arg p "$PREFIX" \
+        '.vms[] | select(.name | startswith($p)) | "\(.name)  \(.vm_id)  \(.observed_state)"'
+    echo "--- host disk ---"
+    df -m / | tail -1
+}
+
+case "${1:-}" in
+    up)     cmd_up ;;
+    down)   cmd_down ;;
+    status) cmd_status ;;
+    *)      die "usage: scripts/vmobs-demo up|down|status" ;;
+esac

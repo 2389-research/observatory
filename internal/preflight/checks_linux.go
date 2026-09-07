@@ -100,7 +100,7 @@ func (r *Runner) checkArchKVM() Check {
 			Evidence: []string{"open /dev/kvm: no such file or directory"},
 			Remediation: &Remediation{
 				Cause:  "kvm_absent",
-				Action: "run scripts/aibox03/setup.sh to load the kvm module and ensure KVM is supported",
+				Action: "load the kvm module on the host (modprobe kvm_intel or kvm_amd) and pass --device /dev/kvm to the container",
 			},
 		}
 	}
@@ -344,7 +344,7 @@ func kernelRelease() string {
 // guestChannelCheck dials the privd socket (1s timeout) and stats the stage root.
 // Pass: connect succeeds and stage root is an existing writable directory.
 // Fail: socket absent/unreachable, or stage root not configured/missing.
-// Remediation always names scripts/aibox03/setup.sh.
+// Remediation names the container that owns privd and the stage root.
 func guestChannelCheck(cfg Config) Check {
 	id := "guest_channel"
 
@@ -359,7 +359,7 @@ func guestChannelCheck(cfg Config) Check {
 			},
 			Remediation: &Remediation{
 				Cause:  "not_configured",
-				Action: "run scripts/aibox03/setup.sh to install vmobs-privd and configure the adapter",
+				Action: "set runtime.privileged_socket and runtime.stage_root in the daemon config; the appliance image ships both in /etc/vmobs/config.yaml",
 			},
 		}
 	}
@@ -376,7 +376,7 @@ func guestChannelCheck(cfg Config) Check {
 			Evidence: append(evidence, fmt.Sprintf("dial %s: %v", cfg.PrivdSocket, err)),
 			Remediation: &Remediation{
 				Cause:  "privd_unreachable",
-				Action: "run scripts/aibox03/setup.sh to install and start vmobs-privd",
+				Action: "vmobs-privd is not answering; it starts with the appliance (deploy/entrypoint.sh), so read the container logs for why it exited",
 			},
 		}
 	}
@@ -393,7 +393,7 @@ func guestChannelCheck(cfg Config) Check {
 			Evidence: append(evidence, fmt.Sprintf("stat %s: %v", cfg.StageRoot, err)),
 			Remediation: &Remediation{
 				Cause:  "stage_root_absent",
-				Action: "run scripts/aibox03/setup.sh to create the stage root directory",
+				Action: "create the stage root and give it to the daemon's uid; the appliance does this at start, so an absent one means the /srv/vmobs mount is not what the daemon was configured for",
 			},
 		}
 	}
@@ -405,7 +405,7 @@ func guestChannelCheck(cfg Config) Check {
 			Evidence: append(evidence, fmt.Sprintf("stat %s: not a directory", cfg.StageRoot)),
 			Remediation: &Remediation{
 				Cause:  "stage_root_not_dir",
-				Action: "run scripts/aibox03/setup.sh to set up the stage root directory correctly",
+				Action: "the configured stage root is a file, not a directory; point runtime.stage_root at a directory",
 			},
 		}
 	}
@@ -420,7 +420,7 @@ func guestChannelCheck(cfg Config) Check {
 			Evidence: append(evidence, fmt.Sprintf("access %s W_OK: %v", cfg.StageRoot, err)),
 			Remediation: &Remediation{
 				Cause:  "stage_root_not_writable",
-				Action: "run scripts/aibox03/setup.sh to fix stage root permissions",
+				Action: "give the stage root to the daemon's uid; the appliance runs the daemon as uid 2389",
 			},
 		}
 	}

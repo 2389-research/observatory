@@ -209,7 +209,7 @@ func TestFCBinariesNoLock(t *testing.T) {
 // A configured path with no file behind it gets the same answer as no lock at
 // all — create one — and not the "the file is corrupt" answer. The daemon's
 // startup load used to turn a missing file into a load error, so an operator
-// who had never run setup.sh was told to re-pin a lock that did not exist.
+// with no lock at all was told to re-pin one that did not exist.
 func TestFCBinariesLockFileMissing(t *testing.T) {
 	lockPath := filepath.Join(t.TempDir(), "runtime.lock.json")
 	r := preflight.New(preflight.Config{DataDir: t.TempDir(), LockPath: lockPath})
@@ -263,7 +263,7 @@ func TestFCBinariesMismatch(t *testing.T) {
 }
 
 // TestFCBinariesFollowsARepinWithoutARestart is why the check reads the file
-// itself. scripts/aibox03/setup.sh installs a firecracker release and re-pins
+// itself. A firecracker upgrade installs a release and re-pins
 // runtime.lock.json in one go; a runner holding the lock it parsed at startup
 // then hashes the new binary against the old pin and reports a mismatch that is
 // not there. It is not only a wrong doctor line — the jailer adapter turns any

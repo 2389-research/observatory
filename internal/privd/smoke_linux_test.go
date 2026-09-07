@@ -19,10 +19,11 @@ const privdSockPath = "/run/vmobs/privd.sock"
 
 // TestPrivdLiveSmoke connects to the real privd socket, allocates a network entry,
 // then releases it. Skips when the socket is absent (daemon not installed yet).
-// To install the daemon, run: scripts/aibox03/setup.sh
+// privd runs inside the appliance and the gate container; scripts/vmobs-gate
+// starts one and runs the suite against it.
 func TestPrivdLiveSmoke(t *testing.T) {
 	if _, err := os.Stat(privdSockPath); errors.Is(err, os.ErrNotExist) {
-		t.Skipf("privd socket absent (%s): install daemon via scripts/aibox03/setup.sh", privdSockPath)
+		t.Skipf("privd socket absent (%s): run this suite with scripts/vmobs-gate", privdSockPath)
 	}
 
 	c := &privd.Client{SocketPath: privdSockPath}

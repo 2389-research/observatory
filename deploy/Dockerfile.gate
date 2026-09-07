@@ -1,0 +1,54 @@
+# ABOUTME: The acceptance-gate image: the appliance plus a Go toolchain, so the
+# ABOUTME: gate runs against the shipped artifacts instead of a host install.
+#
+# The gate used to require a host installer: a sudoers file, a systemd unit,
+# binaries under /usr/local and two group edits on the operator's own machine.
+# That script was written five days before the appliance was containerized and
+# outlived it, so running the gate reinstalled a host privd underneath the
+# container it was supposed to be testing.
+#
+# This image ends that. It starts from the image a user installs, so firecracker,
+# the jailer, the guest kernel and the root image are the exact bytes that ship
+# and are never fetched a second time. What it adds is a toolchain, because the
+# gate compiles the daemon, the runner and privd from the checkout under test --
+# our own binaries must come from the source being tested, or the gate reports on
+# whatever was compiled into the image last.
+#
+# Build and run it through scripts/vmobs-gate.
+
+ARG APPLIANCE_IMAGE=ghcr.io/2389-research/observatory:latest
+
+# The same digest deploy/Dockerfile builds the appliance binaries with, so the
+# gate compiles with the toolchain that produced the image it is testing.
+ARG GO_IMAGE=golang@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36
+FROM ${GO_IMAGE} AS toolchain
+
+FROM ${APPLIANCE_IMAGE}
+
+# sudo for the M0 boot fixture, which drives the root helper through it; the rest
+# are what the gate's own subprocesses call. The appliance already carries
+# iproute2, nftables, e2fsprogs and jq.
+RUN apt-get update -qq \
+ && apt-get install -y --no-install-recommends sudo procps iputils-ping curl \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=toolchain /usr/local/go /usr/local/go
+ENV PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+# local: the toolchain in this image is the one that built the appliance. A
+# go.mod bumped past it should fail here rather than quietly downloading a
+# different compiler mid-gate.
+ENV GOTOOLCHAIN=local
+ENV GOCACHE=/gocache GOMODCACHE=/gocache/mod
+
+# The M0 boot fixture stages VMs through this helper rather than privd -- privd
+# ported its verbs (internal/privd/netops.go) but the fixture predates that. The
+# grant is NOPASSWD for one binary and lives only in this throwaway image; the
+# operator's host keeps no sudoers file.
+COPY tests/integration/fixture/vmobs-root-helper /usr/local/sbin/vmobs-root-helper
+RUN chmod 0755 /usr/local/sbin/vmobs-root-helper
+
+COPY deploy/gate-entrypoint.sh /usr/local/bin/vmobs-gate-entrypoint
+RUN chmod 0755 /usr/local/bin/vmobs-gate-entrypoint
+
+ENTRYPOINT ["/usr/local/bin/vmobs-gate-entrypoint"]
+CMD ["go", "test", "./tests/integration/", "-run", "TestM1aGate", "-v"]

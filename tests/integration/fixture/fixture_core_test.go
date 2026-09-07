@@ -265,7 +265,7 @@ func TestCIDDerivation(t *testing.T) {
 }
 
 // TestUIDDerivation checks that UID = 20000+n (unique per VM).
-// GID is the shared vmobs-fixture group (gid 36000 per setup.sh), resolved at runtime
+// GID is the shared vmobs-fixture group (gid 36000 in the appliance image), resolved at runtime
 // via user.LookupGroup — not derived from n.
 func TestUIDDerivation(t *testing.T) {
 	cases := []struct{ n, wantUID int }{

@@ -104,7 +104,7 @@ func (p Paths) StageRoot() string {
 }
 
 // JailBase is the jailer chroot base: <Runtime>/jail. The privd unit's
-// --jail-base flag (scripts/aibox03/vmobs-privd.service) must point at the same
+// --jail-base flag (deploy/entrypoint.sh) must point at the same
 // directory, or the runner dials a v.sock in a chroot privd never created.
 //
 // Empty when the runtime root is unset, for the same reason as StageRoot.

@@ -1,5 +1,5 @@
 // ABOUTME: M0 gate test: jailed two-VM boot, vsock handshake, capability report, disk ownership.
-// ABOUTME: Requires VMOBS_FIXTURE=1 and scripts/aibox03/setup.sh to have been run first.
+// ABOUTME: Requires the gate container: run this suite with scripts/vmobs-gate.
 
 //go:build linux
 
@@ -56,7 +56,7 @@ func findRepoRoot(t *testing.T) string {
 }
 
 // gateSkipChecks runs all prerequisite probes and skips the test if any
-// prerequisite is absent, with a reason naming scripts/aibox03/setup.sh.
+// prerequisite is absent, with a reason naming scripts/vmobs-gate.
 // This mirrors the Task 7 pattern exactly.
 func gateSkipChecks(t *testing.T) {
 	t.Helper()
@@ -65,21 +65,22 @@ func gateSkipChecks(t *testing.T) {
 		t.Skip("set VMOBS_FIXTURE=1 to run root-gated boot integration tests")
 	}
 
-	// All of these are installed by scripts/aibox03/setup.sh.
+	// All of these are provided by the gate container (deploy/Dockerfile.gate,
+	// deploy/gate-entrypoint.sh), which scripts/vmobs-gate builds and runs.
 	const helperPath = "/usr/local/sbin/vmobs-root-helper"
 	if _, err := os.Stat(helperPath); os.IsNotExist(err) {
-		t.Skipf("root helper absent at %s; run scripts/aibox03/setup.sh to install it", helperPath)
+		t.Skipf("root helper absent at %s; run this suite with scripts/vmobs-gate", helperPath)
 	}
 	if _, err := os.Stat("/srv/vmobs"); os.IsNotExist(err) {
-		t.Skipf("/srv/vmobs absent; run scripts/aibox03/setup.sh to create it")
+		t.Skipf("/srv/vmobs absent; run this suite with scripts/vmobs-gate")
 	}
 	if _, err := os.Stat("/usr/local/bin/firecracker"); os.IsNotExist(err) {
-		t.Skipf("firecracker absent at /usr/local/bin/firecracker; run scripts/aibox03/setup.sh to install it")
+		t.Skipf("firecracker absent at /usr/local/bin/firecracker; run this suite with scripts/vmobs-gate")
 	}
-	// vmobs-fixture group is created by scripts/aibox03/setup.sh.
+	// vmobs-fixture group ships in the appliance image at the fixed gid 36000.
 	// user.LookupGroup may need CGO; use getent for portability.
 	if err := exec.Command("getent", "group", "vmobs-fixture").Run(); err != nil {
-		t.Skipf("vmobs-fixture group absent; run scripts/aibox03/setup.sh to create it")
+		t.Skipf("vmobs-fixture group absent; run this suite with scripts/vmobs-gate")
 	}
 }
 

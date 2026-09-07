@@ -1,0 +1,144 @@
+#!/bin/sh
+# ABOUTME: Runs the acceptance gate inside a container built on the appliance image.
+# ABOUTME: Usage: scripts/vmobs-gate [build] [-- <command>]   (default: the gate suite)
+#
+# The gate used to need a host install: a script that put a sudoers file, a
+# systemd unit and two binaries on the operator's machine and enabled a host
+# vmobs-privd. It predated the container by five days and outlived it, so running
+# the gate quietly reinstalled the very thing the container replaced.
+#
+# Everything it did happens here instead, inside a container `docker run --rm`
+# throws away. The host prerequisites are the ones a user installing vmobs
+# already has: docker, /dev/kvm, /dev/net/tun and the loaded AppArmor profile.
+# Nothing here writes to the host.
+#
+# The container gets exactly the boundary the appliance runs under -- same
+# capabilities, devices, seccomp and AppArmor -- because a gate holding
+# privileges no user has proves nothing about what users can do.
+# tests/deploy/gate_test.go fails if the two drift.
+set -eu
+
+cd "$(dirname "$0")/.."
+REPO="$(pwd)"
+
+PROG=vmobs-gate
+. "$REPO/scripts/lib/container.sh"
+
+# The appliance image the gate builds on. The same default compose.yaml uses, so
+# `scripts/vmobs-gate` with no arguments tests the artifacts a stranger installs.
+# Point it at a local build to gate a change to the image itself.
+APPLIANCE="${VMOBS_IMAGE:-ghcr.io/2389-research/observatory:latest}"
+GATE_IMAGE="${VMOBS_GATE_IMAGE:-vmobs-gate:local}"
+
+# Named, not anonymous: the gate compiles the daemon, the runner and privd on
+# every run, and a cold GOCACHE adds minutes to each one.
+CACHE_VOLUME="${VMOBS_GATE_CACHE_VOLUME:-vmobs-gate-cache}"
+
+# Execution records are the point of a real-host run, and `docker run --rm`
+# deletes the container's filesystem the moment the suite finishes. The records
+# go to a host directory instead, mounted at a fixed path inside. It stays
+# outside the checkout: scripts/linux rsyncs the working tree with --delete, so
+# a record written into the repo dies at the next invocation.
+EVIDENCE_DIR="${VMOBS_GATE_EVIDENCE_DIR:-${TMPDIR:-/tmp}/vmobs-evidence}"
+
+usage() {
+    cat >&2 <<'USAGE'
+usage: scripts/vmobs-gate [build] [command ...]
+
+  build            build the gate image and stop
+  command ...      run this in the gate container (default: the integration suite)
+
+  scripts/vmobs-gate
+  scripts/vmobs-gate go test ./tests/integration/ -run TestM1aGate -v
+  scripts/vmobs-gate build
+
+environment:
+  VMOBS_IMAGE                 appliance image to build on (default: the published one)
+  VMOBS_GATE_IMAGE            tag for the gate image
+  VMOBS_GATE_EVIDENCE_DIR     host directory the execution records are written to
+  VMOBS_APPARMOR_PROFILE      set to `unconfined` on a host with no profile loaded
+USAGE
+    exit 3
+}
+
+require_appliance() {
+    docker image inspect "$APPLIANCE" >/dev/null 2>&1 && return
+    note "pulling $APPLIANCE"
+    docker pull "$APPLIANCE" >/dev/null 2>&1 || die "no image $APPLIANCE locally and it could not be pulled.
+  Build one from this checkout first:
+    scripts/vmobs-container build
+  then point the gate at it:
+    VMOBS_IMAGE=vmobs:latest scripts/vmobs-gate"
+}
+
+build_gate() {
+    need_docker
+    require_appliance
+    note "building $GATE_IMAGE on $APPLIANCE"
+    docker build \
+        --file "$REPO/deploy/Dockerfile.gate" \
+        --build-arg "APPLIANCE_IMAGE=$APPLIANCE" \
+        --tag "$GATE_IMAGE" \
+        "$REPO"
+}
+
+run_gate() {
+    need_docker
+    preflight_host
+
+    # The gate compiles from this checkout and writes its evidence back into it,
+    # so it runs as the uid that owns it. privd's --allowed-uid then checks a real
+    # identity rather than being sidestepped by a root test process.
+    uid="$(id -u)"
+    gid="$(id -g)"
+    [ "$uid" -ne 0 ] || die "do not run the gate as root: privd's --allowed-uid check would never be exercised."
+
+    require_guest_images
+
+    # The gate binds its evidence to a revision and refuses to record a real-host
+    # run it cannot name. scripts/linux rsyncs without .git and carries the answer
+    # in these two variables, so they are asked before git and the pair stays
+    # split -- the sha and the dirty flag are separate facts.
+    rev="${VMOBS_SOURCE_REVISION:-}"
+    dirty="${VMOBS_SOURCE_DIRTY:-0}"
+    if [ -z "$rev" ] && git -C "$REPO" rev-parse HEAD >/dev/null 2>&1; then
+        rev="$(git -C "$REPO" rev-parse HEAD)"
+        [ -z "$(git -C "$REPO" status --porcelain)" ] || dirty=1
+    fi
+
+    mkdir -p "$EVIDENCE_DIR"
+
+    note "running the gate as uid $uid against $APPLIANCE"
+    note "records land in $EVIDENCE_DIR"
+    docker run --rm \
+        --init \
+        --network host \
+        --cap-add SYS_ADMIN \
+        --cap-add NET_ADMIN \
+        --device /dev/kvm \
+        --device /dev/net/tun \
+        --security-opt "apparmor=$APPARMOR_PROFILE" \
+        --security-opt "seccomp=$SECCOMP_PROFILE" \
+        --tmpfs /run:mode=0755 \
+        --volume "$REPO:/src" \
+        --volume "$CACHE_VOLUME:/gocache" \
+        --volume "$EVIDENCE_DIR:/evidence" \
+        --env "VMOBS_EVIDENCE_ROOT=/evidence" \
+        --env "VMOBS_GATE_UID=$uid" \
+        --env "VMOBS_GATE_GID=$gid" \
+        --env "VMOBS_SOURCE_REVISION=$rev" \
+        --env "VMOBS_SOURCE_DIRTY=$dirty" \
+        "$GATE_IMAGE" "$@"
+}
+
+case "${1:-}" in
+    -h|--help) usage ;;
+    build) build_gate; exit 0 ;;
+esac
+
+build_gate
+if [ $# -eq 0 ]; then
+    run_gate go test ./tests/integration/ -v -timeout 45m
+else
+    run_gate "$@"
+fi

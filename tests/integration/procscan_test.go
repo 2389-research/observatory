@@ -58,13 +58,13 @@ func countFirecrackerProcs(procRoot string) (count, unreadable int, err error) {
 			continue // kernel thread or zombie: no argv to read
 		}
 		// An exact base-name match, pinned to how this host installs the binary:
-		// scripts/aibox03/setup.sh:35 installs it as /usr/local/bin/firecracker,
+		// The appliance image installs it as /usr/local/bin/firecracker,
 		// and the jailer copies it into each chroot under that same base name. A
 		// substring match would count vmobsd itself whenever its argv mentions
 		// firecracker, which is exactly the false positive this scan must not
 		// have: the count is evidence, and evidence that over-counts is worse
 		// than none. If the install ever keeps a versioned name, change it here
-		// and in setup.sh together.
+		// and in the image together.
 		if filepath.Base(string(argv0)) == "firecracker" {
 			count++
 		}

@@ -54,32 +54,51 @@ func loadService(t *testing.T) composeService {
 }
 
 // dockerRunFlags pulls the values of one repeated flag out of the `docker run`
-// invocation in scripts/vmobs-container. It fails rather than returning an empty
-// set: a regex that stops matching would otherwise turn every drift check below
-// into a comparison of nothing against nothing.
-func dockerRunFlags(t *testing.T, flag string) []string {
+// invocation in a shell script. It fails rather than returning an empty set: a
+// scan that stopped matching would otherwise turn every drift check below into a
+// comparison of nothing against nothing.
+//
+// The block is the `docker run` line plus every line the backslash
+// continuations carry it onto, so it ends where the command does regardless of
+// what each script writes afterwards.
+func dockerRunFlags(t *testing.T, path, flag string) []string {
 	t.Helper()
-	raw, err := os.ReadFile(containerPath)
+	raw, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read %s: %v", containerPath, err)
+		t.Fatalf("read %s: %v", path, err)
 	}
-	start := strings.Index(string(raw), "docker run --detach")
+	lines := strings.Split(string(raw), "\n")
+	start := -1
+	for i, line := range lines {
+		// Comments talk about `docker run` too, and a comment carries no
+		// continuation -- starting there would make the block one line long and
+		// every check below a comparison of nothing against nothing.
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		if strings.Contains(line, "docker run") {
+			start = i
+			break
+		}
+	}
 	if start < 0 {
-		t.Fatalf("%s no longer contains `docker run --detach`; this test cannot see what it passes", containerPath)
+		t.Fatalf("%s contains no `docker run`; this test cannot see what it passes", path)
 	}
-	end := strings.Index(string(raw)[start:], `"$tag" 2>&1`)
-	if end < 0 {
-		t.Fatalf("%s: cannot find the end of the docker run block", containerPath)
+	block := []string{}
+	for i := start; i < len(lines); i++ {
+		block = append(block, lines[i])
+		if !strings.HasSuffix(strings.TrimRight(lines[i], " \t"), "\\") {
+			break
+		}
 	}
-	block := string(raw)[start : start+end]
 
 	re := regexp.MustCompile(regexp.QuoteMeta(flag) + ` +"?([^"\\\n]+)"?`)
 	var found []string
-	for _, m := range re.FindAllStringSubmatch(block, -1) {
+	for _, m := range re.FindAllStringSubmatch(strings.Join(block, "\n"), -1) {
 		found = append(found, strings.TrimSpace(m[1]))
 	}
 	if len(found) == 0 {
-		t.Fatalf("%s: found no %s in the docker run block", containerPath, flag)
+		t.Fatalf("%s: found no %s in the docker run block", path, flag)
 	}
 	return found
 }
@@ -87,7 +106,7 @@ func dockerRunFlags(t *testing.T, flag string) []string {
 // TestComposeGrantsTheSameCapabilities: the two ways to start this container have
 // to agree, or `docker compose up` runs under a boundary nobody measured.
 func TestComposeGrantsTheSameCapabilities(t *testing.T) {
-	want := dockerRunFlags(t, "--cap-add")
+	want := dockerRunFlags(t, containerPath, "--cap-add")
 	got := loadService(t).CapAdd
 	slices.Sort(want)
 	slices.Sort(got)
@@ -99,7 +118,7 @@ func TestComposeGrantsTheSameCapabilities(t *testing.T) {
 // TestComposePassesTheSameDevices: /dev/kvm and /dev/net/tun. Compose writes a
 // device as source:target, so a bare path means both.
 func TestComposePassesTheSameDevices(t *testing.T) {
-	want := dockerRunFlags(t, "--device")
+	want := dockerRunFlags(t, containerPath, "--device")
 	var got []string
 	for _, d := range loadService(t).Devices {
 		got = append(got, strings.SplitN(d, ":", 2)[0])
