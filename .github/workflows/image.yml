@@ -1,0 +1,96 @@
+# ABOUTME: Builds the vmobs appliance image and pushes it to ghcr.io, after
+# ABOUTME: fetching the pinned guest kernel and root image from a release.
+#
+# deploy/Dockerfile bakes the guest kernel and root image into the appliance, and
+# neither is in the checkout: images/dist/ is gitignored because a 575 MiB
+# vmlinux and a 1 GiB rootfs do not belong in git history.
+#
+# So this workflow downloads them. It does not build them, and it cannot: the
+# kernel build is not reproducible. Measured on the host that produced the
+# artifacts runtime.lock.json currently pins --
+#
+#   Linux version 6.1.186 (root@86c79b11d7c2) (gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1)
+#   ... #2 SMP PREEMPT_DYNAMIC Tue Sep  1 14:43:49 UTC 2026
+#
+# -- four things in that banner vary between builds: the build container's
+# random hostname, the unpinned toolchain version, the .version counter, and the
+# timestamp. A rebuild produces a different vmlinux, images/build-all.sh compares
+# it against the pin and exits 1, and it is right to. The bytes the lock names
+# exist only where they were built, which is the other reason to publish them.
+#
+# scripts/fetch-guest-images verifies each download against the same pin before
+# putting it in place, so the image is built from bytes somebody chose.
+#
+# tests/deploy/workflow_test.go holds this file to four properties: every action
+# pinned to a commit, nothing pushed from a pull request, the same Dockerfile and
+# SOURCE_REVISION the local script passes, and fetching rather than rebuilding.
+
+name: image
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Verified by construction: the script refuses any download whose sha256
+      # disagrees with runtime.lock.json, and says what to do when the lock names
+      # no URL yet. Nothing here needs a token -- the release is public.
+      - name: Fetch the pinned guest images
+        run: scripts/fetch-guest-images
+
+      # The same build scripts/vmobs-container runs, with the revision passed the
+      # same way. github.sha is what was checked out: on a pull request that is
+      # the merge commit, which is the thing that was actually built.
+      - name: Build the appliance image
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}
+        run: |
+          set -eu
+          docker build \
+            --file deploy/Dockerfile \
+            --build-arg "SOURCE_REVISION=${{ github.sha }}" \
+            --tag "$IMAGE:${GITHUB_SHA:0:7}" \
+            --tag "$IMAGE:latest" \
+            .
+
+      # What the image says about itself, read out of the image rather than out
+      # of this file. A build that got the revision wrong prints it here.
+      - name: Report what was built
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}
+        run: |
+          set -eu
+          echo "revision: $(docker run --rm --entrypoint cat "$IMAGE:${GITHUB_SHA:0:7}" /opt/vmobs/SOURCE_REVISION)"
+          docker image ls "$IMAGE" --format '{{.Repository}}:{{.Tag}}  {{.Size}}'
+
+      # A pull request builds and stops there. The job holds packages: write, and
+      # a contributor's branch must not be able to publish under the name a
+      # stranger installs from.
+      - name: Push the appliance image
+        if: github.event_name != 'pull_request'
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}
+        run: |
+          set -eu
+          echo "${{ github.token }}" |
+            docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "$IMAGE:${GITHUB_SHA:0:7}"
+          docker push "$IMAGE:latest"
+          echo "pushed $IMAGE:${GITHUB_SHA:0:7}"
