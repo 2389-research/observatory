@@ -678,3 +678,36 @@ have had the gate call an untouched tree stale. `web/package.json` now pins
 embedded filesystem — what the daemon serves, not what sits on disk — failing on
 the dev JSX transform or any absolute source path. When a gate's question is
 "did a rebuild change anything", ask separately what the artifact *is*.
+
+## git-filter-repo dies on a multi-line git alias
+
+`git filter-repo` reads your settings with `dict(line.split(b'=', 1) for line
+in git config --list)`. A multi-line alias in `~/.gitconfig` makes that command
+emit continuation lines with no `=`, and the dict comprehension raises
+
+    ValueError: dictionary update sequence element #15 has length 1; 2 is required
+
+from `GitUtils.get_config_settings`, naming neither git nor the alias. Run it
+with the user config out of the way instead of editing the user's config:
+
+    : > /tmp/empty-gitconfig
+    env GIT_CONFIG_GLOBAL=/tmp/empty-gitconfig GIT_CONFIG_SYSTEM=/tmp/empty-gitconfig \
+        git-filter-repo --replace-text map.txt --force
+
+Two things worth knowing before you reach for it. `--replace-text` rewrites blob
+*contents* only — commit messages need `--replace-message`, and they are worth
+checking separately. And a rewrite that changes no file at the tip leaves the
+tip tree hash identical, which means a gate run before the rewrite still counts
+after it; compare `git rev-parse HEAD^{tree}` across the rewrite to know.
+
+## A captured fixture carries more than the field you captured it for
+
+`internal/network/testdata/aibox03-routes*.json` is real `ip -json route` output
+from the host. The tests read four things out of it — bare host addresses, `/32`
+peer routes in table 52, local/broadcast/multicast entries to filter — and the
+file was scrubbed for one IP address before publication. It was carrying 41
+tailnet peers, the home LAN prefix, two ULA prefixes, and the host NIC's MAC,
+which appears nowhere as a MAC: it is the EUI-64 suffix of three IPv6 addresses,
+where `00:11:22:33:44:55` becomes `…:211:22ff:fe33:4455`. Every address in both
+files is synthetic now. Renumber a captured fixture by what it *contains*, not
+by the field that made you look at it.
