@@ -157,3 +157,34 @@ func TestAppArmorAllowsTheProbeChildsPrivateRoot(t *testing.T) {
 		t.Errorf("profile is missing %q; privd cannot exec its jail probe child without it", want)
 	}
 }
+
+// TestAppArmorAllowsTheNetnsBind: `ip netns add` names a network namespace by
+// bind-mounting /proc/self/ns/net onto a file, and privd runs that verb for
+// every VM. Its startup probe makes the same mount against its own scratch
+// directory rather than /run/netns, so a probe that dies mid-flight leaves no
+// named namespace behind. The jailer makes neither mount, which is why the trace
+// that produced the rules above never saw them.
+//
+// Measured 2026-09-06 on aibox03 with the profile loaded and neither rule
+// present:
+//
+//	apparmor="DENIED" operation="mount" class="mount" info="failed mntpnt match"
+//	error=-13 profile="vmobs-jailer" name="/tmp/vmobs-jailprobe-1810112568/netns"
+//	comm="vmobs-privd" srcname="/" flags="rw, bind"
+//
+// The probe reported netns_create as a permission error and privd refused to
+// bind its socket, so the appliance came up with no API at all.
+func TestAppArmorAllowsTheNetnsBind(t *testing.T) {
+	raw, err := os.ReadFile(apparmorPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", apparmorPath, err)
+	}
+	for _, want := range []string{
+		"mount options=(rw, bind) -> /run/netns/*,",
+		"mount options=(rw, bind) -> /tmp/vmobs-jailprobe-*/netns,",
+	} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("profile is missing %q; privd cannot name a network namespace without it", want)
+		}
+	}
+}
