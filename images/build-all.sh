@@ -1,6 +1,6 @@
 #!/bin/bash
 # ABOUTME: Orchestrates the full guest image pipeline: kernel build + rootfs build, then
-# ABOUTME: updates runtime.lock.json in-place with computed sha256s and artifact paths.
+# ABOUTME: checks the computed sha256s against the pins in runtime.lock.json.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -8,6 +8,21 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DIST_DIR="$REPO_ROOT/images/dist"
 LOCK_FILE="$REPO_ROOT/runtime.lock.json"
 LOG_DIR="$DIST_DIR/logs"
+REPIN=()
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --repin) REPIN=(--repin); shift ;;
+        -h|--help)
+            echo "usage: images/build-all.sh [--repin]"
+            echo ""
+            echo "Builds the guest kernel and root image, then checks the result against"
+            echo "the pins in runtime.lock.json. --repin rewrites those pins instead, for"
+            echo "a deliberate kernel or snapshot bump; commit the lock afterwards."
+            exit 0 ;;
+        *) echo "[build-all] unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
 
 mkdir -p "$DIST_DIR" "$LOG_DIR"
 
@@ -27,57 +42,19 @@ echo "[build-all] === STEP 2: rootfs build ==="
 bash "$SCRIPT_DIR/rootfs/build.sh"
 
 # ---------------------------------------------------------------------------
-# Step 3: Load computed pins
+# Step 3: Check the build against runtime.lock.json
 # ---------------------------------------------------------------------------
-echo "[build-all] loading pins..."
+echo "[build-all] === STEP 3: pins ==="
+bash "$SCRIPT_DIR/lock-pins.sh" --dist "$DIST_DIR" --lock "$LOCK_FILE" "${REPIN[@]+"${REPIN[@]}"}"
+
+# ---------------------------------------------------------------------------
+# Step 4: Print summary
+# ---------------------------------------------------------------------------
 # shellcheck source=images/dist/kernel.pins
 . "$DIST_DIR/kernel.pins"
 # shellcheck source=images/dist/rootfs.pins
 . "$DIST_DIR/rootfs.pins"
 
-# Verify artifacts exist
-if [ ! -f "$DIST_DIR/vmlinux" ]; then
-    echo "[build-all] ERROR: vmlinux not found in $DIST_DIR" >&2
-    exit 1
-fi
-if [ ! -f "$DIST_DIR/rootfs.ext4" ]; then
-    echo "[build-all] ERROR: rootfs.ext4 not found in $DIST_DIR" >&2
-    exit 1
-fi
-
-# ---------------------------------------------------------------------------
-# Step 4: Update runtime.lock.json via jq
-# ---------------------------------------------------------------------------
-echo "[build-all] updating $LOCK_FILE ..."
-
-# jq in-place update: set all guest_kernel.* and root_image.* fields
-TMP_LOCK="${LOCK_FILE}.tmp.$$"
-jq \
-    --arg version "$KERNEL_VERSION" \
-    --arg url "$KERNEL_URL" \
-    --arg src_sha256 "$KERNEL_SHA256" \
-    --arg cfg_sha256 "$CONFIG_SHA256" \
-    --arg vmlinux_sha256 "$VMLINUX_SHA256" \
-    --arg rootfs_sha256 "$ROOTFS_SHA256" \
-    --arg base_image_ref "$BASE_IMAGE_REF" \
-    --arg apt_snapshot "$APT_SNAPSHOT" \
-    '.guest_kernel.version = $version |
-     .guest_kernel.source_url = $url |
-     .guest_kernel.source_sha256 = $src_sha256 |
-     .guest_kernel.config_sha256 = $cfg_sha256 |
-     .guest_kernel.vmlinux_sha256 = $vmlinux_sha256 |
-     .root_image.sha256 = $rootfs_sha256 |
-     .root_image.base_image_ref = $base_image_ref |
-     .root_image.apt_snapshot = $apt_snapshot' \
-    "$LOCK_FILE" > "$TMP_LOCK"
-
-mv "$TMP_LOCK" "$LOCK_FILE"
-
-echo "[build-all] runtime.lock.json updated"
-
-# ---------------------------------------------------------------------------
-# Step 5: Print summary
-# ---------------------------------------------------------------------------
 echo ""
 echo "[build-all] === BUILD COMPLETE ==="
 echo "[build-all] kernel version:    $KERNEL_VERSION"
@@ -87,6 +64,3 @@ echo "[build-all] vmlinux sha256:    $VMLINUX_SHA256"
 echo "[build-all] rootfs sha256:     $ROOTFS_SHA256"
 echo "[build-all] base image:        $BASE_IMAGE_REF"
 echo "[build-all] apt snapshot:      $APT_SNAPSHOT"
-echo ""
-echo "[build-all] Updated lock:"
-cat "$LOCK_FILE"

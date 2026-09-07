@@ -1,0 +1,153 @@
+#!/bin/sh
+# ABOUTME: Uploads the built guest kernel and root image to a GitHub release and
+# ABOUTME: records their download URLs in runtime.lock.json, so installs can fetch.
+#
+# Publishing is what turns a half-hour kernel compile into a download. It runs
+# once per set of artifacts, by someone with write access to the repository; the
+# install side is scripts/fetch-guest-images, which needs nothing but curl.
+#
+# The upload path is unexercised until the repository exists: everything below
+# the digest check has never run against a real release. The checks above it have
+# tests, and the lock is rewritten last, after the upload reports success, so a
+# failed publish leaves the checkout as it found it.
+set -eu
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd)
+ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
+LOCK="$ROOT/runtime.lock.json"
+DIST="$ROOT/images/dist"
+TAG=""
+REPO=""
+
+die() { printf 'publish-guest-images: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+    cat <<'USAGE'
+usage: scripts/publish-guest-images --tag TAG [--repo OWNER/NAME] [--lock PATH] [--dist DIR]
+
+Uploads images/dist/vmlinux and images/dist/rootfs.ext4 to the GitHub release
+named by --tag, creating it if it does not exist, then writes the resulting
+download URLs into runtime.lock.json. Commit the lock afterwards.
+
+  --tag TAG          the release to publish under, e.g. guest-images-6.1.186
+  --repo OWNER/NAME  the repository; defaults to whatever gh resolves here
+
+The artifacts must already match the digests runtime.lock.json pins. That is the
+point of the pins: an installer downloads these bytes and verifies them against
+the same lock. To publish a different build, repin it first with
+`bash images/build-all.sh --repin` and commit that.
+USAGE
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --tag) TAG="$2"; shift 2 ;;
+        --repo) REPO="$2"; shift 2 ;;
+        --lock) LOCK="$2"; shift 2 ;;
+        --dist) DIST="$2"; shift 2 ;;
+        -h|--help) usage; exit 0 ;;
+        *) die "unknown argument: $1" ;;
+    esac
+done
+
+[ -n "$TAG" ] || { usage >&2; die "no release named; pass --tag TAG"; }
+
+command -v gh >/dev/null 2>&1 || die "gh is not on PATH; install the GitHub CLI (https://cli.github.com) and run 'gh auth login'"
+command -v jq >/dev/null 2>&1 || die "jq is not on PATH"
+
+digest_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | cut -d' ' -f1
+    else
+        shasum -a 256 "$1" | cut -d' ' -f1
+    fi
+}
+
+lock_field() { jq -r "$1 // \"\"" "$LOCK"; }
+
+# Check both artifacts against the lock before uploading either. A publish that
+# gets halfway leaves a release carrying one verifiable file and one that fails
+# every installer's check.
+check_one() {
+    name=$1
+    want=$2
+    file="$DIST/$name"
+
+    [ -n "$want" ] || die "$LOCK pins no sha256 for $name"
+    [ -f "$file" ] || die "$name is not in $DIST — build it first:
+    bash images/build-all.sh"
+
+    have=$(digest_of "$file")
+    if [ "$have" != "$want" ]; then
+        die "$name does not match the digest $LOCK pins, refusing to publish it.
+  lock: $want
+  file: $have
+  Every install verifies the download against the lock, so publishing these bytes
+  would fail for everyone who fetched them. If this build is the new truth:
+    bash images/build-all.sh --repin   (then commit runtime.lock.json)"
+    fi
+    echo "$name matches its pin"
+}
+
+check_one vmlinux "$(lock_field .guest_kernel.vmlinux_sha256)"
+check_one rootfs.ext4 "$(lock_field .root_image.sha256)"
+
+# gh takes -R OWNER/NAME or resolves the repository from the checkout's remote.
+if [ -n "$REPO" ]; then
+    set -- -R "$REPO"
+else
+    set --
+    gh repo view --json nameWithOwner >/dev/null 2>&1 ||
+        die "gh cannot tell which repository this is.
+  Pass --repo OWNER/NAME, or add a remote: git remote add origin git@github.com:OWNER/NAME.git"
+fi
+
+if gh release view "$TAG" "$@" >/dev/null 2>&1; then
+    echo "uploading to the existing release $TAG"
+    gh release upload "$TAG" "$DIST/vmlinux" "$DIST/rootfs.ext4" --clobber "$@"
+else
+    echo "creating release $TAG"
+    gh release create "$TAG" "$DIST/vmlinux" "$DIST/rootfs.ext4" \
+        --title "$TAG" \
+        --notes "Guest kernel and root image pinned by runtime.lock.json." "$@"
+fi
+
+# Ask GitHub for the URLs rather than constructing them: the asset record is the
+# thing an installer will actually fetch, and it carries GitHub's own digest of
+# the stored bytes, which is worth comparing against the pin one last time.
+assets=$(gh release view "$TAG" --json assets "$@")
+
+url_of() { printf '%s' "$assets" | jq -r --arg n "$1" '.assets[] | select(.name == $n) | .url'; }
+digest_from_github() { printf '%s' "$assets" | jq -r --arg n "$1" '.assets[] | select(.name == $n) | .digest'; }
+
+vmlinux_url=$(url_of vmlinux)
+rootfs_url=$(url_of rootfs.ext4)
+[ -n "$vmlinux_url" ] || die "the release $TAG has no asset named vmlinux after the upload"
+[ -n "$rootfs_url" ] || die "the release $TAG has no asset named rootfs.ext4 after the upload"
+
+# GitHub reports a digest as "sha256:<hex>", or null for an asset stored before
+# it recorded them. A null is not a mismatch, so it is reported and not fatal.
+confirm_digest() {
+    got=$(digest_from_github "$1")
+    case "$got" in
+        sha256:"$2") ;;
+        null|"") echo "note: GitHub reports no digest for $1; nothing to cross-check" ;;
+        *) die "GitHub stored $1 with digest $got, not sha256:$2 — the upload is corrupt" ;;
+    esac
+}
+confirm_digest vmlinux "$(lock_field .guest_kernel.vmlinux_sha256)"
+confirm_digest rootfs.ext4 "$(lock_field .root_image.sha256)"
+
+TMP="$LOCK.tmp.$$"
+jq --arg k "$vmlinux_url" --arg r "$rootfs_url" \
+    '.guest_kernel.vmlinux_url = $k | .root_image.url = $r' \
+    "$LOCK" > "$TMP"
+mv "$TMP" "$LOCK"
+
+echo ""
+echo "published $TAG"
+echo "  vmlinux:     $vmlinux_url"
+echo "  rootfs.ext4: $rootfs_url"
+echo ""
+echo "runtime.lock.json now names them. Commit it — until it is committed, an"
+echo "install from this repository still has nothing to download."

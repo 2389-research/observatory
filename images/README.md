@@ -10,13 +10,25 @@ Builds two artifacts consumed by the Firecracker microVM runtime:
 All scripts run **on aibox03** (the Linux KVM host). No root or sudo is needed — docker is rootless for `harper`.
 
 ```
-# Full build (kernel + rootfs + lock update):
+# Full build (kernel + rootfs), checked against runtime.lock.json:
 bash images/build-all.sh
+
+# Same, but taking the build's digests as the new pins:
+bash images/build-all.sh --repin
 
 # Individual stages:
 bash images/kernel/build.sh
 bash images/rootfs/build.sh
 ```
+
+Most installs never run any of this. `scripts/fetch-guest-images` downloads the
+published artifacts and verifies them against the same pins; building from source
+is for moving the pins, or for a set nobody has published yet.
+
+`runtime.lock.json` is an input here: `images/lock-pins.sh` compares what the
+build produced against it and fails on a disagreement, so an ordinary build
+leaves the checkout clean. `--repin` is how you move the pins on purpose — commit
+the lock afterwards, and republish with `scripts/publish-guest-images`.
 
 Scripts are idempotent: re-running cleans their own staging and produces fresh artifacts. The kernel tarball is cached at `/tmp/vmobs-kernel-src/` to avoid redundant downloads.
 

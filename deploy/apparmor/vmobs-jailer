@@ -34,8 +34,8 @@
 # and chown of the jail tree -- is covered by the template's blanket `capability,`
 # and `file,` rules, which are unchanged.
 #
-# Load once, as root:  apparmor_parser -r -W deploy/apparmor/vmobs-jailer
-# Then:                docker run --security-opt apparmor=vmobs-jailer ...
+# Install and load once, as root:  sudo sh deploy/install-apparmor.sh
+# Then:                            docker run --security-opt apparmor=vmobs-jailer ...
 
 #include <tunables/global>
 

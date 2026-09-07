@@ -1,6 +1,6 @@
 #!/bin/sh
 # ABOUTME: Build and run the vmobs appliance container from a checkout.
-# ABOUTME: Usage: scripts/vmobs-container build|start|stop|status|logs|init-auth
+# ABOUTME: Usage: scripts/vmobs-container up|build|start|stop|status|logs|init-auth
 #
 # The security profiles this passes to docker are the narrow ones in deploy/,
 # measured in docs/design/container-boundary.md. Nothing here runs as root on the
@@ -69,15 +69,17 @@ tag_for() {
 }
 
 # require_guest_images fails before the docker build rather than 500 layers in.
-# The guest kernel and root image are built by images/build-all.sh, which needs a
-# kernel toolchain and half an hour; they are not in the checkout and this script
-# will not silently build them for you.
+# The guest kernel and root image are not in the checkout: they are downloaded
+# against the digests in runtime.lock.json, or built from source when nothing has
+# been published. `up` does that step; `build` names it rather than doing it
+# behind your back.
 require_guest_images() {
     for rel in images/dist/vmlinux images/dist/rootfs.ext4; do
-        [ -f "$REPO/$rel" ] || die "missing $rel — build the guest images first:
-    bash images/build-all.sh
-  It needs docker and a kernel build toolchain, and it pins the digests it
-  produces into runtime.lock.json."
+        [ -f "$REPO/$rel" ] || die "missing $rel — get the guest images first:
+    scripts/fetch-guest-images
+  That downloads them and checks each against its pin in runtime.lock.json. If
+  nothing has been published it says so and names images/build-all.sh, which
+  compiles the guest kernel from source and takes a while."
     done
 }
 
@@ -199,8 +201,8 @@ cmd_start() {
             *apparmor*|*AppArmor*)
                 die "docker refused the AppArmor profile:
   $err
-  Load it once, as root:
-    sudo apparmor_parser -r -W deploy/apparmor/$APPARMOR_PROFILE" ;;
+  Install and load it once, as root:
+    sudo sh deploy/install-apparmor.sh" ;;
             *)
                 die "docker run failed:
   $err" ;;
@@ -208,6 +210,35 @@ cmd_start() {
     fi
     note "started; the API is at http://$LISTEN"
     note "follow it with: scripts/vmobs-container logs"
+}
+
+# cmd_up is the whole install: artifacts, prerequisites, image, container. It
+# does the steps in that order for one reason -- the AppArmor profile is the only
+# root step, and an operator who has to run it should learn that in the first few
+# seconds rather than after a ten-minute docker build.
+#
+# It installs nothing on the host and asks for no privilege. The root line it
+# stops on is a line for a human to read and run.
+cmd_up() {
+    need_docker
+    if docker container inspect "$NAME" >/dev/null 2>&1; then
+        die "container $NAME already exists.
+  See what it is doing:  scripts/vmobs-container status
+  Or replace it:         scripts/vmobs-container stop && scripts/vmobs-container up"
+    fi
+
+    note "==> guest images"
+    sh "$REPO/scripts/fetch-guest-images"
+
+    note "==> host prerequisites"
+    preflight_host
+    note "ok"
+
+    note "==> image"
+    cmd_build
+
+    note "==> container"
+    cmd_start
 }
 
 cmd_stop() {
@@ -259,6 +290,7 @@ usage() {
     cat >&2 <<'USAGE'
 usage: scripts/vmobs-container <command>
 
+  up                 the whole install: guest images, prerequisites, image, container
   build              build the appliance image from this checkout
   start [image:tag]  run it with the profiles from deploy/
   stop               stop and remove the container, keeping the volumes
@@ -274,6 +306,7 @@ USAGE
 [ $# -ge 1 ] || usage
 command="$1"; shift
 case "$command" in
+    up)        cmd_up "$@" ;;
     build)     cmd_build "$@" ;;
     start)     cmd_start "$@" ;;
     stop)      cmd_stop "$@" ;;

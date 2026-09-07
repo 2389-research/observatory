@@ -6,17 +6,27 @@ container has to be given the same three things a bare-metal install has. This
 directory holds the narrow profiles that grant exactly those and nothing more,
 plus the image that carries the pinned binaries.
 
-Everything here runs from a checkout:
+Everything here runs from a checkout. From nothing to a running appliance:
 
-    scripts/vmobs-container build
-    scripts/vmobs-container start
+    sudo sh deploy/install-apparmor.sh   # once per host, the only root step
+    scripts/vmobs-container up
+
+`up` downloads the guest images, checks the host, builds the appliance image and
+starts the container. Run it without the profile installed and it stops at the
+prerequisite check and prints that first line — it will not sudo on your behalf.
+
+Afterwards:
+
     scripts/vmobs-container status
     scripts/vmobs-container logs -f
     scripts/vmobs-container stop
 
-There is no installer. Nothing in `start` writes to the host outside Docker's
-own storage; the single root step is installing the AppArmor profile, below, and
-you run it yourself.
+`build` and `start` are still there as separate verbs; `up` is the two of them
+with the prerequisite checks moved to the front, where a missing one costs you
+seconds instead of a finished image.
+
+There is no installer. Nothing in `up` writes to the host outside Docker's own
+storage.
 
 ## Host prerequisites
 
@@ -28,20 +38,44 @@ you run it yourself.
 | x86-64 | the lock pins `firecracker-<ver>-x86_64` | `uname -m` |
 | The guest kernel and root image | baked into the image | `ls images/dist/` |
 
-`scripts/vmobs-container start` checks the first two and refuses with the fix
-named. It does not check the rest, because Docker's own error is clearer.
+`scripts/vmobs-container up` checks the first two and the AppArmor profile, and
+refuses with the fix named. It does not check the rest, because Docker's own
+error is clearer.
 
 ### The guest images
 
-`images/dist/vmlinux` and `images/dist/rootfs.ext4` are not in the checkout —
-they are built, and their digests are pinned in `runtime.lock.json`:
+`images/dist/vmlinux` and `images/dist/rootfs.ext4` are not in the checkout.
+`runtime.lock.json` pins their sha256s and, once they have been published, the
+URLs to fetch them from:
+
+    scripts/fetch-guest-images
+
+`up` runs that for you. It downloads each artifact, checks it against its pin,
+and refuses to leave an unverified file behind. A file already on disk that
+matches its pin is left alone, so re-running it costs one hash.
+
+If nothing has been published yet, the lock names no URL and the fetch says so,
+pointing at the source build:
 
     bash images/build-all.sh
 
-That needs Docker and a kernel build toolchain, and it takes a while. The
-appliance build copies both into the image and verifies all four pinned digests
-(firecracker, jailer, kernel, root image) in the final stage, so a build that
-succeeds cannot be shipping bytes nobody pinned.
+That compiles the guest kernel in a pinned container and debootstraps the root
+image. It needs Docker, and it takes a while. It checks what it produced against
+the pins in `runtime.lock.json` and fails if they disagree — the lock is an
+input, not a build output. To move the pins deliberately, `--repin` rewrites them
+and you commit the result.
+
+Whoever has write access to the repository publishes a built set once:
+
+    scripts/publish-guest-images --tag guest-images-6.1.186
+
+That uploads both artifacts to a GitHub release, refuses if they do not match the
+digests the lock pins, and writes the resulting download URLs back into
+`runtime.lock.json` for you to commit. After that nobody else compiles a kernel.
+
+The appliance build copies both into the image and verifies all four pinned
+digests (firecracker, jailer, kernel, root image) in the final stage, so a build
+that succeeds cannot be shipping bytes nobody pinned.
 
 ### The AppArmor profile — the one root command
 
@@ -56,7 +90,7 @@ kernel and leaves nothing on disk, so after a reboot the host has no
 outright. Installing it under `/etc/apparmor.d` is what makes the host load it
 at boot.
 
-`start` refuses before it runs anything if the profile is missing from
+`up` and `start` refuse before running anything if the profile is missing from
 `/etc/apparmor.d` or differs from the copy in this repo, and names this script.
 It compares those two files because what the kernel actually holds is not
 readable without root: `/sys/kernel/security/apparmor/profiles` is `0444`
@@ -228,7 +262,7 @@ flag. Then:
 
 | Symptom | Cause |
 | --- | --- |
-| `profile "vmobs-jailer" not found` | load the profile: `sudo apparmor_parser -r -W deploy/apparmor/vmobs-jailer` |
+| `profile "vmobs-jailer" not found` | install the profile: `sudo sh deploy/install-apparmor.sh` |
 | probe fails at `pivot_root` with EPERM | the seccomp profile is not being passed |
 | probe fails at any step with EACCES | the AppArmor profile is not being applied |
 | probe fails at `tap_create` with ENOENT | `--device /dev/net/tun` missing, or the module is not loaded |

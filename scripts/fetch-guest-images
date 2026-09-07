@@ -1,0 +1,125 @@
+#!/bin/sh
+# ABOUTME: Downloads the guest kernel and root image named by runtime.lock.json
+# ABOUTME: and verifies each against its pinned digest before putting it in place.
+#
+# An install should not compile a 6.1 kernel. The lock already pins both
+# artifacts by SHA-256, so fetching them is verified by construction; what this
+# adds is somewhere to fetch from. Idempotent: a file already matching its pin
+# is left alone, which is what lets `vmobs-container up` call this every time.
+set -eu
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd)
+ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
+LOCK=""
+
+usage() {
+    cat <<'USAGE'
+usage: fetch-guest-images [--lock PATH] [--root DIR]
+
+Downloads images/dist/vmlinux and images/dist/rootfs.ext4 from the URLs pinned
+in runtime.lock.json, verifying each against its pinned SHA-256.
+
+  --lock PATH   lock file to read (default: <root>/runtime.lock.json)
+  --root DIR    where the lock's relative paths resolve (default: the checkout)
+USAGE
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --lock) LOCK="${2:?--lock needs a path}"; shift 2 ;;
+        --root) ROOT="${2:?--root needs a directory}"; shift 2 ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "fetch-guest-images: unknown argument $1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+[ -n "$LOCK" ] || LOCK="$ROOT/runtime.lock.json"
+
+die() { echo "fetch-guest-images: $*" >&2; exit 1; }
+
+[ -f "$LOCK" ] || die "no lock file at $LOCK"
+command -v jq >/dev/null 2>&1 || die "jq is not installed; it reads $LOCK"
+
+# The digest is the security property here, not the transport: the lock is a
+# committed file, and bytes that do not match its pin are refused whatever
+# scheme delivered them.
+download() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --retry 3 -o "$2" "$1"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q -O "$2" "$1"
+    else
+        die "neither curl nor wget is installed; one of them is needed to fetch $1"
+    fi
+}
+
+# An unreadable file yields an empty digest, which compares unequal to the pin
+# and is refused. Failing closed is the only safe direction here.
+digest_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | cut -d' ' -f1
+    else
+        shasum -a 256 "$1" | cut -d' ' -f1
+    fi
+}
+
+lock_field() { jq -r "$1 // \"\"" "$LOCK"; }
+
+fetch_one() {
+    name=$1
+    url=$2
+    want=$3
+    rel=$4
+
+    [ -n "$want" ] || die "$name: $LOCK pins no sha256 for it"
+    [ -n "$rel" ] || die "$name: $LOCK names no path for it"
+    dest="$ROOT/$rel"
+
+    if [ -f "$dest" ]; then
+        have=$(digest_of "$dest")
+        if [ "$have" = "$want" ]; then
+            echo "$name: present and matches its pin"
+            return 0
+        fi
+        echo "$name: present but does not match its pin (have $have, want $want); refetching"
+    fi
+
+    if [ -z "$url" ]; then
+        die "$name: $LOCK pins no URL, so there is nothing to download.
+  Build it instead:  bash images/build-all.sh
+  That compiles the guest kernel from source and takes a while. Publishing the
+  built artifacts is what removes this step -- see scripts/publish-guest-images."
+    fi
+
+    mkdir -p "$(dirname "$dest")"
+    tmp="$dest.partial.$$"
+    echo "$name: fetching $url"
+    if ! download "$url" "$tmp"; then
+        rm -f "$tmp"
+        die "$name: download failed from $url"
+    fi
+
+    got=$(digest_of "$tmp")
+    if [ "$got" != "$want" ]; then
+        # Never leave unverified bytes at the destination: the next run trusts a
+        # file that is already there, and would adopt them.
+        rm -f "$tmp"
+        die "$name: digest mismatch, refusing it.
+  want $want
+  got  $got
+  Either the download was corrupted, or $LOCK was repinned without republishing
+  the artifact."
+    fi
+
+    mv "$tmp" "$dest"
+    echo "$name: verified and installed at $rel"
+}
+
+fetch_one "guest kernel" \
+    "$(lock_field .guest_kernel.vmlinux_url)" \
+    "$(lock_field .guest_kernel.vmlinux_sha256)" \
+    "$(lock_field .guest_kernel.vmlinux_path)"
+
+fetch_one "root image" \
+    "$(lock_field .root_image.url)" \
+    "$(lock_field .root_image.sha256)" \
+    "$(lock_field .root_image.path)"

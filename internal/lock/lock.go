@@ -44,6 +44,12 @@ type HostSupportEntry struct {
 
 // GuestKernelEntry records the guest kernel artifact and its verification hash.
 // VmlinuxPath is relative to the repo root.
+//
+// SourceURL and VmlinuxURL name different things: SourceURL is the kernel.org
+// tarball the build compiles, VmlinuxURL is the built vmlinux an install
+// downloads instead of compiling. An empty VmlinuxURL is the honest state of a
+// tree whose artifacts have never been published -- scripts/fetch-guest-images
+// reads it as "build it yourself", not as an error.
 type GuestKernelEntry struct {
 	Version       string `json:"version"`
 	SourceURL     string `json:"source_url"`
@@ -51,6 +57,7 @@ type GuestKernelEntry struct {
 	ConfigSHA256  string `json:"config_sha256"`
 	VmlinuxSHA256 string `json:"vmlinux_sha256"`
 	VmlinuxPath   string `json:"vmlinux_path"`
+	VmlinuxURL    string `json:"vmlinux_url"`
 }
 
 // RootImageEntry records the root filesystem image artifact.
@@ -61,6 +68,9 @@ type RootImageEntry struct {
 	BaseImageRef string `json:"base_image_ref"`
 	AptSnapshot  string `json:"apt_snapshot"`
 	Inventory    string `json:"inventory"`
+	// URL is where a built root image can be downloaded, so an install does not
+	// have to debootstrap one. Empty until the artifacts are published.
+	URL string `json:"url"`
 }
 
 // GuestDEntry records the guestd protocol version requirement.
