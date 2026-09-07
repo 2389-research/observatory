@@ -12,3 +12,8 @@ images/dist/
 web/node_modules/
 # tsc's incremental build cache: machine-local, rewritten by every typecheck.
 web/tsconfig.tsbuildinfo
+
+# Local scratch that must never reach the public repo: a Repomix dump of the
+# whole tree, and the kata tool's project file.
+output.txt
+.kata.toml
