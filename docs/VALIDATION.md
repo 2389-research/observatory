@@ -1,5 +1,50 @@
 # Specification Package Validation
 
+## Revision 27 (2026-09-06) — a VM boots confined, a terminal opens, and two bugs it found
+
+Kata `q4b2`, closing half. The last thing §7 asked for is measured: a VM reached
+`running / running / healthy` with `vmobs-jailer` in enforce mode on the firecracker
+process itself, zero denials, guest channel authenticated over vsock. A terminal opened
+on a second VM under the same profile — `101` on the upgrade, `attached` with the writer
+lease, `echo <marker>` typed in and the marker echoed back with a fresh prompt. Two of
+§7's remaining bullets closed, not one; §10 carries both transcripts.
+
+Reaching that took a fifth AppArmor denial and found two product bugs.
+
+The denial was `mount fstype=sysfs -> /sys/`: `ip netns exec` replaces `/sys` with a
+sysfs instance describing the namespace it enters, and privd runs every network command
+that way. Granting the three mounts `ip netns add` makes never reaches it — startup
+passed and every launch failed at network allocation. privd's jail probe now runs
+`ip netns exec` too, and caught the next instance of this in under a second instead of
+a rebuild, a restart and a launch. **A startup probe is worth exactly the production
+verbs it runs**: all five denials were operations the probe did not perform.
+
+The first product bug: terminals were unreachable on every VM in the shipped
+configuration. `cmd/vmobsd/main.go` set `PublicOrigin` only on the branch where
+authentication is enabled, and the appliance ships with `require_authentication: false`.
+It is not an authentication field — the WebSocket origin gate compares it on every
+upgrade — so every terminal was refused `403 public_origin_unset` while the config set a
+public origin two lines above the listen address. Every API test builds `AuthConfig` by
+hand, which is why the suite never saw it.
+
+The second: a container restart could strand a VM beyond any API call. privd's ledger is
+on tmpfs; the chroots are not. The force-stop path reported privd's ordinary `not_found`
+as a cleanup debt, `Manager.Delete` treats a debt as a failed force-stop, and the row sat
+at `failed` with 5120 MiB reserved and `free_disk` at `-2536`. `doRelease` had always
+taken its verdict from the filesystem; the stop path now shares that rule. The deeper
+half is unfixed and §7 says so: a chroot whose ledger entry is gone is still reclaimable
+only by hand.
+
+Also corrected: the profile had never been installed, only parsed — `/etc/apparmor.d/vmobs-jailer`
+did not exist, so it died at every reboot. `deploy/install-apparmor.sh` installs it where
+boot looks and `start` refuses when the installed copy is missing or stale, naming the
+script. `deploy/README.md` listed three rules; the profile has ten.
+
+`env -u GOROOT mise exec -- ./scripts/check`: all ten gates passed.
+`uv run docs/validation/check.py`: 47/47 package checks passed. The confined boot,
+terminal round trip and strand were measured on aibox03 against the container built from
+this branch; the acceptance gate has still never run in a container.
+
 ## Revision 26 (2026-09-06) — verified systems review recorded in Kata
 
 Checked the eight supplied review findings against source at `bd65d80` and existing

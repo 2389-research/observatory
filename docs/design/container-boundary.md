@@ -158,28 +158,21 @@ copied instead of re-measured.
 Naming these because a profile that boots `--version` is not a profile that
 boots a VM, and the difference is where the remaining risk lives.
 
-Four of the six items this section carried before the build are now measured
+Six of the eight items this section carried before the build are now measured
 and have moved to §10, one of them with the opposite answer to the one
-predicted here. What is left:
+predicted here. Getting there took five AppArmor denials, all of one family:
+the profile was traced from the jailer, and the container runs more than the
+jailer. What is left:
 
-- **A VM booting under the AppArmor profile.** Loading
-  `deploy/apparmor/vmobs-jailer` has now been done, and it found a defect: the
-  profile denied privd its own startup, because it was derived by tracing the
-  jailer and privd's probe child makes a mount the jailer never makes. §10
-  carries the measurement and the fix, and the corrected profile is loaded on
-  aibox03. What is still unmeasured is the thing that bullet was really about:
-  every run in this document — §6's matrix and §10's alike — was made with
-  `apparmor=unconfined`, and no VM has yet booted with the profile in force.
-  Until one has, option 4 is built and its one known defect is fixed, but the
-  chain under confinement is unproven, and `scripts/vmobs-container start`
-  keeps printing a warning whenever it sees `unconfined` rather than letting
-  the weaker boundary pass for the shipped one.
 - **The acceptance gate.** AT-002 and the live integration suite have never
   run in a container against v2. §10's VMs were driven through the API by
   hand — the gate's shape, not the gate.
-- **Anything past the VM lifecycle.** The measured runs created, started,
-  observed and deleted VMs and read their telemetry. No console PTY was opened
-  in a container.
+- **Reclaiming a jail chroot whose ledger entry is gone.** A container restart
+  empties privd's tmpfs ledger while the chroots survive, and no privileged
+  call can then remove one: privd reaches a chroot only through a ledger entry.
+  §10 records the case that made this concrete. A stop no longer reports a debt
+  that does not exist, and names the directory when one does — but clearing a
+  real strand still means removing the directory by hand.
 
 ## 8. The options, with what each costs
 
@@ -366,13 +359,194 @@ Two things this measures beyond the one missing rule:
   which operation was actually refused, which is why §1's method — read the
   kernel, not the error string — is the part that matters.
 
-The rule is now in the profile with the reasoning beside it, and
+The rule went into the profile with the reasoning beside it, and
 `tests/deploy/profiles_test.go` fails if it is removed. The fixed profile was
 loaded on aibox03 at 2026-09-07 00:40:03 UTC (`apparmor="STATUS"
 operation="profile_replace" name="vmobs-jailer"`).
 
-**Not yet measured: a VM booting under the loaded profile.** The container on
-that host is still running `apparmor=unconfined`, so what is proven is that the
-denial is understood and the rule that answers it is loaded — not that the
-chain completes under confinement. §7 keeps that bullet until a confined boot
-is observed.
+### Three more denials, and what the probe was really measuring
+
+The container restarted under the amended profile and exited again. The kernel
+named the next one:
+
+    apparmor="DENIED" operation="mount" class="mount" info="failed mntpnt match"
+    error=-13 profile="vmobs-jailer" name="/tmp/vmobs-jailprobe-1810112568/netns"
+    pid=232429 comm="vmobs-privd" srcname="/" flags="rw, bind"
+
+`ip netns add` names a network namespace by bind-mounting `/proc/self/ns/net`
+onto a file. privd runs that verb for every launch. The jailer runs it never,
+so the trace found it never — the same root cause as the `rprivate` rule,
+arriving at a different syscall.
+
+The obvious fix was a rule for `/tmp/vmobs-jailprobe-*/netns`, and it was
+wrong. It shipped, and the next restart produced this:
+
+    apparmor="DENIED" operation="mount" class="mount" info="failed mntpnt match"
+    error=-13 profile="vmobs-jailer" name="/tmp/vmobs-jailprobe-4208701220/"
+    srcname="/tmp/vmobs-jailprobe-4208701220/" flags="rw, rbind"
+
+That is the probe's own `pivot_root` step, self-binding its scratch directory
+the way the jailer self-binds a chroot — in `/tmp`, where the profile grants
+nothing, because the rules name `/srv/vmobs/jail/**`.
+
+**A probe that runs somewhere convenient measures a grant nothing uses.** Two
+of the three denials so far were the probe being denied paths production never
+touches, and the reverse error was worse than the noise: a probe passing in
+`/tmp` says nothing about whether `/srv/vmobs/jail` is permitted, so a profile
+with a typo in the jail path would clear startup and fail every launch, from
+inside the jailer, after a VM's worth of admission and staging.
+
+The probe now stages at `<jail base>/firecracker/jailprobe-*/root` — the shape
+the `pivot_root` rule names — and needs no rules of its own. The same argument
+applied to the netns step, which had reimplemented `ip netns add` as a single
+bind. It now runs the command. That change measured something a
+reimplementation could not:
+
+    apparmor="DENIED" operation="mount" class="mount" info="failed mntpnt match"
+    error=-13 profile="vmobs-jailer" name="/run/netns/" comm="ip"
+    flags="rw, rshared"
+
+iproute2 marks `/run/netns` shared before it binds anything, and `MS_SHARED`
+needs a mount point, so on the plain directory inside the `/run` tmpfs it gets
+`EINVAL` and binds the directory onto itself to make one. Three mounts for one
+verb. The hand-written version made one of them, would have passed the probe,
+and every launch would have failed at network allocation.
+
+**Run the verb; do not model it.** A probe that reimplements what production
+calls measures the author's belief about the command. Where the real thing can
+be run — and here it could, in a throwaway namespace, at a cost of one exec —
+run it.
+
+What this cost is worth recording too. Each missing rule took a full image
+rebuild and container restart to find, because the probe returned at its first
+failing step. It now runs every step and names a remedy for each, so a host
+with three gaps learns about three. A step whose prerequisite failed is
+reported inconclusive rather than run: `pivot_root(2)` after a failed
+`mount_propagation_slave` raises an `EINVAL` about propagation, and `ip netns
+exec` on a namespace that was never created reports only that it is missing.
+Either, recorded as its own failure, names the wrong problem. And the remedy
+for a step with no errno — a step that runs a command has an exit status and
+nothing else — now sends the operator to `journalctl -k` first, which is the
+only place an AppArmor denial is ever written.
+
+### The fifth denial, and the first one the probe caught
+
+With the four rules above loaded, privd started, the API came up, preflight
+passed, and the first VM launched under the profile failed at network
+allocation:
+
+    apparmor="DENIED" operation="mount" class="mount" info="failed mntpnt match"
+    error=-13 profile="vmobs-jailer" name="/sys/" comm="ip" fstype="sysfs"
+    srcname="vmobs-<vm id>"
+
+`ip netns exec` does not merely `setns`. It replaces `/sys` with a sysfs
+instance describing the namespace it entered, so that `/sys/class/net` shows
+that namespace's interfaces rather than the caller's. privd runs every network
+setup command that way, and no amount of `ip netns add` reaches it: the add's
+three mounts were granted and every launch still failed. The rule constrains
+the filesystem type and the mount point, because the source is the namespace's
+name and not a path:
+
+    mount fstype=sysfs -> /sys/,
+
+Then the same lesson a fourth time — run the verb — produced the first
+denial this document did not have to spend a launch on. A fifth probe step
+runs `ip netns exec <ns> true`, and on the host with the old profile still
+loaded privd refused to serve, in under a second, saying which step and why:
+
+    vmobs-privd: jail probe: 1 of 5 steps failed
+      netns_exec: ip netns exec vmobs-jailprobe-42 true: exit status 255:
+                  mount of /sys failed: Permission denied
+
+Four of five steps passed; the report named the one that did not. The same
+defect, found the previous way, had cost an image rebuild, a container restart,
+admission, staging and a launch. **A startup probe is worth exactly the
+production verbs it runs** — the four denials the earlier probe missed were all
+operations it did not perform.
+
+### A VM boots, and a terminal opens, under the loaded profile
+
+With all ten rules loaded, a VM booted under the profile. It was created
+through the web UI at 01:36:02 and reached `running / running / healthy`:
+
+    container AppArmorProfile: vmobs-jailer
+    /proc/<firecracker pid>/attr/current: vmobs-jailer (enforce)
+    AppArmor denials since container start: 0
+    events: guest.channel_established (host_observed),
+            guest.sensor_health (guest_reported)
+
+The VMM itself runs under the profile — not merely the container that spawned
+it — and the guest agent answered over vsock, so the confined chain runs end to
+end. That was the last thing §7 named about the mount boundary.
+
+A terminal opened on a later VM under the same profile, and this is the round
+trip in full: `POST /vms/<id>/terminals` allocated a PTY at guest pid 730, the
+WebSocket upgrade returned `101`, the stream's first message was
+`{"type":"attached","writer":true}`, and typing `echo <marker>` produced the
+marker back followed by a fresh prompt. PTY bytes cross the vsock, through the
+jailed VMM, under confinement.
+
+Opening it required a fix. `cmd/vmobsd/main.go` built its `api.AuthConfig` with
+`PublicOrigin` set only on the branch where authentication is enabled, and the
+appliance ships with `require_authentication: false`. `PublicOrigin` is not an
+authentication field: the WebSocket origin gate compares it on every upgrade,
+and an empty one matches nothing. Every terminal in the shipped configuration
+was refused with `403 public_origin_unset`, while `/etc/vmobs/config.yaml` set
+a public origin two lines above the listen address. Every API test builds its
+`AuthConfig` by hand, so the suite never saw the daemon's own construction of
+it; the fix extracts that into `authConfig()` with a test on the auth-off path.
+
+The gate still bites. With the fix in place, `Origin: http://localhost:8787`
+and `Origin: http://evil.example` are both refused `403 origin_rejected`
+against a `public_origin` of `http://127.0.0.1:8787`. What changed is that the
+configured origin now passes.
+
+### A restart could strand a VM permanently, and did
+
+§10's earlier note that a container restart strands every VM it was running
+described the shape. This is the measured case, and it was worse than the note
+said: the strand could not be cleared by any API call at all.
+
+privd's ledger is on `--tmpfs /run`, so a restart empties it while the jail
+chroots on the `vmobs-runtime` volume survive. `Manager.Delete` force-stops
+first, and the force-stop asked `release_vm` for a VM the new ledger had never
+heard of. privd answered its ordinary typed `not_found`, and the stop path
+reported that as an `ErrCleanupPending` — a cleanup debt. Delete treats a debt
+as a failed force-stop, correctly, because a `deleted` row promises every
+resource is gone. So the row sat at `failed`, its 5120 MiB reservation held,
+`free_disk` at `-2536`, and every retry produced:
+
+    HTTP 500  ... stopped, but its jail chroot could not be reclaimed:
+    privd: not_found: vm not in ledger
+
+`doRelease` had always run that answer through `ignoreNotFound` and taken its
+verdict from the filesystem. The force-stop path did neither. Both now share
+`chrootDebt`, which asks the filesystem — because `not_found` cannot simply be
+ignored either: a lost ledger is precisely the state where the chroot *does*
+survive. When it does, the debt now names the directory instead of repeating
+privd's answer, which is the difference between a leak an operator can find and
+one they cannot.
+
+The deeper half stands. A chroot whose ledger entry is gone is still
+unreclaimable by any privileged call — only privd may remove it, and privd
+reaches it only through a ledger entry. Clearing this one meant removing the
+directory by hand. Rebuilding the ledger from what is durable on disk, or
+letting a force-stop reclaim a chroot by path, is unbuilt.
+
+### The profile was never installed, only loaded
+
+Every load of the profile on this host was `apparmor_parser -r` against the
+checkout, which loads into the running kernel and leaves nothing behind:
+`/etc/apparmor.d/vmobs-jailer` did not exist. The profile therefore died at
+every reboot, and `docker run --security-opt apparmor=vmobs-jailer` would have
+refused to start the appliance until someone reran the command by hand.
+
+`deploy/install-apparmor.sh` installs it where the host loads it at boot and
+then loads it, and `start` refuses up front when the installed copy is missing
+or differs from the repo's. The comparison is between those two files because
+what the kernel holds is not readable without root — `/sys/kernel/security/apparmor/profiles`
+is `0444` root-only — and the refusal says which two it compared. A stale
+profile is the case worth catching: docker accepts any loaded profile by name,
+so the container starts clean and the mismatch surfaces minutes later as a
+denied mount in the middle of a launch. Four of this document's five denials
+were found that way.

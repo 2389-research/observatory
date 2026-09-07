@@ -59,7 +59,7 @@ Distilled working knowledge for agents and collaborators in this repo. Append en
 - **The /30 prefix allocator never gives a prefix back — size a pool for the daemon's whole lifetime, and read exhaustion as "restart the daemon", not "find the leak".** `internal/network/alloc.go` has `Next()` and `Exclusions()` and nothing else: `Next()` walks a cursor forward, no release, free or return path exists, and `internal/jailer/launch.go` calls `Next()` once per fresh launch (a restart reuses the CIDR in the manifest). Built once per daemon over two /16 pools (`cmd/vmobsd/runtime_linux.go`), that is 32,768 /30s per daemon lifetime; a rolled-back launch and a deleted VM never return theirs, and only a restart resets the cursor. The AT-005 recovery launches pass because each subtest's pool is sized for two launches, not because anything was freed. Reclamation is an M1b candidate (PLAN.md deviations log).
 - **A cleanup guarded on a recorded stage skips exactly the failures that happen before the record.** `doRollback` removed the stage dir only when the manifest named `staged`, and `staged` is written after `doStage` returns — so every `doStage` failure kept the stage dir forever, and the rollback then deleted the manifest `Release` would have needed to find it. `os.RemoveAll` on a missing path is a no-op; remove unconditionally (`doRelease` already did). Before guarding any cleanup on a record, ask what happens to a failure between the side effect and the record.
 - **A chmod-based injection lands on the first syscall that touches the directory, not on the step the test is named for.** `manifest_write_failure` chmodded `vms/` 0555 and failed at `MkdirAll`, never reaching `writeManifest`; three reviews inherited the name. To fail one specific write, re-exec the test binary as a child with `RLIMIT_FSIZE=0` (`launchWriteFailHelper` in `internal/jailer/inject_linux_test.go`): the first `Write` gets EFBIG, nothing else is touched, and the parent's `testing` package keeps its own log writes. Lowering the rlimit in-process trips those log writes; a 0555 dir also blocks the unlink a fix may need, which makes a restart test vacuous.
-- **A missing record is not proof the resource is gone — probe the host.** Three separate leaks on this branch shared one shape: `doRollback` deleted the manifest whether or not its `release_vm` landed, `Reconcile` finalized a `deleting` row without ever retrying `Release`, and `doStop` read a missing manifest as "already gone" and answered success — so `Release` early-returned nil on the same missing manifest and `Delete` wrote `deleted` over a microVM that was still running, every call reporting success. Anything that treats the manifest, a recorded stage, or a `deleting` row as evidence of what exists on the host is wrong the moment the record is destroyed before the resource. `doStop` now stats `<JailBase>/firecracker/<id>` when the manifest is missing; absent stays the silent no-op, present means tear it down and let the filesystem, not privd's return value, decide the verdict; `Release` does the same on the same missing manifest, running `release_vm` **before** `release_network` because whichever release empties the last half of a ledger entry makes privd delete it, after which the other answers `not_found` and the chroot is unreachable forever. That gap is closed now: `doRelease` (`internal/jailer/stop.go`) is one path regardless of whether a manifest exists, and it runs `release_vm` unconditionally too, with no stage guard on either verb. The case that forced it: a guest that shuts itself down reaches `stopped` via `NotifyVMMExit`, so `Delete` never force-stops it and goes straight to Release with the manifest still there — a present manifest is a record of what `launch.go` believed it had done, not evidence of what privd or the filesystem still hold, same as the missing-manifest case above.
+- **A missing record is not proof the resource is gone — probe the host.** Three separate leaks on this branch shared one shape: `doRollback` deleted the manifest whether or not its `release_vm` landed, `Reconcile` finalized a `deleting` row without ever retrying `Release`, and `doStop` read a missing manifest as "already gone" and answered success — so `Release` early-returned nil on the same missing manifest and `Delete` wrote `deleted` over a microVM that was still running, every call reporting success. Anything that treats the manifest, a recorded stage, or a `deleting` row as evidence of what exists on the host is wrong the moment the record is destroyed before the resource. `doStop` now stats `<JailBase>/firecracker/<id>` when the manifest is missing; absent stays the silent no-op, present means tear it down and let the filesystem, not privd's return value, decide the verdict; `Release` does the same on the same missing manifest, running `release_vm` **before** `release_network` because whichever release empties the last half of a ledger entry makes privd delete it, after which the other answers `not_found` and the chroot is unreachable forever. That gap is closed now: `doRelease` (`internal/jailer/stop.go`) is one path regardless of whether a manifest exists, and it runs `release_vm` unconditionally too, with no stage guard on either verb. The case that forced it: a guest that shuts itself down reaches `stopped` via `NotifyVMMExit`, so `Delete` never force-stops it and goes straight to Release with the manifest still there — a present manifest is a record of what `launch.go` believed it had done, not evidence of what privd or the filesystem still hold, same as the missing-manifest case above. The principle bit once more from the other side: privd's `not_found` is not evidence that the chroot is *gone* either, and the force-stop path was reading it as a failure — see the privd-restart entry below.
 - **privd's `start_vm` rollback has no start time to check, so it checks `comm` *and* the VM id in the argv.** `AbortStartVM` (`internal/privd/vmops.go`) reads `<jailDir>/root/firecracker.pid` to kill a VMM that `cmd.Run()` started before a later read failed. There is no recorded start time for that process — the failure *is* that `StartVM` never got one — and `StartVM`'s `MkdirAll` does not clear the tree, so the pid file can name a recycled pid. The guard is two `/proc` reads: `stat`'s comm field must read `firecracker`, **and** `/proc/<pid>/cmdline` must carry `--id` and this VM's id as two adjacent argv elements. comm alone is not enough on a host whose whole job is running firecrackers — the process that inherits a recycled pid is disproportionately *another VM's* VMM, which comm cannot tell apart, and SIGKILLing a healthy neighbour is worse than the leak this rollback prevents. **Never identify a jailed VMM by `/proc/<pid>/root`.** The jailer unshares a mount namespace, `pivot_root`s into the jail and detaches the old root, so the jail root is a mount only inside the VMM's own namespace and the host cannot express it as a path: a readlink comparison there matches nothing and withholds *every* kill. `cmdline` reads the same from any namespace, and is world-readable, which matters because the VMM runs as another uid. Match argv elements, never a substring of the joined line — every jail path carries the VM id, the runner's `--uds` among them. Jailer v1.16.1 execs firecracker with `--id` and the id as separate elements (`.args(["--id", &self.id])` in `src/jailer/src/env.rs`), not `--id=<id>`; if that ever changes, every withheld kill logs the argv it saw. Anything that leaves identity unproven withholds the kill and logs it. Do not "simplify" either check away, and never into a bare `Kill(pid)`. An empty `cmdline` has two causes, not one: a zombie has no mm, **and** a live process momentarily has no argv — `execve` sets `comm` before it sets the new mm's `arg_start`/`arg_end`, and Go's `cmd.Start()` returns inside that window, so a just-spawned process can read comm `firecracker` with an empty argv while its state is `R` (measured: 7 empties in 500 spawns). Production never sees it — `firecracker.pid` is written after exec — but any test that spawns a stand-in and reads its argv must wait for the argv to appear (`waitForArgv`, `internal/privd/vmops_jailguard_linux_test.go`) or it fails about one run in five.
 - **`RunnerPID` has a partner field: `RunnerStart`.** `runnerAlive` used to stat `/proc/<pid>` and call whatever was there the runner, so a recycled pid read alive — `doStop` would try a graceful shutdown through a ctl socket nobody serves, and `Reconcile` would report a VM adopted whose runner is gone. Both spawn sites (`launch.go`, `respawnRunner` in `stop.go`) now record `/proc/<pid>/stat` field 22 and the check goes through `privd.PIDAlive`. Assign it unconditionally at every spawn: a previous boot's start time next to a new pid makes a live runner read dead. An empty value keeps the old pid-only answer on purpose (old manifests, and spawns whose read lost the race with an instant death) — reporting those dead would let `Reconcile` spawn a second runner onto a live VM.
 - **The linux-only suites do run from a Mac — in a container, as a non-root user.** `internal/jailer`'s and `internal/privd`'s `//go:build linux` files never compile on darwin, so `scripts/check` proves nothing about them; a `golang:1.26` container with the repo mounted at `/src` runs them for real. Four traps. Run as a non-root uid (`--user 1000:1000`) or the chmod-based injection subtests fail outright — root's `MkdirAll` ignores a 0555 directory, and `TestInject/state_dir_mkdir_failure` says so rather than skipping — and give the build cache a volume that uid can write. A bind-mounted macOS directory is not that volume: `GOCACHE` on one fails `permission denied` under `--user 1000:1000`; use docker-managed volumes `chown`ed to the uid. Stock `golang:1.26` also has no `mkfs.ext4` — ten `internal/jailer` tests build real ext4 images and fail without it, which is easy to misread as a code failure; run them on a `FROM golang:1.26` + `apt-get install -y e2fsprogs` derivative. What the container still cannot prove: it is whatever arch your Mac is (arm64, not the amd64 the host runs), there is no KVM, and `tests/integration` needs a real Firecracker. A green container run is evidence about logic, never about the host.
@@ -513,15 +513,28 @@ and discards what docker granted. The entrypoint reads the gid off the device
 node instead. When a jailed process cannot open something, look inside the
 chroot, not at the host node. `docs/design/container-boundary.md` §10.
 
-**Restarting privd strands every existing VM's jail chroot, permanently.** The
-ledger is on tmpfs and the chroot is on real disk, so the record dies and the
-thing it was the key to does not. `RealOps.ReleaseVM` is the only code that
-removes `<JailBase>/firecracker/<vm_id>` and is reachable only through a live
-ledger entry, so `DELETE` returns 500 `runtime_operation_failed` ("privd:
-not_found: vm not in ledger") and the row parks in `deleting` forever, still
-holding the reservation that then refuses the next launch. True of a host
-`systemctl restart vmobs-privd` or reboot, not just the container. Reclaiming
-needs root and `rm -rf`. Kata `7p8m` carries the fix's design constraints.
+**Restarting privd strands every existing VM's jail chroot; the delete finishes
+now, the directory still does not go away.** The ledger is on tmpfs and the
+chroot is on real disk, so the record dies and the thing it was the key to does
+not. `RealOps.ReleaseVM` is the only code that removes
+`<JailBase>/firecracker/<vm_id>`, and it is reachable only through a live ledger
+entry. Two faults came out of that and only one is fixed. **Fixed (`6b5973b`):**
+the force-stop path in `internal/jailer/stop.go` took privd's `not_found` at
+face value and reported an `ErrCleanupPending` for a chroot that was not there —
+`Manager.Delete` reads a debt as a failed force-stop, so `DELETE` answered 500
+`runtime_operation_failed` ("privd: not_found: vm not in ledger") and the row
+parked in `deleting` forever, still holding a reservation that refused the next
+launch (measured on aibox03: row `failed`, 5120 MiB reserved, `free_disk:
+-2536`). `doRelease` had always run the answer through `ignoreNotFound` and
+taken its verdict from `stat`; the force-stop path did neither, and no test
+caught it because `stopOnlyAdapter` uses `unreachablePrivd` and
+`requireOnlyCleanupDebt` swallows the result. Both paths now share `chrootDebt`,
+which calls a debt only what the filesystem still shows. **Not fixed:** when the
+directory really is there, nothing can reclaim it — the only code allowed to
+remove it needs the ledger entry that died — so clearing a real strand still
+means root and `rm -rf`. True of a host `systemctl restart vmobs-privd` or a
+reboot, not just the container. Kata `7p8m` carries what is left: rebuild the
+ledger from the durable on-disk state, or give privd a reclaim-by-path verb.
 
 **aibox03's host install hides fresh-install bugs; the container is the first
 clean slate.** Its directories were created by the M0 root helper under umask
@@ -540,3 +553,50 @@ They used to discard output, so a flaky vitest run and a real regression
 printed the identical `FAIL web tests` line. The failure now names the file.
 One flake was observed 2026-09-06: one run failed, two later runs and a
 hand-run passed 214/214 with nothing kept to explain it.
+
+**`apparmor_parser -r` loads a profile into the running kernel and writes
+nothing to disk — parsed is not installed.** The `vmobs-jailer` profile had been
+loaded five times in one day on aibox03 and `/etc/apparmor.d/vmobs-jailer` still
+did not exist, so the next reboot would have dropped it and
+`docker run --security-opt apparmor=vmobs-jailer` would have refused to start
+the appliance at all. Worse in the middle: docker accepts a loaded profile *by
+name*, so a stale one starts the container clean and fails minutes later as a
+denied mount inside a launch — which is how four of the five denials on this
+branch were found, each costing an image rebuild and a full launch. Both halves
+are handled now. `deploy/install-apparmor.sh` installs to `/etc/apparmor.d/`
+**then** loads (loading first parses whatever copy was already there and reports
+success for the profile you were replacing), and `scripts/vmobs-container start`
+refuses when the installed file is missing or differs from the repo copy. It
+compares those two *files* because the kernel's own list,
+`/sys/kernel/security/apparmor/profiles`, is `0444` root-only — an operator
+cannot read what is actually loaded.
+`/sys/module/apparmor/parameters/enabled` is world-readable and is how the
+script tells "no AppArmor on this host" from "profile not installed".
+
+**A startup probe is worth exactly the production verbs it runs.** privd's jail
+probe checked mount propagation, netns creation, tap creation and `pivot_root`.
+The AppArmor profile denied five different operations over one day and the probe
+caught none of the first four, because every one of them was an operation the
+probe did not perform: Go's own `rprivate` remount of `/` when it execs a child
+into a new mount namespace, iproute2's make-shared and self-bind of `/run/netns`
+inside `ip netns add`, and the sysfs remount `ip netns exec` does on `/sys`.
+Adding one `ip netns exec` step caught the fifth in under a second at startup,
+naming the step and the errno; the same class of defect found the old way costs
+a rebuild, a restart, admission, staging and a launch. When a probe misses a
+failure, run the real verb — do not add an assertion about the facility. Steps
+whose prerequisite failed report `inconclusive` rather than a misleading errno.
+
+**`PublicOrigin` is not an authentication field, and the terminal WebSocket
+reads it even when authentication is off.** `cmd/vmobsd/main.go` built
+`api.AuthConfig` in two branches and set `PublicOrigin` only on the
+auth-enabled one; the appliance ships `require_authentication: false`, so every
+terminal upgrade was refused `403 public_origin_unset` while
+`/etc/vmobs/config.yaml` set a public origin two lines above the listen address.
+`originAllowed` (`internal/api/auth.go`) compares the `Origin` header on every
+upgrade regardless. The suite could not see it: every API test builds
+`AuthConfig` by hand, so nothing exercised the daemon's own construction of it —
+a whole shipped capability was dead. Fixed by extracting `authConfig()` and
+testing the auth-off path. Two things to know when probing this by hand: a
+client that sends no `Origin` header at all is refused on purpose, so a Go
+client's 403 is not necessarily the bug; and `handleTerminalStream` needs no
+lease to attach, only to write.
