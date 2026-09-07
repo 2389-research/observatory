@@ -55,7 +55,10 @@ func main() {
 	// serve. A container missing one flag would otherwise take a launch through
 	// admission, network allocation and staging before failing inside the
 	// jailer, and the operator would read that as a bug in vmobs.
-	if err := privd.ProbeJailSyscalls(); err != nil {
+	//
+	// It probes under the jail base, not somewhere convenient, because that is
+	// the path the AppArmor rules name; see ProbeJailSyscalls.
+	if err := privd.ProbeJailSyscalls(flags.jailBase); err != nil {
 		log.Fatalf("vmobs-privd: %v", err)
 	}
 

@@ -117,7 +117,9 @@ func TestJailProbeFailsUnprivileged(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root; this test asserts the unprivileged refusal")
 	}
-	err := ProbeJailSyscalls()
+	// A jail base this user owns: the probe now stages under it, so a read-only
+	// /srv/vmobs would fail this test for the wrong reason.
+	err := ProbeJailSyscalls(t.TempDir())
 	if err == nil {
 		t.Fatal("probe passed as an unprivileged user, which means it measured nothing")
 	}

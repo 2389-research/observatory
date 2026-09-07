@@ -59,21 +59,22 @@ func jailProbeSteps(dir string) []jailProbeStep {
 			},
 		},
 		{
-			// What `ip netns add` does after unshare(CLONE_NEWNET): bind the
-			// caller's net namespace onto a file so it has a name. privd runs
-			// that verb for every VM. The bind target is inside the probe's own
-			// scratch directory rather than /run/netns, so a probe that dies
-			// mid-flight leaves no named namespace behind.
+			// The verb privd runs for every VM, run rather than reimplemented.
+			// `ip netns add` makes more than the one bind of /proc/self/ns/net
+			// that is obvious from outside -- it also prepares /run/netns as a
+			// mount point -- and a reimplementation would measure this author's
+			// model of the command instead of the command. The name carries the
+			// pid because the probe runs before privd takes its singleton lock,
+			// so two starting daemons must not collide, and a leftover name says
+			// which process left it.
 			name:  "netns_create",
-			needs: "bind mount of /proc/self/ns/net",
+			needs: "`ip netns add`: bind mount of /proc/self/ns/net under /run/netns",
 			run: func() error {
-				target := filepath.Join(dir, "netns")
-				f, err := os.OpenFile(target, os.O_CREATE|os.O_RDONLY|os.O_EXCL, 0o600)
-				if err != nil {
+				ns := fmt.Sprintf("vmobs-jailprobe-%d", os.Getpid())
+				if err := runIP("add", ns); err != nil {
 					return err
 				}
-				f.Close()
-				return unix.Mount("/proc/self/ns/net", target, "", unix.MS_BIND, "")
+				return runIP("delete", ns)
 			},
 		},
 		{
@@ -118,6 +119,17 @@ func jailProbeSteps(dir string) []jailProbeStep {
 			},
 		},
 	}
+}
+
+// runIP runs one `ip netns` verb and folds its own diagnostics into the error.
+// The exit status alone carries no errno, so what iproute2 wrote to stderr is
+// the only thing that says which of its several mounts the kernel refused.
+func runIP(verb, ns string) error {
+	out, err := exec.Command("ip", "netns", verb, ns).CombinedOutput() //nolint:gosec // fixed argv
+	if err != nil {
+		return fmt.Errorf("ip netns %s %s: %w: %s", verb, ns, err, bytes.TrimSpace(out))
+	}
+	return nil
 }
 
 // jailProbeRemedy turns a step and its errno into the one change an operator
@@ -206,18 +218,33 @@ func RunJailProbeChild(dir string, stdout, stderr *os.File) int {
 // allocated, after the stage directory is filled -- so a container missing one
 // flag would otherwise spend a VM's worth of resources to produce a failure deep
 // in the runtime. Refusing to serve is the honest form of that answer.
-func ProbeJailSyscalls() error {
+func ProbeJailSyscalls(jailBase string) error {
 	self, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("jail probe: locate this binary: %w", err)
 	}
-	dir, err := os.MkdirTemp("", "vmobs-jailprobe-")
+	// The scratch directory sits where the jailer's chroots sit, at the same
+	// depth, because the AppArmor rules that permit the jailer's self-bind and
+	// its pivot_root name that path shape exactly. A probe run anywhere else
+	// measures a grant no launch will ever use: it would pass on a host where
+	// /srv/vmobs/jail was denied, and the operator would meet that denial one
+	// launch later, from inside the jailer, with a VM's worth of work spent.
+	if err := EnsureJailBase(jailBase); err != nil {
+		return fmt.Errorf("jail probe: %w", err)
+	}
+	dir, err := os.MkdirTemp(filepath.Join(jailBase, "firecracker"), "jailprobe-")
 	if err != nil {
 		return fmt.Errorf("jail probe: scratch directory: %w", err)
 	}
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }()
+	// One level further down, because the pivot_root rule names <id>/root and
+	// nothing shallower.
+	root := filepath.Join(dir, "root")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		return fmt.Errorf("jail probe: scratch root: %w", err)
+	}
 
-	cmd := exec.Command(self, JailProbeChildArg, dir)
+	cmd := exec.Command(self, JailProbeChildArg, root)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Unshareflags: syscall.CLONE_NEWNS | syscall.CLONE_NEWNET,
 	}

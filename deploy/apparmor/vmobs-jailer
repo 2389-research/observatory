@@ -21,7 +21,10 @@
 # `vmobs-privd`, once at startup, running its jail probe child:
 #
 #   mount(NULL, "/", NULL, MS_REC|MS_PRIVATE, NULL)     -- made by Go, not by us
-#   mount("/proc/self/ns/net", <scratch>/netns, NULL, MS_BIND, NULL)
+#
+# The rest of that probe is the jailer's own sequence run against a scratch
+# chroot under /srv/vmobs/jail/firecracker/, plus a real `ip netns add`, so it
+# needs no rules of its own -- it exercises the ones below.
 #
 # `vmobs-privd`, per launch, in `ip netns add`:
 #
@@ -77,15 +80,12 @@ profile vmobs-jailer flags=(attach_disconnected,mediate_deleted) {
   # each jail directory onto itself to make one. Confined to the chroot base.
   mount options=(rw, rbind) /srv/vmobs/jail/** -> /srv/vmobs/jail/**,
   # `ip netns add` names a network namespace by bind-mounting /proc/self/ns/net
-  # onto a file, and privd runs that verb for every VM. Its startup probe makes
-  # the same mount against its own scratch directory rather than /run/netns, so
-  # a probe that dies mid-flight leaves no named namespace behind. The jailer
-  # makes neither mount, which is why tracing it found neither rule. Denied, the
-  # probe reports netns_create as a permission error and privd refuses to serve.
-  # The source is unconstrained because /proc/self/ns/net is a magic link the
-  # kernel reports to AppArmor as "/"; both mount points are exact.
+  # onto a file under /run/netns, and privd runs that verb for every VM. The
+  # jailer never does, which is why tracing the jailer did not find this rule
+  # and privd was denied its own startup. The source is unconstrained because
+  # /proc/self/ns/net is a magic link the kernel reports to AppArmor as "/";
+  # the mount point is exact.
   mount options=(rw, bind) -> /run/netns/*,
-  mount options=(rw, bind) -> /tmp/vmobs-jailprobe-*/netns,
   pivot_root /srv/vmobs/jail/firecracker/*/root/,
   # `umount,` above covers the MNT_DETACH of the old root.
   # No blanket `mount,` rule follows: anything not listed above stays denied.

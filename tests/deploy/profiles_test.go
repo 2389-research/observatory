@@ -179,12 +179,8 @@ func TestAppArmorAllowsTheNetnsBind(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read %s: %v", apparmorPath, err)
 	}
-	for _, want := range []string{
-		"mount options=(rw, bind) -> /run/netns/*,",
-		"mount options=(rw, bind) -> /tmp/vmobs-jailprobe-*/netns,",
-	} {
-		if !strings.Contains(string(raw), want) {
-			t.Errorf("profile is missing %q; privd cannot name a network namespace without it", want)
-		}
+	const want = "mount options=(rw, bind) -> /run/netns/*,"
+	if !strings.Contains(string(raw), want) {
+		t.Errorf("profile is missing %q; privd cannot name a network namespace without it", want)
 	}
 }
