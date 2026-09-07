@@ -630,3 +630,34 @@ needed to read the lock at all; the digest checks need nothing external and are
 the likeliest thing to be wrong; `gh` is now checked immediately before the
 upload uses it. Run a new suite on both platforms before believing it: a test
 whose fixture is "an empty `PATH`" cannot tell you which check fired.
+
+**No compose file can load an AppArmor profile, so the one root step survives
+every attempt to package this as `docker compose up`.** Docker takes a profile
+by *name* and asks the kernel for one already loaded; there is no Docker API
+that loads a profile, so `security_opt: apparmor=vmobs-jailer` names something
+that must exist before compose runs. Seccomp is the opposite — measured with
+docker 29.6.1, a relative `seccomp=./deploy/seccomp/vmobs-jailer.json` resolves
+against the compose project directory and the daemon really applies it (a test
+profile denying `chmod` produced EPERM inside the container). That asymmetry is
+the whole shape of the install: two commands, and the first one is
+`sudo sh deploy/install-apparmor.sh`.
+
+**A compose volume needs an explicit `name:` when anything else mounts the same
+volume.** Compose prefixes the project name onto every volume it declares, and
+the project name is the directory — so on aibox03, where the checkout lives in
+`~/vmobs-build`, `vmobs-state` would have become `vmobs-build_vmobs-state` and
+`docker compose up` would have mounted different state than
+`scripts/vmobs-container start`. Two start paths, one appliance, silently
+divergent. `compose.yaml`'s `volumes:` block names both volumes explicitly for
+that reason, and `tests/deploy/compose_test.go` compares the two start paths
+flag by flag.
+
+**`unconfined` is not a smaller boundary here, it is close to none.** The
+container holds `CAP_SYS_ADMIN` and a seccomp profile that deliberately permits
+`mount`, `pivot_root`, `setns` and `unshare`, because the jailer needs all four.
+AppArmor is the only remaining layer that bounds *where* those mounts can land.
+`docs/design/container-boundary.md` §9 put exactly this question to review — is
+a container with `CAP_SYS_ADMIN` and no mount confinement a boundary worth
+having — and the answer that got built was the narrow profiles. So the shipped
+default in both start paths is the confined profile, and `unconfined` is a
+variable you set knowingly.
