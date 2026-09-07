@@ -19,7 +19,9 @@ size the disk for how many you intend to run. Then:
     sudo sh deploy/install-apparmor.sh   # once per host, the only root step
     docker compose up -d
 
-The API comes up on `127.0.0.1:8787`; the UI is at `/ui/`.
+The second command pulls `ghcr.io/2389-research/observatory:latest`, which bakes
+in the guest kernel and root image — 384 MB over the wire, 1.8 GB on disk. The
+API comes up on `127.0.0.1:8787`; the UI is at `/ui/`.
 
 Two commands, and the first one is root because Docker takes an AppArmor profile
 by *name* and asks the kernel for one already loaded — there is no Docker API

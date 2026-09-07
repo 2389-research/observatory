@@ -17,7 +17,7 @@
 services:
   vmobs:
     container_name: ${VMOBS_CONTAINER_NAME:-vmobs}
-    image: ${VMOBS_IMAGE:-vmobs:latest}
+    image: ${VMOBS_IMAGE:-ghcr.io/2389-research/observatory:latest}
 
     # Built from this checkout when the image is not present. The build needs the
     # guest kernel and root image at images/dist/ -- `scripts/fetch-guest-images`

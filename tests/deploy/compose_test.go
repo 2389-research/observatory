@@ -191,3 +191,30 @@ func TestComposeReapsAndSharesTheHostNetwork(t *testing.T) {
 		t.Errorf("restart = %q, want \"no\"", svc.Restart)
 	}
 }
+
+// TestComposeDefaultsToAPullableImage: `docker compose up -d` is the whole
+// install, so the image it names when nobody sets VMOBS_IMAGE has to be one a
+// stranger's Docker can reach. Docker reads a reference with no dot before the
+// first slash as a Docker Hub name -- a bare `vmobs:latest` resolves to
+// docker.io/library/vmobs, which is not ours and does not exist. The override
+// stays, because a local build still wants it.
+func TestComposeDefaultsToAPullableImage(t *testing.T) {
+	image := loadService(t).Image
+
+	const prefix = "${VMOBS_IMAGE:-"
+	if !strings.HasPrefix(image, prefix) || !strings.HasSuffix(image, "}") {
+		t.Fatalf("image = %q, want ${VMOBS_IMAGE:-DEFAULT} so a local build can still override it", image)
+	}
+	def := strings.TrimSuffix(strings.TrimPrefix(image, prefix), "}")
+
+	host, rest, ok := strings.Cut(def, "/")
+	if !ok || !strings.Contains(host, ".") {
+		t.Fatalf("default image %q names no registry host; Docker would resolve it against Docker Hub", def)
+	}
+	if rest == "" {
+		t.Fatalf("default image %q names a registry and no repository", def)
+	}
+	if !strings.Contains(rest, ":") {
+		t.Errorf("default image %q names no tag; an install would silently follow whatever :latest became", def)
+	}
+}
