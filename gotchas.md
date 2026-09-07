@@ -749,6 +749,14 @@ a reboot either. To retire the host install on a machine that now runs the
 appliance in a container, `systemctl disable --now vmobs-privd.service` — and do
 not re-run setup.sh afterwards, because it will put it back.
 
+setup.sh is the bare-metal installer from before the container: it apt-installs
+packages, drops firecracker, jailer and a root helper into /usr/local, writes
+/etc/sudoers.d/vmobs-fixture, creates /srv/vmobs, adds the operator to the kvm
+group, and builds privd into a systemd unit. The container needs none of it —
+only the AppArmor profile, which is its own script. The one thing still chaining
+the two together is the live gate: `tests/integration/m1a_gate_test.go` dials
+`/run/vmobs/privd.sock` and skips by naming setup.sh.
+
 Two privds can coexist without colliding: the container gets its own mount
 namespace and its own `/run` tmpfs, so the host socket at `/run/vmobs/privd.sock`
 is invisible to it, and the container's `/srv/vmobs` is a docker volume rather
