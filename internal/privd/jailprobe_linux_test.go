@@ -6,6 +6,7 @@
 package privd
 
 import (
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -126,5 +127,40 @@ func TestJailProbeFailsUnprivileged(t *testing.T) {
 	}
 	if !strings.Contains(msg, "SYS_ADMIN") {
 		t.Errorf("error %q does not tell the operator what to change", msg)
+	}
+}
+
+// TestParseJailProbeFailuresReadsEveryLine: a host can be missing several things
+// at once, and the probe now reports all of them in one run.
+//
+// The shape this replaced read the whole output as one flat set of fields, so
+// two failure lines collapsed into whichever step came last. Measured cost on
+// aibox03: the AppArmor profile was missing two mount rules, and finding the
+// second one took a full image rebuild and container restart after fixing the
+// first.
+func TestParseJailProbeFailuresReadsEveryLine(t *testing.T) {
+	got := parseJailProbeFailures("step=mount_propagation_slave errno=13\nstep=netns_create errno=13\n")
+	if len(got) != 2 {
+		t.Fatalf("parsed %d failures, want 2: %+v", len(got), got)
+	}
+	if got[0].step != "mount_propagation_slave" || got[1].step != "netns_create" {
+		t.Errorf("steps = %q, %q; want mount_propagation_slave, netns_create", got[0].step, got[1].step)
+	}
+	for i, f := range got {
+		if !errors.Is(f.errno, unix.EACCES) {
+			t.Errorf("failure %d errno = %v, want EACCES", i, f.errno)
+		}
+	}
+}
+
+// TestParseJailProbeFailuresSkipsLinesNamingNoStep: garbage in the stream must
+// not become a failure with an empty name, which would send an operator to the
+// fallback remedy for a step that never ran.
+func TestParseJailProbeFailuresSkipsLinesNamingNoStep(t *testing.T) {
+	if got := parseJailProbeFailures("errno=13\n\nnot a machine line\n"); len(got) != 0 {
+		t.Errorf("parsed %+v from lines naming no step, want none", got)
+	}
+	if got := parseJailProbeFailures(""); len(got) != 0 {
+		t.Errorf("parsed %+v from empty output, want none", got)
 	}
 }

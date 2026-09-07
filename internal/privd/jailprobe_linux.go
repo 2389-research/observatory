@@ -168,10 +168,24 @@ func jailProbeRemedy(step string, err error) string {
 // machine-readable line to stdout when a step fails, so the parent can classify
 // the errno it never sees. Returns the process exit code.
 func RunJailProbeChild(dir string, stdout, stderr *os.File) int {
+	rc := 0
+	propagationOK := true
 	for _, step := range jailProbeSteps(dir) {
+		// pivot_root(2) needs its new root's parent mount not to be shared,
+		// which is exactly what mount_propagation_slave establishes. Run after
+		// that step failed it returns an EINVAL that says nothing about
+		// pivot_root, so it is reported inconclusive rather than guessed at.
+		if step.name == "pivot_root" && !propagationOK {
+			fmt.Fprintf(stderr, "vmobs-privd: jail probe: %s (%s): inconclusive, mount_propagation_slave failed first\n",
+				step.name, step.needs)
+			continue
+		}
 		err := step.run()
 		if err == nil {
 			continue
+		}
+		if step.name == "mount_propagation_slave" {
+			propagationOK = false
 		}
 		var errno syscall.Errno
 		if !errors.As(err, &errno) {
@@ -179,9 +193,9 @@ func RunJailProbeChild(dir string, stdout, stderr *os.File) int {
 		}
 		fmt.Fprintf(stdout, "step=%s errno=%d\n", step.name, int(errno))
 		fmt.Fprintf(stderr, "vmobs-privd: jail probe: %s (%s): %v\n", step.name, step.needs, err)
-		return 1
+		rc = 1
 	}
-	return 0
+	return rc
 }
 
 // ProbeJailSyscalls runs the probe in a child process holding its own mount and
@@ -223,30 +237,53 @@ func ProbeJailSyscalls() error {
 	if runErr == nil {
 		return nil
 	}
-	step, errno := parseJailProbeFailure(stdout.String())
+	failures := parseJailProbeFailures(stdout.String())
 	detail := strings.TrimSpace(stderr.String())
-	if step == "" {
+	if len(failures) == 0 {
 		return fmt.Errorf("jail probe: child failed without naming a step: %w; stderr: %s", runErr, detail)
 	}
-	return fmt.Errorf("jail probe: %s failed: %s; %s", step, detail, jailProbeRemedy(step, errno))
+	var b strings.Builder
+	fmt.Fprintf(&b, "jail probe: %d of %d steps failed", len(failures), len(jailProbeSteps("")))
+	for _, f := range failures {
+		fmt.Fprintf(&b, "\n  %s: %s", f.step, jailProbeRemedy(f.step, f.errno))
+	}
+	fmt.Fprintf(&b, "\n%s", detail)
+	return errors.New(b.String())
 }
 
-// parseJailProbeFailure reads the child's one machine line. An unparseable line
-// yields an empty step, which the caller reports as such rather than guessing.
-func parseJailProbeFailure(out string) (step string, err error) {
-	for _, field := range strings.Fields(strings.TrimSpace(out)) {
-		name, value, ok := strings.Cut(field, "=")
-		if !ok {
-			continue
-		}
-		switch name {
-		case "step":
-			step = value
-		case "errno":
-			if n, convErr := strconv.Atoi(value); convErr == nil && n != 0 {
-				err = syscall.Errno(n)
+// jailProbeFailure is one step the child could not complete.
+type jailProbeFailure struct {
+	step  string
+	errno error
+}
+
+// parseJailProbeFailures reads the child's machine-readable output, one line per
+// failed step. Lines are parsed separately because a host can be missing several
+// things at once, and reading the whole output as one set of fields kept only the
+// last step named -- an operator fixing that one, rebuilding, and meeting the next.
+// A line that names no step is skipped; if none does, the caller says so rather
+// than guessing.
+func parseJailProbeFailures(out string) []jailProbeFailure {
+	var failures []jailProbeFailure
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		var f jailProbeFailure
+		for _, field := range strings.Fields(line) {
+			name, value, ok := strings.Cut(field, "=")
+			if !ok {
+				continue
+			}
+			switch name {
+			case "step":
+				f.step = value
+			case "errno":
+				if n, convErr := strconv.Atoi(value); convErr == nil && n != 0 {
+					f.errno = syscall.Errno(n)
+				}
 			}
 		}
+		if f.step != "" {
+			failures = append(failures, f)
+		}
 	}
-	return step, err
+	return failures
 }
