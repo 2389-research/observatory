@@ -485,11 +485,11 @@ func (a *Adapter) doStop(ctx context.Context, vmID string, grace time.Duration, 
 	// row promises more than a stopped one has to.
 	releaseCtx, releaseCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer releaseCancel()
-	if err := a.releaseVMWhenDead(releaseCtx, vmID); err != nil {
+	if debt := a.chrootDebt(vmID, a.releaseVMWhenDead(releaseCtx, vmID)); debt != nil {
 		return forced, &runtime.ErrCleanupPending{
 			VMID:     vmID,
 			Resource: "jail chroot",
-			Reason:   err.Error(),
+			Reason:   debt.Error(),
 		}
 	}
 
@@ -659,6 +659,40 @@ func (a *Adapter) Release(ctx context.Context, vmID string) error {
 // the slot -- and so on the jail uid and guest CID derived from it. A release
 // that reports failure must not have already handed those identities to the
 // next launch.
+// chrootDebt answers what a release of the jail chroot left behind, given what
+// privd returned and what is on disk. nil means nothing survives; an error names
+// the path that does, and why.
+//
+// The verdict comes from the filesystem rather than from privd's answer, because
+// the two disagree in exactly the state this exists to get right. privd's ledger
+// lives on a tmpfs (deploy/README.md mounts /run that way) while the chroots live
+// on the runtime volume, so a privd restart answers not_found for VMs whose
+// directories are still there. Reading not_found as "already clean" would report
+// a leak as reclaimed; reading it as a failure -- which the force-stop path did
+// -- reports a debt for a chroot that is not there, and Manager.Delete treats
+// ErrCleanupPending as a failed force-stop, so the row can never leave
+// "deleting" and its disk reservation is never released.
+//
+// A non-not_found error still counts as a debt once the directory is gone: the
+// ledger entry it pins is a held uid and CID, which is a resource whether or not
+// anything remains on disk.
+func (a *Adapter) chrootDebt(vmID string, vmErr error) error {
+	vmErr = ignoreNotFound(vmErr)
+	jailDir := filepath.Join(a.cfg.JailBase, "firecracker", vmID)
+	_, statErr := os.Stat(jailDir)
+	switch {
+	case statErr == nil && vmErr != nil:
+		return fmt.Errorf("jail chroot %s could not be released: %w", jailDir, vmErr)
+	case statErr == nil:
+		return fmt.Errorf("jail chroot %s survives a release privd accepted", jailDir)
+	case !os.IsNotExist(statErr):
+		return fmt.Errorf("stat jail chroot %q: %w", jailDir, statErr)
+	case vmErr != nil:
+		return fmt.Errorf("release_vm: %w", vmErr)
+	}
+	return nil
+}
+
 func (a *Adapter) doRelease(ctx context.Context, vmID string) error {
 	releaseCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -673,21 +707,8 @@ func (a *Adapter) doRelease(ctx context.Context, vmID string) error {
 		return fmt.Errorf("jailer release %s: remove stage dir: %w", vmID, err)
 	}
 
-	// The verdict comes from the filesystem, not from what privd returned.
-	jailDir := filepath.Join(a.cfg.JailBase, "firecracker", vmID)
-	_, statErr := os.Stat(jailDir)
-	switch {
-	case statErr == nil && vmErr != nil:
-		return fmt.Errorf("jailer release %s: jail chroot %s could not be released: %w",
-			vmID, jailDir, vmErr)
-	case statErr == nil:
-		return fmt.Errorf("jailer release %s: jail chroot %s survives a release privd accepted",
-			vmID, jailDir)
-	case !os.IsNotExist(statErr):
-		return fmt.Errorf("jailer release %s: stat jail chroot %q: %w", vmID, jailDir, statErr)
-	}
-	if vmErr != nil {
-		return fmt.Errorf("jailer release %s: release_vm: %w", vmID, vmErr)
+	if debt := a.chrootDebt(vmID, vmErr); debt != nil {
+		return fmt.Errorf("jailer release %s: %w", vmID, debt)
 	}
 	if netErr != nil {
 		return fmt.Errorf("jailer release %s: release_network: %w", vmID, netErr)
