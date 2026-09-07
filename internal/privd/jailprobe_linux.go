@@ -133,8 +133,16 @@ func jailProbeRemedy(step string, err error) string {
 		errno = 0
 	}
 	const (
-		apparmor = "load deploy/apparmor/vmobs-jailer (apparmor_parser -r -W deploy/apparmor/vmobs-jailer) " +
-			"and run the container with --security-opt apparmor=vmobs-jailer"
+		// EACCES says an AppArmor profile refused this and nothing more; the
+		// two profiles it could be need opposite fixes, and only the kernel's
+		// denial line names which one is in force.
+		apparmor = "an AppArmor profile refused this -- read which one: " +
+			"journalctl -k | grep 'apparmor=\"DENIED\"'. " +
+			"If it names docker-default, load ours and use it: " +
+			"apparmor_parser -r -W deploy/apparmor/vmobs-jailer, then run the container with " +
+			"--security-opt apparmor=vmobs-jailer. " +
+			"If it names vmobs-jailer, that profile is missing a rule for the operation " +
+			"the denial line reports"
 		seccomp  = "run the container with --security-opt seccomp=deploy/seccomp/vmobs-jailer.json"
 		sysadmin = "run the container with --cap-add SYS_ADMIN"
 		netadmin = "run the container with --cap-add NET_ADMIN"

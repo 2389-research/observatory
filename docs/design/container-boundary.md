@@ -162,14 +162,18 @@ Four of the six items this section carried before the build are now measured
 and have moved to §10, one of them with the opposite answer to the one
 predicted here. What is left:
 
-- **The AppArmor profile.** `deploy/apparmor/vmobs-jailer` is written and
-  shipped and has never been used. Loading a profile is root work on the host,
-  so every measurement in this document — §6's matrix and §10's alike — ran
-  with `apparmor=unconfined`, which is the one thing separating the measured
-  configuration from profile H in §8. Until `apparmor_parser -r` has loaded it
-  and a VM has booted under it, option 4 is built but half-proven, and
-  `scripts/vmobs-container start` prints a warning whenever it sees that value
-  rather than letting the weaker boundary pass for the shipped one.
+- **A VM booting under the AppArmor profile.** Loading
+  `deploy/apparmor/vmobs-jailer` has now been done, and it found a defect: the
+  profile denied privd its own startup, because it was derived by tracing the
+  jailer and privd's probe child makes a mount the jailer never makes. §10
+  carries the measurement and the fix, and the corrected profile is loaded on
+  aibox03. What is still unmeasured is the thing that bullet was really about:
+  every run in this document — §6's matrix and §10's alike — was made with
+  `apparmor=unconfined`, and no VM has yet booted with the profile in force.
+  Until one has, option 4 is built and its one known defect is fixed, but the
+  chain under confinement is unproven, and `scripts/vmobs-container start`
+  keeps printing a warning whenever it sees `unconfined` rather than letting
+  the weaker boundary pass for the shipped one.
 - **The acceptance gate.** AT-002 and the live integration suite have never
   run in a container against v2. §10's VMs were driven through the API by
   hand — the gate's shape, not the gate.
@@ -322,3 +326,53 @@ answer that goes wrong when something does.
 default profile plus `pivot_root` — "very likely sufficient" while refusing to
 write that down as a measurement. Every run above used the narrow profile and
 booted. It is a measurement now.
+
+### The shipped AppArmor profile denied privd its own startup
+
+Loading `deploy/apparmor/vmobs-jailer` and starting the container broke privd
+before it bound its socket. The controlled form: one image, one seccomp
+profile, one variable changed — `apparmor=unconfined` to
+`apparmor=vmobs-jailer`. Unconfined booted VMs; confined never got a socket.
+
+What privd reported was an exec failure:
+
+    jail probe: could not enter a private mount namespace: fork/exec
+    /usr/local/bin/vmobs-privd: permission denied
+
+That message names no mount, and the remediation it carries tells the operator
+to load the AppArmor profile — the profile that had just denied it. The kernel
+was the only place the truth was written:
+
+    apparmor="DENIED" operation="mount" class="mount" info="failed flags match"
+    error=-13 profile="vmobs-jailer" name="/" pid=103968 comm="vmobs-privd"
+    flags="rw, rprivate"
+
+The profile was derived by tracing `jailer`, which marks `/` **rslave**
+(`MS_REC|MS_SLAVE`) and nothing stricter. privd's jail probe forks a child with
+`CLONE_NEWNS`, and Go's own `syscall/exec_linux.go` marks `/` **rprivate** in
+that child before `execve` — a second, stricter propagation change on the same
+mount point, made by the runtime rather than by any code in this repository.
+Tracing the jailer could not have found it, because the jailer never makes it.
+
+Two things this measures beyond the one missing rule:
+
+- **A profile derived from tracing one program confines every program that
+  runs under it.** The container's profile is the container's, not the
+  jailer's. Anything the Go runtime does on its own behalf — here, one mount —
+  has to be in the profile or it is denied.
+- **An EACCES inside a forked child arrives as an exec failure.** The syscall
+  that was refused happens between `fork` and `execve`, so the parent sees only
+  `permission denied` on the exec. Nothing short of the kernel audit log says
+  which operation was actually refused, which is why §1's method — read the
+  kernel, not the error string — is the part that matters.
+
+The rule is now in the profile with the reasoning beside it, and
+`tests/deploy/profiles_test.go` fails if it is removed. The fixed profile was
+loaded on aibox03 at 2026-09-07 00:40:03 UTC (`apparmor="STATUS"
+operation="profile_replace" name="vmobs-jailer"`).
+
+**Not yet measured: a VM booting under the loaded profile.** The container on
+that host is still running `apparmor=unconfined`, so what is proven is that the
+denial is understood and the rule that answers it is loaded — not that the
+chain completes under confinement. §7 keeps that bullet until a confined boot
+is observed.

@@ -62,6 +62,22 @@ func TestJailProbeRemedyReadsTheErrno(t *testing.T) {
 	}
 }
 
+// TestJailProbeRemedyOnEACCESSendsTheOperatorToTheKernel: EACCES means an
+// AppArmor profile refused the mount, but the errno cannot say which profile.
+// Both live cases arrive identically here, and they need opposite fixes:
+// docker-default is in force and ours should replace it, or ours is in force and
+// is missing a rule. Measured on aibox03 -- the shipped profile denied privd's
+// own probe child, and this remedy told the operator to load the profile that
+// had just denied them. Only the kernel's denial line names the profile.
+func TestJailProbeRemedyOnEACCESSendsTheOperatorToTheKernel(t *testing.T) {
+	got := jailProbeRemedy("mount_propagation_slave", unix.EACCES)
+	for _, want := range []string{"journalctl", "DENIED", "docker-default", "vmobs-jailer"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("EACCES remedy %q does not mention %q", got, want)
+		}
+	}
+}
+
 // TestJailProbeRemedyNeverEmpty: an unclassified failure still has to say
 // something an operator can act on. Silence here reads as "no problem".
 func TestJailProbeRemedyNeverEmpty(t *testing.T) {

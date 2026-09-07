@@ -114,10 +114,17 @@ func (p Policy) Admit(totals store.ReservationTotals, memTotalMiB int64, vcpu in
 	usableDisk := p.UsableDiskMiB()
 	if totals.DiskMiB+diskMiB > usableDisk {
 		free := usableDisk - totals.DiskMiB
+		// The two numbers behind "usable" are named because neither is visible
+		// from outside: the reserve is a flat figure that can swallow most of a
+		// nearly-full disk, and free space is probed once, so clearing disk now
+		// does not move this number until the daemon restarts. Without them a
+		// refusal on a visibly empty disk reads as a defect in the daemon.
 		return &store.AdmissionRefusal{
 			Cause: "insufficient_capacity",
-			Message: fmt.Sprintf("disk: need %d MiB, only %d MiB free (usable %d, reserved %d)",
-				diskMiB, free, usableDisk, totals.DiskMiB),
+			Message: fmt.Sprintf(
+				"disk: need %d MiB, only %d MiB free (usable %d; host had %d MiB free at startup, %d MiB held for inspection scratch; %d MiB reserved by VMs)",
+				diskMiB, free, usableDisk,
+				p.Host.StateDiskFreeMiB, p.Admission.ReserveInspectorScratchMiB, totals.DiskMiB),
 		}
 	}
 

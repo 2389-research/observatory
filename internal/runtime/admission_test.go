@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/2389-research/observatory-v2/internal/config"
@@ -158,6 +159,36 @@ func TestAdmitDiskRefusal(t *testing.T) {
 	}
 	if ar.Cause != "insufficient_capacity" {
 		t.Errorf("cause = %q, want insufficient_capacity", ar.Cause)
+	}
+}
+
+// TestDiskRefusalNamesTheReserve: the disk refusal has to say why usable is
+// what it is. Measured on aibox03: a host with 22 GiB free refused a 5 GiB VM
+// saying "usable 5862", and nothing in the message connected 5862 to the 20 GiB
+// reserve_inspector_scratch_mib that produced it. An operator reading that on a
+// disk they can see is three-quarters empty concludes the daemon is wrong.
+//
+// The probe time matters too: free space is measured once at startup, so
+// clearing disk now does not move the number until the daemon restarts.
+func TestDiskRefusalNamesTheReserve(t *testing.T) {
+	p := runtime.Policy{
+		Admission: baseAdmission(),
+		Host:      runtime.HostResources{TotalMemoryMiB: 131072, CPUCores: 32, StateDiskFreeMiB: 26342},
+	}
+	err := p.Admit(store.ReservationTotals{DiskMiB: 5120}, 1024, 1, 5120)
+	var ar *store.AdmissionRefusal
+	if !errors.As(err, &ar) {
+		t.Fatalf("expected AdmissionRefusal, got %v", err)
+	}
+	for _, want := range []string{
+		"26342",              // what the host actually had
+		"20480",              // what policy holds back
+		"inspection scratch", // what it is held for
+		"at startup",         // when it was measured
+	} {
+		if !strings.Contains(ar.Message, want) {
+			t.Errorf("message %q does not mention %q", ar.Message, want)
+		}
 	}
 }
 
