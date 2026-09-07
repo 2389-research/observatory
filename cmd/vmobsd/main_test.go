@@ -235,3 +235,34 @@ func TestServeRefusesUninitializedAuth(t *testing.T) {
 		t.Errorf("error does not mention init-auth: %v", err)
 	}
 }
+
+// TestAuthConfigCarriesThePublicOriginWithAuthOff: a WebSocket upgrade is
+// accepted only when its Origin equals AuthConfig.PublicOrigin, and that gate
+// runs whether or not authentication does -- it is cross-site defence, not
+// authentication, and it matters more when there is no credential behind it.
+//
+// Built with auth off, the config's public_origin never reached the gate: the
+// field was populated only inside the auth-enabled branch. The shipped default
+// config has require_authentication: false, so on the appliance every terminal
+// upgrade was refused, for every VM and every Origin, with:
+//
+//	403 {"cause":"public_origin_unset"}
+//
+// while /etc/vmobs/config.yaml named a public origin two lines from the listen
+// address. Measured on aibox03 2026-09-06 against a running, healthy VM.
+func TestAuthConfigCarriesThePublicOriginWithAuthOff(t *testing.T) {
+	cfg := testConfig(t, "127.0.0.1:0")
+	cfg.Server.PublicOrigin = "http://127.0.0.1:8787"
+
+	ac, err := authConfig(cfg)
+	if err != nil {
+		t.Fatalf("authConfig: %v", err)
+	}
+	if ac.Enabled {
+		t.Fatal("auth reports enabled although the config does not require it")
+	}
+	if ac.PublicOrigin != cfg.Server.PublicOrigin {
+		t.Errorf("PublicOrigin = %q, want %q; the terminal upgrade gate reads this field and refuses every Origin when it is empty",
+			ac.PublicOrigin, cfg.Server.PublicOrigin)
+	}
+}

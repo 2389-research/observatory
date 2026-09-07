@@ -225,6 +225,36 @@ func managerConfig(cfg *config.Config, tpls map[string]runtime.Template, host ru
 // or the doctor reports a host it never looked at. LockPath is that same rule
 // applied to the lock: the doctor names the file a launch would stage from, and
 // reads it when asked rather than holding a copy from startup.
+// authConfig builds the API's auth boundary from the daemon's config. When auth
+// is off (the dev default: loopback only) the API injects a local_operator/none
+// identity on every request, and the /auth/* routes refuse to log anyone in.
+//
+// PublicOrigin is set in both cases. It is not an authentication field: the
+// WebSocket origin gate compares it on every upgrade, so leaving it empty when
+// auth is off refuses every terminal in the configuration the appliance ships.
+func authConfig(cfg *config.Config) (api.AuthConfig, error) {
+	if !cfg.AuthEnabled() {
+		return api.AuthConfig{Enabled: false, PublicOrigin: cfg.Server.PublicOrigin}, nil
+	}
+	credStore, err := auth.OpenStore(cfg.Auth.CredentialStore)
+	if err != nil {
+		return api.AuthConfig{}, fmt.Errorf("auth.require_authentication is true but the credential store at %s is not initialized (run: vmobsd init-auth -config ...): %w", cfg.Auth.CredentialStore, err)
+	}
+	sameSite := http.SameSiteStrictMode
+	if cfg.Auth.SessionCookieSameSite == "lax" {
+		sameSite = http.SameSiteLaxMode
+	}
+	return api.AuthConfig{
+		Enabled:        true,
+		Creds:          credStore,
+		Sessions:       auth.NewSessions(time.Duration(cfg.Auth.SessionTTLMinutes) * time.Minute),
+		PublicOrigin:   cfg.Server.PublicOrigin,
+		CookieSameSite: sameSite,
+		CookieSecure:   cfg.Auth.SessionCookieSecure,
+		LoginDelay:     500 * time.Millisecond,
+	}, nil
+}
+
 func preflightConfig(cfg *config.Config) preflight.Config {
 	return preflight.Config{
 		LockPath:    cfg.Runtime.LockFile,
@@ -425,29 +455,9 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready f
 		logger.Info("spool importer started", "root", spoolRoot)
 	}
 
-	// Build auth config. When auth is off (dev mode, loopback only), the API
-	// injects a local_operator/none identity on every request. The smoke test
-	// runs with require_authentication: true; the example config shows the
-	// dev-default (false, loopback only).
-	ac := api.AuthConfig{Enabled: false}
-	if cfg.AuthEnabled() {
-		credStore, err := auth.OpenStore(cfg.Auth.CredentialStore)
-		if err != nil {
-			return fmt.Errorf("auth.require_authentication is true but the credential store at %s is not initialized (run: vmobsd init-auth -config ...): %w", cfg.Auth.CredentialStore, err)
-		}
-		sameSite := http.SameSiteStrictMode
-		if cfg.Auth.SessionCookieSameSite == "lax" {
-			sameSite = http.SameSiteLaxMode
-		}
-		ac = api.AuthConfig{
-			Enabled:        true,
-			Creds:          credStore,
-			Sessions:       auth.NewSessions(time.Duration(cfg.Auth.SessionTTLMinutes) * time.Minute),
-			PublicOrigin:   cfg.Server.PublicOrigin,
-			CookieSameSite: sameSite,
-			CookieSecure:   cfg.Auth.SessionCookieSecure,
-			LoginDelay:     500 * time.Millisecond,
-		}
+	ac, err := authConfig(cfg)
+	if err != nil {
+		return err
 	}
 
 	// The registry dials each VM's runner control socket under the state dir.
