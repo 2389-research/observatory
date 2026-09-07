@@ -1,23 +1,28 @@
 #!/bin/sh
-# ABOUTME: One-time root setup for aibox03 as the vmobs L0 host. Run as:
+# ABOUTME: One-time root setup for a Linux KVM host as the vmobs L0 host. Run as:
 # ABOUTME:   cd ~/vmobs-build && sudo sh scripts/aibox03/setup.sh
 set -eu
 [ "$(id -u)" = 0 ] || { echo "run with sudo" >&2; exit 1; }
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 
+# Every host grant below names the operator -- the user who invoked sudo -- so
+# this script works on any host, not only the one it was written for.
+: "${SUDO_USER:?SUDO_USER not set; run via sudo sh setup.sh}"
+operator="$SUDO_USER"
+
 # 1. Tools the pipeline needs on the host.
 apt-get install -y --no-install-recommends jq e2fsprogs >/dev/null
 
 # 2. KVM access + fixture group.
-usermod -aG kvm harper
+usermod -aG kvm "$operator"
 # Fixed gid 36000: the root helper validates gid in [10000,59999]; a --system
 # group would land below 1000 and be rejected at jail-start.
 if ! getent group vmobs-fixture >/dev/null; then
   getent group 36000 >/dev/null && { echo "gid 36000 taken; edit setup.sh" >&2; exit 1; }
   groupadd --gid 36000 vmobs-fixture
 fi
-usermod -aG vmobs-fixture harper
+usermod -aG vmobs-fixture "$operator"
 
 # 3. Pinned firecracker + jailer, hash-verified against runtime.lock.json.
 lock="$repo/runtime.lock.json"
@@ -37,11 +42,12 @@ install -o root -g root -m 0755 "$j" /usr/local/bin/jailer
 
 # 4. Root helper + narrow sudoers.
 install -o root -g root -m 0755 "$here/vmobs-root-helper" /usr/local/sbin/vmobs-root-helper
-visudo -cf "$here/sudoers-vmobs" >/dev/null || { echo "sudoers fragment invalid" >&2; exit 1; }
-install -o root -g root -m 0440 "$here/sudoers-vmobs" /etc/sudoers.d/vmobs-fixture
+sed "s/__OPERATOR__/$operator/g" "$here/sudoers-vmobs" > "$tmp/sudoers-vmobs"
+visudo -cf "$tmp/sudoers-vmobs" >/dev/null || { echo "sudoers fragment invalid" >&2; exit 1; }
+install -o root -g root -m 0440 "$tmp/sudoers-vmobs" /etc/sudoers.d/vmobs-fixture
 
 # 5. Fixture directories.
-install -d -o harper -g vmobs-fixture -m 0775 /srv/vmobs /srv/vmobs/fixture
+install -d -o "$operator" -g vmobs-fixture -m 0775 /srv/vmobs /srv/vmobs/fixture
 install -d -o root -g root -m 0755 /srv/vmobs/jail
 
 # 6. vmobs-privd daemon.

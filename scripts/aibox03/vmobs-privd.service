@@ -1,8 +1,8 @@
-# ABOUTME: systemd unit for vmobs-privd, the M1 root privilege daemon on aibox03.
+# ABOUTME: systemd unit for vmobs-privd, the M1 root privilege daemon on the KVM host.
 # ABOUTME: setup.sh substitutes __ALLOWED_UID__ and __ALLOWED_GID__ before installing.
 [Unit]
 Description=vmobs privilege daemon (privd)
-Documentation=file:///home/harper/vmobs-build/docs/runbooks/aibox03.md
+Documentation=https://github.com/2389-research/observatory-v2/blob/main/docs/runbooks/aibox03.md
 After=network.target
 
 [Service]

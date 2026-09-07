@@ -1,1 +1,1 @@
-harper ALL=(root) NOPASSWD: /usr/local/sbin/vmobs-root-helper
+__OPERATOR__ ALL=(root) NOPASSWD: /usr/local/sbin/vmobs-root-helper

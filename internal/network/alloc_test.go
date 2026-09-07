@@ -1,5 +1,5 @@
 // ABOUTME: Tests for transit-subnet allocation with host-route overlap detection.
-// ABOUTME: Fixture data is real captured aibox03 output: `ip -json route` and `ip -json route show table all`.
+// ABOUTME: Fixture data is captured aibox03 output (`ip -json route`) with its addresses renumbered.
 package network_test
 
 import (
@@ -10,6 +10,15 @@ import (
 
 	"github.com/2389-research/observatory-v2/internal/network"
 )
+
+// Both fixtures are captured `ip -json route` output from the aibox03 host: the
+// set of entries, their fields, and their order are verbatim. The addresses are
+// not. Every tailnet peer, the host's own tailnet and LAN addresses, and the
+// IPv6 addresses that carry the NIC's MAC in their EUI-64 suffix were renumbered
+// onto synthetic equivalents before this repository was published. What the
+// tests below read -- bare host addresses, /32 peer routes in table 52,
+// local/broadcast/multicast entries to filter -- is the shape, and the shape is
+// unchanged.
 
 //go:embed testdata/aibox03-routes.json
 var aibox03RoutesJSON []byte
@@ -258,11 +267,11 @@ func TestAllocatorExcludesTailscaleRoutes(t *testing.T) {
 		t.Fatalf("ParseIPRoutes(table-all): %v", err)
 	}
 
-	// 100.65.0.0/16 contains 100.64.0.1 (a tailscale /32 in the fixture).
+	// 100.64.0.0/16 contains 100.64.0.1 (a tailscale /32 in the fixture).
 	// Using it as a pool must trigger an exclusion.
 	// 10.190.0.0/16 is the fallback pool that must remain usable.
 	pools := []netip.Prefix{
-		netip.MustParsePrefix("100.65.0.0/16"),
+		netip.MustParsePrefix("100.64.0.0/16"),
 		netip.MustParsePrefix("10.190.0.0/16"),
 	}
 	a, err := network.NewAllocator(routes, pools)
@@ -270,17 +279,17 @@ func TestAllocatorExcludesTailscaleRoutes(t *testing.T) {
 		t.Fatalf("NewAllocator: %v", err)
 	}
 	if len(a.Exclusions()) == 0 {
-		t.Error("expected at least one exclusion for pool 100.65.0.0/16 overlapping tailscale routes")
+		t.Error("expected at least one exclusion for pool 100.64.0.0/16 overlapping tailscale routes")
 	}
 	// Verify the exclusion message mentions the overlapping pool.
 	found := false
 	for _, ex := range a.Exclusions() {
-		if strings.Contains(ex, "100.65.0.0/16") {
+		if strings.Contains(ex, "100.64.0.0/16") {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("exclusion for 100.65.0.0/16 not found; got: %v", a.Exclusions())
+		t.Errorf("exclusion for 100.64.0.0/16 not found; got: %v", a.Exclusions())
 	}
 }
 
