@@ -110,8 +110,46 @@ preflight_host() {
     # weaker boundary pass quietly for the shipped one.
     case "$APPARMOR_PROFILE" in
         unconfined) ;;
-        *) [ -f "$REPO/deploy/apparmor/$APPARMOR_PROFILE" ] || die "missing deploy/apparmor/$APPARMOR_PROFILE" ;;
+        *) preflight_apparmor ;;
     esac
+}
+
+# preflight_apparmor checks the two things docker's own error cannot separate:
+# a host with no AppArmor at all, and a host whose loaded profile is older than
+# the repo's.
+#
+# What the kernel actually holds is not readable here --
+# /sys/kernel/security/apparmor/profiles is 0444 root-only -- so the comparison
+# is against /etc/apparmor.d/<name>, the copy the host loads at boot. That is
+# the honest check, and it catches the failure that costs the most: docker
+# accepts any loaded profile by name, so a stale one starts cleanly and then
+# denies a mount in the middle of a launch, minutes later and nowhere near the
+# cause.
+preflight_apparmor() {
+    src="$REPO/deploy/apparmor/$APPARMOR_PROFILE"
+    dest="/etc/apparmor.d/$APPARMOR_PROFILE"
+    [ -f "$src" ] || die "missing deploy/apparmor/$APPARMOR_PROFILE"
+
+    enabled=""
+    [ -r /sys/module/apparmor/parameters/enabled ] && enabled="$(cat /sys/module/apparmor/parameters/enabled)"
+    if [ "$enabled" != "Y" ]; then
+        die "this host has no AppArmor enabled, so the profile cannot load.
+  Enable AppArmor, or accept the weaker boundary and start with:
+    VMOBS_APPARMOR_PROFILE=unconfined scripts/vmobs-container start
+  (that drops the mount confinement; seccomp and the capabilities still apply.)"
+    fi
+
+    if [ ! -f "$dest" ]; then
+        die "$APPARMOR_PROFILE is not installed at $dest, so this host does not load it at boot.
+  Install and load it once, as root:
+    sudo sh deploy/install-apparmor.sh"
+    fi
+    if ! cmp -s "$src" "$dest"; then
+        die "the profile installed at $dest differs from deploy/apparmor/$APPARMOR_PROFILE.
+  docker would accept the installed one by name and the difference would surface
+  later, as a denied mount in the middle of a launch. Reload it, as root:
+    sudo sh deploy/install-apparmor.sh"
+    fi
 }
 
 cmd_start() {

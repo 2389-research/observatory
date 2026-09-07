@@ -15,7 +15,7 @@ Everything here runs from a checkout:
     scripts/vmobs-container stop
 
 There is no installer. Nothing in `start` writes to the host outside Docker's
-own storage; the single root step is loading the AppArmor profile, below, and
+own storage; the single root step is installing the AppArmor profile, below, and
 you run it yourself.
 
 ## Host prerequisites
@@ -45,22 +45,47 @@ succeeds cannot be shipping bytes nobody pinned.
 
 ### The AppArmor profile — the one root command
 
-    sudo apparmor_parser -r -W deploy/apparmor/vmobs-jailer
+    sudo sh deploy/install-apparmor.sh
 
-Once per host, and again whenever the profile changes. Without it `docker run`
-fails with a profile-not-found error and the script tells you this command.
+Once per host, and again whenever `deploy/apparmor/vmobs-jailer` changes.
+
+It installs the profile to `/etc/apparmor.d/vmobs-jailer` and then loads it.
+Both halves matter: `apparmor_parser` alone loads a profile into the running
+kernel and leaves nothing on disk, so after a reboot the host has no
+`vmobs-jailer` and `docker run --security-opt apparmor=vmobs-jailer` fails
+outright. Installing it under `/etc/apparmor.d` is what makes the host load it
+at boot.
+
+`start` refuses before it runs anything if the profile is missing from
+`/etc/apparmor.d` or differs from the copy in this repo, and names this script.
+It compares those two files because what the kernel actually holds is not
+readable without root: `/sys/kernel/security/apparmor/profiles` is `0444`
+root-only. A stale profile is the failure worth catching — docker accepts any
+loaded profile by name, so the container starts cleanly and the difference
+surfaces minutes later as a denied mount in the middle of a launch.
 
 The profile is Docker's own `docker-default` template with one substitution.
 `docker-default` carries a blanket `deny mount,`, and an AppArmor `deny`
 overrides every allow regardless of order, so no amount of capability grants
 gets past it. In its place:
 
+    umount,
     mount options=(rw, rslave) -> /,
+    mount options=(rw, rprivate) -> /,
     mount options=(rw, rbind) /srv/vmobs/jail/** -> /srv/vmobs/jail/**,
+    mount options=(rw, rshared) -> /run/netns/,
+    mount options=(rw, bind) /run/netns/ -> /run/netns/,
+    mount options=(rw, rbind) /run/netns/ -> /run/netns/,
+    mount options=(rw, bind) -> /run/netns/*,
+    mount fstype=sysfs -> /sys/,
     pivot_root /srv/vmobs/jail/firecracker/*/root/,
 
-Three rules for the three things the jailer does: make its mount namespace
-slave, bind the chroot, pivot into it. Every other mount stays denied.
+Every other mount stays denied. The list grew from three rules to these because
+it was first traced from the jailer alone, and the container runs more than the
+jailer: privd's own exec makes `/` rprivate, and `ip netns add` and `ip netns
+exec` account for the five `/run/netns` and `/sys` rules between them. Each one
+was added against a measured denial, recorded in
+`docs/design/container-boundary.md` §10 and pinned by `tests/deploy/profiles_test.go`.
 
 ## What `start` passes, and why
 
