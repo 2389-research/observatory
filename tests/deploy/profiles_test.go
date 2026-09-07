@@ -191,3 +191,30 @@ func TestAppArmorAllowsTheNetnsMounts(t *testing.T) {
 		}
 	}
 }
+
+// TestAppArmorAllowsTheNetnsSysfsRemount: the other half of the verb pair.
+// privd runs every network setup command as `ip netns exec <ns> ...`, and
+// entering a namespace that way replaces /sys with a sysfs instance describing
+// it, so that /sys/class/net shows that namespace's interfaces rather than the
+// caller's. Granting the three mounts `ip netns add` makes does not reach this
+// one: startup passed and every launch still failed at network allocation.
+//
+// Measured 2026-09-06 on aibox03, on the first VM launched under the loaded
+// profile:
+//
+//	apparmor="DENIED" operation="mount" class="mount" info="failed mntpnt match"
+//	error=-13 profile="vmobs-jailer" name="/sys/" comm="ip" fstype="sysfs"
+//	srcname="vmobs-<vm id>"
+//
+// The source is the namespace's name rather than a path, so the rule constrains
+// the filesystem type and the mount point and nothing else.
+func TestAppArmorAllowsTheNetnsSysfsRemount(t *testing.T) {
+	raw, err := os.ReadFile(apparmorPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", apparmorPath, err)
+	}
+	const want = "mount fstype=sysfs -> /sys/,"
+	if !strings.Contains(string(raw), want) {
+		t.Errorf("profile is missing %q; privd cannot enter a network namespace without it", want)
+	}
+}

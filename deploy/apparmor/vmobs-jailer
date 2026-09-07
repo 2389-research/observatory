@@ -103,6 +103,18 @@ profile vmobs-jailer flags=(attach_disconnected,mediate_deleted) {
   mount options=(rw, bind) /run/netns/ -> /run/netns/,
   mount options=(rw, rbind) /run/netns/ -> /run/netns/,
   mount options=(rw, bind) -> /run/netns/*,
+  # `ip netns exec` enters a namespace and then replaces /sys with a sysfs
+  # instance describing it, so that /sys/class/net shows that namespace's
+  # interfaces. privd runs every network setup command that way. Measured:
+  #
+  #   apparmor="DENIED" operation="mount" info="failed mntpnt match" error=-13
+  #   profile="vmobs-jailer" name="/sys/" comm="ip" fstype="sysfs"
+  #   srcname="vmobs-<vm id>"
+  #
+  # The source is the namespace's name rather than a path, so only the
+  # filesystem type and the mount point are constrained. The MNT_DETACH of the
+  # old /sys that precedes it is covered by `umount,` above.
+  mount fstype=sysfs -> /sys/,
   pivot_root /srv/vmobs/jail/firecracker/*/root/,
   # `umount,` above covers the MNT_DETACH of the old root.
   # No blanket `mount,` rule follows: anything not listed above stays denied.
