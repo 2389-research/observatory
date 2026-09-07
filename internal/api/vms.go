@@ -289,10 +289,19 @@ func vmErrorFor(err error) (int, Error) {
 					Params:    map[string]any{"path": basePath + "/host/status"},
 					Rationale: "shows current reservations, usable capacity, and active VMs",
 				},
+				// Both levers, each saying what it frees. The refusal names its
+				// dimension only inside a human message, so nothing here can
+				// pick one -- and offering just the stop sends an operator
+				// blocked on disk to an action that provably cannot help.
 				{
 					Action:    "post",
 					Params:    map[string]any{"path": basePath + "/vms/{id}/actions", "body": map[string]string{"action": "stop"}},
-					Rationale: "stopping a running VM releases its memory and CPU reservation",
+					Rationale: "stopping a running VM releases its memory and CPU reservation; its disk stays reserved",
+				},
+				{
+					Action:    "delete",
+					Params:    map[string]any{"path": basePath + "/vms/{id}"},
+					Rationale: "deleting a VM releases its disk reservation as well as its memory and CPU",
 				},
 			},
 		}

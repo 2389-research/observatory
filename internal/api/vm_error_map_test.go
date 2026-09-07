@@ -236,3 +236,40 @@ func TestNamingTheOperationChangesNothingElse(t *testing.T) {
 		t.Errorf("remediation count = %d, want %d", len(got.Remediation), len(want.Remediation))
 	}
 }
+
+// TestAdmissionRemediationDistinguishesStopFromDelete: an admission refusal
+// offers actions, and an action that cannot resolve the refusal is worse than
+// none — the operator spends the stop and is refused identically.
+//
+// Measured on aibox03: a disk refusal offered "stop", whose rationale correctly
+// said it frees memory and CPU. Stop does not free disk; only delete does. The
+// refusal does not carry its dimension past the store, so rather than guess,
+// both actions are offered and each says what it frees.
+func TestAdmissionRemediationDistinguishesStopFromDelete(t *testing.T) {
+	_, e := mapVMError(t, &store.AdmissionRefusal{
+		Cause:   "insufficient_capacity",
+		Message: "disk: need 5120 MiB, only 742 MiB free",
+	})
+
+	var stop, del *Remediation
+	for i := range e.Remediation {
+		switch e.Remediation[i].Action {
+		case "post":
+			stop = &e.Remediation[i]
+		case "delete":
+			del = &e.Remediation[i]
+		}
+	}
+	if stop == nil {
+		t.Fatal("no stop action offered")
+	}
+	if del == nil {
+		t.Fatal("no delete action offered; a disk shortfall has no other lever")
+	}
+	if !strings.Contains(stop.Rationale, "disk") {
+		t.Errorf("stop rationale %q does not say what it leaves reserved", stop.Rationale)
+	}
+	if !strings.Contains(del.Rationale, "disk") {
+		t.Errorf("delete rationale %q does not say it frees disk", del.Rationale)
+	}
+}
