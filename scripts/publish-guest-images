@@ -52,8 +52,7 @@ done
 
 [ -n "$TAG" ] || { usage >&2; die "no release named; pass --tag TAG"; }
 
-command -v gh >/dev/null 2>&1 || die "gh is not on PATH; install the GitHub CLI (https://cli.github.com) and run 'gh auth login'"
-command -v jq >/dev/null 2>&1 || die "jq is not on PATH"
+command -v jq >/dev/null 2>&1 || die "jq is not on PATH; it is needed to read $LOCK"
 
 digest_of() {
     if command -v sha256sum >/dev/null 2>&1; then
@@ -91,6 +90,8 @@ check_one() {
 
 check_one vmlinux "$(lock_field .guest_kernel.vmlinux_sha256)"
 check_one rootfs.ext4 "$(lock_field .root_image.sha256)"
+
+command -v gh >/dev/null 2>&1 || die "gh is not on PATH; install the GitHub CLI (https://cli.github.com) and run 'gh auth login'"
 
 # gh takes -R OWNER/NAME or resolves the repository from the checkout's remote.
 if [ -n "$REPO" ]; then

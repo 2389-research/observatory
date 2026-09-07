@@ -41,17 +41,49 @@ func runPublish(t *testing.T, lock, dist string, extraPath string, args ...strin
 	return string(out), err
 }
 
+// pathWithoutGh builds a PATH holding every tool the script needs before it
+// reaches the upload, and nothing else -- so the run gets as far as gh and no
+// further. Removing one entry from the real PATH is not possible; naming the
+// dependencies is, and it keeps this test honest about what they are.
+func pathWithoutGh(t *testing.T) string {
+	t.Helper()
+	bin := t.TempDir()
+	found := 0
+	for _, tool := range []string{"dirname", "jq", "cut", "sha256sum", "shasum"} {
+		real, err := exec.LookPath(tool)
+		if err != nil {
+			continue // sha256sum and shasum are the macOS/Linux pair; one is enough
+		}
+		if err := os.Symlink(real, filepath.Join(bin, tool)); err != nil {
+			t.Fatalf("link %s: %v", tool, err)
+		}
+		found++
+	}
+	if found < 4 {
+		t.Fatalf("only %d of the script's tools are on PATH; cannot build the fixture", found)
+	}
+	return bin
+}
+
 // TestPublishRefusesWithoutGh: gh is how this talks to GitHub at all. Its own
 // "command not found" says nothing about what the operator is trying to do.
+//
+// The fixture's artifacts match the lock, so the run reaches the gh check
+// rather than stopping earlier -- which is the order that matters. gh was
+// checked first once, and on a host without gh installed every other refusal
+// in this file reported the missing tool instead of the thing it was testing.
 func TestPublishRefusesWithoutGh(t *testing.T) {
 	lock, dist := publishFixture(t)
-	// An empty PATH still finds sh's builtins; gh and jq are both gone.
-	out, err := runPublish(t, lock, dist, filepath.Join(t.TempDir(), "empty"), "--tag", "guest-images-1")
+	out, err := runPublish(t, lock, dist, pathWithoutGh(t), "--tag", "guest-images-1")
 	if err == nil {
 		t.Fatalf("publish ran with no gh on PATH:\n%s", out)
 	}
 	if !strings.Contains(out, "gh") {
 		t.Errorf("refusal does not name gh:\n%s", out)
+	}
+	// It got past the local checks to get there.
+	if !strings.Contains(out, "vmlinux matches its pin") {
+		t.Errorf("the artifact checks did not run before the gh check:\n%s", out)
 	}
 }
 
