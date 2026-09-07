@@ -572,6 +572,13 @@ compares those two *files* because the kernel's own list,
 cannot read what is actually loaded.
 `/sys/module/apparmor/parameters/enabled` is world-readable and is how the
 script tells "no AppArmor on this host" from "profile not installed".
+The distinction outlived the fix in two shipped files: `scripts/vmobs-container`'s
+docker-refused-the-profile branch and the profile's own header comment both still
+handed over `apparmor_parser -r` weeks after `install-apparmor.sh` existed, and
+each read correctly to anyone who already knew the difference.
+`tests/deploy/remedy_lines_test.go` now fails on any shipped file under
+`deploy/`, `scripts/` or `images/` whose runnable text starts with
+`apparmor_parser`, comment markers and prose lead-ins stripped.
 
 **A startup probe is worth exactly the production verbs it runs.** privd's jail
 probe checked mount propagation, netns creation, tap creation and `pivot_root`.
@@ -600,3 +607,26 @@ testing the auth-off path. Two things to know when probing this by hand: a
 client that sends no `Origin` header at all is refused on purpose, so a Go
 client's 403 is not necessarily the bug; and `handleTerminalStream` needs no
 lease to attach, only to write.
+
+**`runtime.lock.json` is an input to every install, and a build that rewrote it
+turned a stranger's first command into an uncommitted change.**
+`images/build-all.sh` used to `jq`-write its computed digests straight back into
+the lock. So the documented install sequence — clone, `build-all.sh`,
+`vmobs-container build` — dirtied the checkout at step two, and step three then
+tagged and labelled the appliance image `-dirty` on a tree nobody had edited.
+The pin step now lives in `images/lock-pins.sh`: the default *compares* the
+build against the lock and fails naming `--repin`, and only `--repin` rewrites
+it. Read it as a lockfile, not a build artifact — the digests are what an
+installer verifies a download against, so the direction of trust runs from the
+committed lock outward.
+
+**Check the cheap local preconditions before the external tool, or every test on
+a machine without that tool reports the wrong failure.**
+`scripts/publish-guest-images` asked for `gh` in its first five lines. On
+aibox03, where `gh` is not installed, three of its four refusal tests passed on
+the Mac and then failed remotely for a reason none of them was testing — the
+missing tool masked the artifact checks entirely. `jq` stays first because it is
+needed to read the lock at all; the digest checks need nothing external and are
+the likeliest thing to be wrong; `gh` is now checked immediately before the
+upload uses it. Run a new suite on both platforms before believing it: a test
+whose fixture is "an empty `PATH`" cannot tell you which check fired.
