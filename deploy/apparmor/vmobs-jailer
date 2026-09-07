@@ -81,10 +81,27 @@ profile vmobs-jailer flags=(attach_disconnected,mediate_deleted) {
   mount options=(rw, rbind) /srv/vmobs/jail/** -> /srv/vmobs/jail/**,
   # `ip netns add` names a network namespace by bind-mounting /proc/self/ns/net
   # onto a file under /run/netns, and privd runs that verb for every VM. The
-  # jailer never does, which is why tracing the jailer did not find this rule
-  # and privd was denied its own startup. The source is unconstrained because
-  # /proc/self/ns/net is a magic link the kernel reports to AppArmor as "/";
-  # the mount point is exact.
+  # jailer never does, which is why tracing the jailer found none of these three
+  # rules and privd was denied its own startup.
+  #
+  # Before that bind, iproute2 marks /run/netns shared so the name is visible in
+  # every mount namespace. That was measured:
+  #
+  #   apparmor="DENIED" operation="mount" info="failed mntpnt match" error=-13
+  #   profile="vmobs-jailer" name="/run/netns/" comm="ip" flags="rw, rshared"
+  #
+  # MS_SHARED needs a mount point and /run/netns is a plain directory inside the
+  # /run tmpfs, so that first attempt returns EINVAL and iproute2 binds the
+  # directory onto itself to make one. Both bind forms are listed because
+  # AppArmor matches the recursion flag exactly and which one iproute2 passes is
+  # not something to guess at; they name the same single path either way.
+  #
+  # The per-namespace bind's source is unconstrained because /proc/self/ns/net is
+  # a magic link the kernel reports to AppArmor as "/". Every mount point here is
+  # exact.
+  mount options=(rw, rshared) -> /run/netns/,
+  mount options=(rw, bind) /run/netns/ -> /run/netns/,
+  mount options=(rw, rbind) /run/netns/ -> /run/netns/,
   mount options=(rw, bind) -> /run/netns/*,
   pivot_root /srv/vmobs/jail/firecracker/*/root/,
   # `umount,` above covers the MNT_DETACH of the old root.

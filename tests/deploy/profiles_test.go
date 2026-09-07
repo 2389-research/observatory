@@ -158,29 +158,36 @@ func TestAppArmorAllowsTheProbeChildsPrivateRoot(t *testing.T) {
 	}
 }
 
-// TestAppArmorAllowsTheNetnsBind: `ip netns add` names a network namespace by
-// bind-mounting /proc/self/ns/net onto a file, and privd runs that verb for
-// every VM. Its startup probe makes the same mount against its own scratch
-// directory rather than /run/netns, so a probe that dies mid-flight leaves no
-// named namespace behind. The jailer makes neither mount, which is why the trace
-// that produced the rules above never saw them.
+// TestAppArmorAllowsTheNetnsMounts: `ip netns add` names a network namespace by
+// bind-mounting /proc/self/ns/net onto a file under /run/netns, and privd runs
+// that verb for every VM. The jailer runs it never, so the trace that produced
+// the rules above found none of these and privd was denied its own startup.
 //
-// Measured 2026-09-06 on aibox03 with the profile loaded and neither rule
-// present:
+// It takes four rules because iproute2 does more than the one obvious bind: it
+// marks /run/netns shared first, and /run/netns is a plain directory inside the
+// /run tmpfs, so MS_SHARED returns EINVAL there and iproute2 binds the directory
+// onto itself to make it a mount point. Measured 2026-09-06 on aibox03 with the
+// profile loaded and only the per-namespace bind present:
 //
 //	apparmor="DENIED" operation="mount" class="mount" info="failed mntpnt match"
-//	error=-13 profile="vmobs-jailer" name="/tmp/vmobs-jailprobe-1810112568/netns"
-//	comm="vmobs-privd" srcname="/" flags="rw, bind"
+//	error=-13 profile="vmobs-jailer" name="/run/netns/" comm="ip"
+//	flags="rw, rshared"
 //
-// The probe reported netns_create as a permission error and privd refused to
-// bind its socket, so the appliance came up with no API at all.
-func TestAppArmorAllowsTheNetnsBind(t *testing.T) {
+// privd reported it as `mount --make-shared /run/netns failed: Permission
+// denied` and refused to bind its socket, so the appliance came up with no API.
+func TestAppArmorAllowsTheNetnsMounts(t *testing.T) {
 	raw, err := os.ReadFile(apparmorPath)
 	if err != nil {
 		t.Fatalf("read %s: %v", apparmorPath, err)
 	}
-	const want = "mount options=(rw, bind) -> /run/netns/*,"
-	if !strings.Contains(string(raw), want) {
-		t.Errorf("profile is missing %q; privd cannot name a network namespace without it", want)
+	for _, want := range []string{
+		"mount options=(rw, rshared) -> /run/netns/,",
+		"mount options=(rw, bind) /run/netns/ -> /run/netns/,",
+		"mount options=(rw, rbind) /run/netns/ -> /run/netns/,",
+		"mount options=(rw, bind) -> /run/netns/*,",
+	} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("profile is missing %q; privd cannot name a network namespace without it", want)
+		}
 	}
 }

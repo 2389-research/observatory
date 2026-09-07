@@ -172,8 +172,13 @@ func jailProbeRemedy(step string, err error) string {
 	case errno == unix.EPERM:
 		return sysadmin
 	}
-	return "compare this host against the prerequisites in deploy/README.md; " +
-		"the operation is one docs/design/container-boundary.md §5 measures"
+	// No errno to read: a step that runs a command gets an exit status, and the
+	// AppArmor denial that most often causes one is written only to the kernel
+	// log. Send the operator there first rather than to a prerequisites list
+	// that says nothing about which operation was refused.
+	return "read the kernel's own answer: journalctl -k | grep 'apparmor=\"DENIED\"'; " +
+		"then compare this host against the prerequisites in deploy/README.md. " +
+		"The operation is one docs/design/container-boundary.md §5 measures"
 }
 
 // RunJailProbeChild is the child half. It runs every step in order and prints one
