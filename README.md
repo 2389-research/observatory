@@ -73,3 +73,12 @@ is never reachable from a served mode; the gate fails if it becomes so.
 
 Acceptance evidence requires real Firecracker on a real Linux host. Results from
 the fake runtime are labelled as such and cannot satisfy a KVM gate.
+
+## Licence
+
+MIT — see [LICENSE](LICENSE).
+
+That covers this repository. The appliance image is not only this repository:
+it bundles Firecracker v1.16.1 (Apache-2.0), a Linux 6.1.186 guest kernel
+(GPL-2.0), and an Ubuntu userland, each under its own terms.
+`runtime.lock.json` names every pinned component.
