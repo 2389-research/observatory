@@ -661,3 +661,20 @@ a container with `CAP_SYS_ADMIN` and no mount confinement a boundary worth
 having — and the answer that got built was the narrow profiles. So the shipped
 default in both start paths is the confined profile, and `unconfined` is a
 variable you set knowingly.
+
+**A committed build artifact can be reproducible and still wrong — `web/dist`
+shipped React's development build for as long as it existed.** `vite build`
+takes its mode from `NODE_ENV` when that variable is set, and the shell that
+built this tree exported `NODE_ENV=development`. The daemon embeds `web/dist`
+(`web/embed.go`) and serves it to every browser, so the shipped page was the dev
+build: 452,554 bytes against 232,268 for the same source, prop validation on
+every element, an `Error` allocated per element for its stack trace, and
+seventeen copies of the build machine's absolute source paths stamped in by the
+dev JSX transform. The `web dist current` gate could not see it — it asks only
+whether a rebuild moves the bytes, and on the machine that made them it does
+not. It was *reproducible only there*: anyone with a different `NODE_ENV` would
+have had the gate call an untouched tree stale. `web/package.json` now pins
+`NODE_ENV=production` in the build script, and `web/embed_test.go` walks the
+embedded filesystem — what the daemon serves, not what sits on disk — failing on
+the dev JSX transform or any absolute source path. When a gate's question is
+"did a rebuild change anything", ask separately what the artifact *is*.
