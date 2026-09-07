@@ -19,7 +19,7 @@ import (
 // tries pivot_root before the mount tree is slave-propagating measures nothing --
 // the first failure would be the one that hides the second.
 func TestJailProbeStepsAreTheMeasuredGates(t *testing.T) {
-	want := []string{"mount_propagation_slave", "netns_create", "tap_create", "pivot_root"}
+	want := []string{"mount_propagation_slave", "netns_create", "netns_exec", "tap_create", "pivot_root"}
 	steps := jailProbeSteps("/nonexistent")
 	if len(steps) != len(want) {
 		t.Fatalf("steps = %d, want %d", len(steps), len(want))
@@ -33,6 +33,67 @@ func TestJailProbeStepsAreTheMeasuredGates(t *testing.T) {
 		}
 		if s.run == nil {
 			t.Errorf("step %q has no operation to run", s.name)
+		}
+	}
+}
+
+// TestJailProbeDependenciesPointBackwards: a dependsOn naming a step that runs
+// later, or a step that does not exist, silently disables the guard -- the
+// dependency has not failed yet when the dependent runs, so the dependent runs
+// anyway and reports a consequence as if it were a cause.
+func TestJailProbeDependenciesPointBackwards(t *testing.T) {
+	seen := make(map[string]bool)
+	for _, s := range jailProbeSteps("/nonexistent") {
+		if s.dependsOn != "" && !seen[s.dependsOn] {
+			t.Errorf("step %q depends on %q, which does not run before it", s.name, s.dependsOn)
+		}
+		seen[s.name] = true
+	}
+}
+
+// TestJailProbeChildSkipsStepsWhoseDependencyFailed: an unprivileged run fails
+// the first mount, and every later step then measures the missing capability
+// rather than the gate it names. pivot_root(2) would return EINVAL because its
+// parent mount is still shared, and `ip netns exec` would report only that the
+// namespace is missing. Both would be recorded as failures of themselves.
+func TestJailProbeChildSkipsStepsWhoseDependencyFailed(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; this test needs the steps to fail")
+	}
+	out, err := os.CreateTemp(t.TempDir(), "stdout")
+	if err != nil {
+		t.Fatalf("stdout file: %v", err)
+	}
+	errf, err := os.CreateTemp(t.TempDir(), "stderr")
+	if err != nil {
+		t.Fatalf("stderr file: %v", err)
+	}
+	if rc := RunJailProbeChild(t.TempDir(), out, errf); rc == 0 {
+		t.Fatal("probe child passed unprivileged, which means it measured nothing")
+	}
+
+	raw, err := os.ReadFile(errf.Name())
+	if err != nil {
+		t.Fatalf("read stderr: %v", err)
+	}
+	diag := string(raw)
+	for _, want := range []string{
+		"pivot_root (pivot_root(2)): inconclusive, mount_propagation_slave failed first",
+		"netns_exec (`ip netns exec`: sysfs remount of /sys inside the namespace): inconclusive, netns_create failed first",
+	} {
+		if !strings.Contains(diag, want) {
+			t.Errorf("diagnostics do not say %q; got:\n%s", want, diag)
+		}
+	}
+	// A skipped step is not a measured failure: reporting it on stdout would
+	// send the parent looking up a remedy for an errno nothing produced.
+	raw, err = os.ReadFile(out.Name())
+	if err != nil {
+		t.Fatalf("read stdout: %v", err)
+	}
+	for _, step := range []string{"step=pivot_root", "step=netns_exec"} {
+		if strings.Contains(string(raw), step) {
+			t.Errorf("%q was reported as a failure although it never ran; got:\n%s", step, raw)
 		}
 	}
 }

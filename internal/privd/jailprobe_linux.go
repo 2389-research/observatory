@@ -43,7 +43,11 @@ func JailProbeChildArgs(args []string) (dir string, ok bool) {
 type jailProbeStep struct {
 	name  string
 	needs string // the kernel facility, for the failure message
-	run   func() error
+	// dependsOn names a step whose failure makes this one's result meaningless.
+	// Such a step is reported inconclusive rather than run, because the error it
+	// would raise describes the missing prerequisite and not the gate under test.
+	dependsOn string
+	run       func() error
 }
 
 // jailProbeSteps builds the probe against a scratch directory the caller owns.
@@ -63,18 +67,32 @@ func jailProbeSteps(dir string) []jailProbeStep {
 			// `ip netns add` makes more than the one bind of /proc/self/ns/net
 			// that is obvious from outside -- it also prepares /run/netns as a
 			// mount point -- and a reimplementation would measure this author's
-			// model of the command instead of the command. The name carries the
-			// pid because the probe runs before privd takes its singleton lock,
-			// so two starting daemons must not collide, and a leftover name says
-			// which process left it.
+			// model of the command instead of the command. The namespace it
+			// leaves behind is what the next step enters; that step deletes it.
 			name:  "netns_create",
 			needs: "`ip netns add`: bind mount of /proc/self/ns/net under /run/netns",
 			run: func() error {
-				ns := fmt.Sprintf("vmobs-jailprobe-%d", os.Getpid())
-				if err := runIP("add", ns); err != nil {
-					return err
+				return runIP("add", probeNetnsName())
+			},
+		},
+		{
+			// The other half of the verb pair: privd runs every network setup
+			// command as `ip netns exec <ns> ...`, and entering a namespace
+			// that way replaces /sys with a sysfs instance that describes it.
+			// That remount is mediated, and it is not reachable from `ip netns
+			// add` -- which is why granting the add's three mounts still left
+			// every launch failing at network allocation.
+			name:      "netns_exec",
+			needs:     "`ip netns exec`: sysfs remount of /sys inside the namespace",
+			dependsOn: "netns_create",
+			run: func() error {
+				ns := probeNetnsName()
+				defer func() { _ = runIP("delete", ns) }()
+				out, err := exec.Command("ip", "netns", "exec", ns, "true").CombinedOutput() //nolint:gosec // fixed argv
+				if err != nil {
+					return fmt.Errorf("ip netns exec %s true: %w: %s", ns, err, bytes.TrimSpace(out))
 				}
-				return runIP("delete", ns)
+				return nil
 			},
 		},
 		{
@@ -103,8 +121,9 @@ func jailProbeSteps(dir string) []jailProbeStep {
 			// old root. Docker's default seccomp profile has pivot_root in no
 			// allow group, so this is the step that fails with everything else
 			// already open.
-			name:  "pivot_root",
-			needs: "pivot_root(2)",
+			name:      "pivot_root",
+			needs:     "pivot_root(2)",
+			dependsOn: "mount_propagation_slave",
 			run: func() error {
 				if err := unix.Mount(dir, dir, "", unix.MS_BIND|unix.MS_REC, ""); err != nil {
 					return err
@@ -119,6 +138,13 @@ func jailProbeSteps(dir string) []jailProbeStep {
 			},
 		},
 	}
+}
+
+// probeNetnsName is the namespace the two netns steps share. The pid is in it
+// because the probe runs before privd takes its singleton lock, so two starting
+// daemons must not collide on the name, and a leftover says which left it.
+func probeNetnsName() string {
+	return fmt.Sprintf("vmobs-jailprobe-%d", os.Getpid())
 }
 
 // runIP runs one `ip netns` verb and folds its own diagnostics into the error.
@@ -186,24 +212,22 @@ func jailProbeRemedy(step string, err error) string {
 // the errno it never sees. Returns the process exit code.
 func RunJailProbeChild(dir string, stdout, stderr *os.File) int {
 	rc := 0
-	propagationOK := true
+	failed := make(map[string]bool)
 	for _, step := range jailProbeSteps(dir) {
-		// pivot_root(2) needs its new root's parent mount not to be shared,
-		// which is exactly what mount_propagation_slave establishes. Run after
-		// that step failed it returns an EINVAL that says nothing about
-		// pivot_root, so it is reported inconclusive rather than guessed at.
-		if step.name == "pivot_root" && !propagationOK {
-			fmt.Fprintf(stderr, "vmobs-privd: jail probe: %s (%s): inconclusive, mount_propagation_slave failed first\n",
-				step.name, step.needs)
+		// pivot_root(2) after a failed mount_propagation_slave raises an EINVAL
+		// that says nothing about pivot_root; `ip netns exec` on a namespace that
+		// was never created reports only that it is missing. Neither answers the
+		// question the step was asked, so neither is run.
+		if step.dependsOn != "" && failed[step.dependsOn] {
+			fmt.Fprintf(stderr, "vmobs-privd: jail probe: %s (%s): inconclusive, %s failed first\n",
+				step.name, step.needs, step.dependsOn)
 			continue
 		}
 		err := step.run()
 		if err == nil {
 			continue
 		}
-		if step.name == "mount_propagation_slave" {
-			propagationOK = false
-		}
+		failed[step.name] = true
 		var errno syscall.Errno
 		if !errors.As(err, &errno) {
 			errno = 0
