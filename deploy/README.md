@@ -6,27 +6,52 @@ container has to be given the same three things a bare-metal install has. This
 directory holds the narrow profiles that grant exactly those and nothing more,
 plus the image that carries the pinned binaries.
 
-Everything here runs from a checkout. From nothing to a running appliance:
+From nothing to a running appliance, two commands:
 
     sudo sh deploy/install-apparmor.sh   # once per host, the only root step
-    scripts/vmobs-container up
+    docker compose up -d
 
-`up` downloads the guest images, checks the host, builds the appliance image and
-starts the container. Run it without the profile installed and it stops at the
-prerequisite check and prints that first line — it will not sudo on your behalf.
+`compose.yaml` at the repository root carries the whole boundary: both
+capabilities, both devices, both security profiles, the tmpfs and the two
+volumes. Docker takes an AppArmor profile by *name* and asks the kernel for one
+already loaded, so no compose file can load it — that is the first line, and the
+reason it needs root.
 
-Afterwards:
+`scripts/vmobs-container up` does the same thing with checks in front of it. It
+downloads the guest images, tests `/dev/kvm` and `/dev/net/tun`, notices a
+profile that is stale rather than missing, and names the one thing to change
+instead of letting Docker's error stand. Prefer it when something is wrong;
+prefer compose when nothing is.
+
+Afterwards, either way:
 
     scripts/vmobs-container status
     scripts/vmobs-container logs -f
     scripts/vmobs-container stop
 
-`build` and `start` are still there as separate verbs; `up` is the two of them
-with the prerequisite checks moved to the front, where a missing one costs you
-seconds instead of a finished image.
+`compose.yaml` and the script start the same container under the same name and
+the same volumes, and `tests/deploy/compose_test.go` fails if the two ever grant
+different things. `build` and `start` are still there as separate verbs; `up` is
+the two of them with the prerequisite checks moved to the front, where a missing
+one costs you seconds instead of a finished image.
 
-There is no installer. Nothing in `up` writes to the host outside Docker's own
-storage.
+There is no installer. Nothing here writes to the host outside Docker's own
+storage and the one profile in `/etc/apparmor.d/`.
+
+### Starting without the profile
+
+`VMOBS_APPARMOR_PROFILE=unconfined` starts on a host that has not loaded it —
+`docker compose up -d` reads the variable, and so does the script, which says so
+out loud on every start.
+
+It is worth being plain about what that costs. This container holds
+`CAP_SYS_ADMIN` and a seccomp profile that deliberately permits `mount`,
+`pivot_root`, `setns` and `unshare`, because the jailer needs all four. AppArmor
+is the only remaining layer that bounds *where* those mounts can land.
+`docs/design/container-boundary.md` §9 asked whether a container with
+`CAP_SYS_ADMIN` and no mount confinement is a boundary worth having, and the
+answer that got built was the narrow profiles. Use `unconfined` to get a look at
+the thing; do not run anything you care about behind it.
 
 ## Host prerequisites
 

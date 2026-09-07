@@ -1,0 +1,193 @@
+// ABOUTME: Checks compose.yaml runs the container under the same boundary
+// ABOUTME: scripts/vmobs-container does: same caps, devices, profiles, mounts.
+package deploy_test
+
+import (
+	"os"
+	"regexp"
+	"slices"
+	"strings"
+	"testing"
+
+	"gopkg.in/yaml.v3"
+)
+
+const (
+	composePath   = "../../compose.yaml"
+	containerPath = "../../scripts/vmobs-container"
+)
+
+// composeService is the subset of the compose schema these checks read.
+type composeService struct {
+	Image       string   `yaml:"image"`
+	Init        *bool    `yaml:"init"`
+	NetworkMode string   `yaml:"network_mode"`
+	CapAdd      []string `yaml:"cap_add"`
+	Devices     []string `yaml:"devices"`
+	SecurityOpt []string `yaml:"security_opt"`
+	Tmpfs       []string `yaml:"tmpfs"`
+	Volumes     []string `yaml:"volumes"`
+	Restart     string   `yaml:"restart"`
+}
+
+// loadService returns the one service compose.yaml declares. More than one, and
+// the checks below would be asserting against whichever the map iterated first.
+func loadService(t *testing.T) composeService {
+	t.Helper()
+	raw, err := os.ReadFile(composePath)
+	if err != nil {
+		t.Fatalf("read %s: %v", composePath, err)
+	}
+	var c struct {
+		Services map[string]composeService `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(raw, &c); err != nil {
+		t.Fatalf("parse %s: %v", composePath, err)
+	}
+	if len(c.Services) != 1 {
+		t.Fatalf("compose.yaml declares %d services, want exactly 1", len(c.Services))
+	}
+	for _, svc := range c.Services {
+		return svc
+	}
+	panic("unreachable: the length was just checked")
+}
+
+// dockerRunFlags pulls the values of one repeated flag out of the `docker run`
+// invocation in scripts/vmobs-container. It fails rather than returning an empty
+// set: a regex that stops matching would otherwise turn every drift check below
+// into a comparison of nothing against nothing.
+func dockerRunFlags(t *testing.T, flag string) []string {
+	t.Helper()
+	raw, err := os.ReadFile(containerPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", containerPath, err)
+	}
+	start := strings.Index(string(raw), "docker run --detach")
+	if start < 0 {
+		t.Fatalf("%s no longer contains `docker run --detach`; this test cannot see what it passes", containerPath)
+	}
+	end := strings.Index(string(raw)[start:], `"$tag" 2>&1`)
+	if end < 0 {
+		t.Fatalf("%s: cannot find the end of the docker run block", containerPath)
+	}
+	block := string(raw)[start : start+end]
+
+	re := regexp.MustCompile(regexp.QuoteMeta(flag) + ` +"?([^"\\\n]+)"?`)
+	var found []string
+	for _, m := range re.FindAllStringSubmatch(block, -1) {
+		found = append(found, strings.TrimSpace(m[1]))
+	}
+	if len(found) == 0 {
+		t.Fatalf("%s: found no %s in the docker run block", containerPath, flag)
+	}
+	return found
+}
+
+// TestComposeGrantsTheSameCapabilities: the two ways to start this container have
+// to agree, or `docker compose up` runs under a boundary nobody measured.
+func TestComposeGrantsTheSameCapabilities(t *testing.T) {
+	want := dockerRunFlags(t, "--cap-add")
+	got := loadService(t).CapAdd
+	slices.Sort(want)
+	slices.Sort(got)
+	if !slices.Equal(want, got) {
+		t.Errorf("cap_add = %v, scripts/vmobs-container passes %v", got, want)
+	}
+}
+
+// TestComposePassesTheSameDevices: /dev/kvm and /dev/net/tun. Compose writes a
+// device as source:target, so a bare path means both.
+func TestComposePassesTheSameDevices(t *testing.T) {
+	want := dockerRunFlags(t, "--device")
+	var got []string
+	for _, d := range loadService(t).Devices {
+		got = append(got, strings.SplitN(d, ":", 2)[0])
+	}
+	slices.Sort(want)
+	slices.Sort(got)
+	if !slices.Equal(want, got) {
+		t.Errorf("devices = %v, scripts/vmobs-container passes %v", got, want)
+	}
+}
+
+// TestComposeDefaultsToTheConfinedProfile: the boundary docs/design/container-
+// boundary.md §9 decided to build. `unconfined` is reachable by setting
+// VMOBS_APPARMOR_PROFILE, and a default that skipped the profile would hand every
+// third party a container with CAP_SYS_ADMIN and no mount confinement.
+func TestComposeDefaultsToTheConfinedProfile(t *testing.T) {
+	opts := loadService(t).SecurityOpt
+
+	const wantAppArmor = "apparmor=${VMOBS_APPARMOR_PROFILE:-vmobs-jailer}"
+	if !slices.Contains(opts, wantAppArmor) {
+		t.Errorf("security_opt = %v, want it to contain %q", opts, wantAppArmor)
+	}
+	for _, opt := range opts {
+		if opt == "apparmor=unconfined" {
+			t.Errorf("compose.yaml ships %q; the shipped default is the confined profile", opt)
+		}
+	}
+}
+
+// TestComposeUsesTheSameSeccompProfile: a path, not a name -- compose resolves it
+// against the project directory and the daemon applies the file. Measured with
+// docker 29.6.1: a profile denying chmod produced EPERM inside the container.
+func TestComposeUsesTheSameSeccompProfile(t *testing.T) {
+	var got string
+	for _, opt := range loadService(t).SecurityOpt {
+		if after, ok := strings.CutPrefix(opt, "seccomp="); ok {
+			got = after
+		}
+	}
+	if got == "" {
+		t.Fatalf("compose.yaml passes no seccomp profile")
+	}
+	if _, err := os.Stat("../../" + strings.TrimPrefix(got, "./")); err != nil {
+		t.Errorf("seccomp=%s does not resolve to a file in the repo: %v", got, err)
+	}
+	const want = "./deploy/seccomp/vmobs-jailer.json"
+	if got != want {
+		t.Errorf("seccomp = %q, want %q -- the same file scripts/vmobs-container passes", got, want)
+	}
+}
+
+// TestComposeMountsTheSameState: both volumes, and /run as a tmpfs. privd binds
+// its socket under /run/vmobs, and the image creates that directory in a layer --
+// without the tmpfs the socket would persist into the image's own filesystem.
+func TestComposeMountsTheSameState(t *testing.T) {
+	svc := loadService(t)
+
+	var targets []string
+	for _, v := range svc.Volumes {
+		parts := strings.Split(v, ":")
+		if len(parts) < 2 {
+			t.Errorf("volume %q has no target", v)
+			continue
+		}
+		targets = append(targets, parts[1])
+	}
+	slices.Sort(targets)
+	if want := []string{"/srv/vmobs", "/var/lib/vmobs"}; !slices.Equal(targets, want) {
+		t.Errorf("volume targets = %v, want %v", targets, want)
+	}
+
+	if len(svc.Tmpfs) != 1 || !strings.HasPrefix(svc.Tmpfs[0], "/run:") {
+		t.Errorf("tmpfs = %v, want a single /run entry", svc.Tmpfs)
+	}
+}
+
+// TestComposeReapsAndSharesTheHostNetwork: --init because every VMM reparents to
+// PID 1 and a zombie answers kill(pid, 0), which the runtime reads as alive;
+// host networking because the API binds loopback.
+func TestComposeReapsAndSharesTheHostNetwork(t *testing.T) {
+	svc := loadService(t)
+	if svc.Init == nil || !*svc.Init {
+		t.Errorf("init = %v, want true -- without a reaper every exited VMM stays a zombie and reads as alive", svc.Init)
+	}
+	if svc.NetworkMode != "host" {
+		t.Errorf("network_mode = %q, want \"host\" -- the API binds loopback", svc.NetworkMode)
+	}
+	if svc.Restart != "no" {
+		t.Errorf("restart = %q, want \"no\"", svc.Restart)
+	}
+}

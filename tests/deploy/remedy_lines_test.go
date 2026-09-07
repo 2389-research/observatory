@@ -11,9 +11,11 @@ import (
 
 // shippedFiles are the files a stranger reads or runs during an install. Test
 // files and the plan archive are excluded: they record history, not remedies.
+// compose.yaml is named on its own because it is the one such file at the
+// repository root, and it is the first one a stranger opens.
 func shippedFiles(t *testing.T) []string {
 	t.Helper()
-	var out []string
+	out := []string{"../../compose.yaml"}
 	for _, root := range []string{"../../deploy", "../../scripts", "../../images"} {
 		err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
