@@ -835,3 +835,12 @@ sample each configured filesystem and credit guest allocation only on its own
 device; state free space cannot authorize writes elsewhere. Ambiguous startup
 findings must not enter the proven-exit callback. After an attempted launch,
 a guest-owned dead PID file cannot prove the actual VMM absent.
+
+## Production wiring and detached disk work
+
+A package test can wire a dependency that the real daemon omits. Report generation
+stayed pending until `serve` used `NewManagerWithReportGen`; the real startup test
+now proves recovery of a stored terminal run into a digest report. Also, a timed-out
+privd caller may leave host file work running beyond the adapter lock. Disk credit
+requires settled privileged inventory as well as that lock; query failure means
+zero materialization credit, never guessed cleanup.
