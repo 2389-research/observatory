@@ -212,6 +212,8 @@ type daemonOptions struct {
 	// privdSocket allows a real transport fault proxy in acceptance tests.
 	privdSocket        string
 	parallelProvisions int
+	// telemetryAttention enables real importer incidents for telemetry gates.
+	telemetryAttention bool
 }
 
 // daemonOption tunes daemonOptions.
@@ -304,7 +306,6 @@ func startDaemon(t *testing.T, repoRoot, daemonBin, runnerBin, label string, opt
 	templatesDir := filepath.Join(stateDir, "templates")
 	for _, d := range []string{
 		stateDir,
-		filepath.Join(stateDir, "spool"),
 		templatesDir,
 	} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
@@ -464,6 +465,8 @@ capture:
   redact_before_persistence: false
   allow_unredacted_proxy_flow_dump: false
 agent_interface:
+  attention_triggers:
+    telemetry_degraded: %t
   situation_max_response_bytes: 0
   attention_queue_max_items: 0
   attention_collapse_duplicates: false
@@ -499,6 +502,7 @@ performance_targets:
 		o.parallelProvisions,
 		gateRootDiskMiB,
 		gateWorkspaceDiskMiB,
+		o.telemetryAttention,
 		dbPath,
 	)
 
