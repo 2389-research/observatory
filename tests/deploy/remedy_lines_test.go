@@ -37,22 +37,10 @@ func shippedFiles(t *testing.T) []string {
 	return out
 }
 
-// TestNoFileTellsAnOperatorToRunApparmorParser: `apparmor_parser -r` loads a
-// profile into the running kernel and writes nothing to disk, so a host that
-// followed such a line comes up after its next reboot with no profile and
-// `docker run --security-opt apparmor=vmobs-jailer` failing outright. Every
-// remedy has to name deploy/install-apparmor.sh, which installs and then loads.
-//
-// Two shipped files carried the old line for a while after the script existed --
-// scripts/vmobs-container's docker-refused-the-profile branch and the profile's
-// own header comment. Both looked right to a reader who already knew the
-// difference, which is exactly why a test says it instead of a reviewer.
+// The Compose service owns policy loading. Operator remedies must use it so
+// they work with the same image and security boundary as normal startup.
 func TestNoFileTellsAnOperatorToRunApparmorParser(t *testing.T) {
 	for _, path := range shippedFiles(t) {
-		// The one file that legitimately runs it: installing is what it does.
-		if filepath.Base(path) == "install-apparmor.sh" {
-			continue
-		}
 		raw, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
@@ -69,9 +57,17 @@ func TestNoFileTellsAnOperatorToRunApparmorParser(t *testing.T) {
 			cmd = strings.TrimPrefix(cmd, "sudo ")
 			if strings.HasPrefix(cmd, "apparmor_parser") {
 				t.Errorf("%s:%d hands the operator a bare apparmor_parser line:\n    %s\n"+
-					"  It loads without installing; the remedy is `sudo sh deploy/install-apparmor.sh`.",
+					"  Use the Compose apparmor service instead of a host command.",
 					path, i+1, strings.TrimSpace(line))
 			}
+		}
+	}
+}
+
+func TestShippedFilesDoNotRequireHostPolicyInstallation(t *testing.T) {
+	for _, path := range shippedFiles(t) {
+		if strings.Contains(readFile(t, path), "install-apparmor.sh") {
+			t.Errorf("%s still references the removed host policy installer", path)
 		}
 	}
 }

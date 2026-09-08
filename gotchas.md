@@ -32,7 +32,7 @@ Distilled working knowledge for agents and collaborators in this repo. Append en
 - **`require_authentication: false` is loopback-only dev mode.** Config validation rejects it with any non-loopback `server.mode`. The smoke runs with `require_authentication: true`; the example config's `false` is the dev default, not a production option.
 - **`scripts/linux` rsyncs via SSH then runs a command remotely.** Usage: `scripts/linux '<shell command>'`. It excludes `.git` and `.superpowers` from the transfer. The `--filter='P images/dist/'` rule protects build artifacts in gitignored dirs from `--delete` — macOS openrsync ignores `:- .gitignore` for deletion protection. Setting `VMOBS_LINUX_HOST` or `VMOBS_LINUX_DIR` overrides the defaults.
 - **Anything a remote run writes inside the tree dies at the next `scripts/linux` call.** The rsync is one-way with `--delete`, and it runs *before* every command, so the local copy wins. A gate that writes `tests/integration/evidence/m1a-gate-aibox03.txt` remotely has it silently replaced by the stale local file the next time you ssh in to read it — and the md5s then match, which reads like the run wrote nothing. Copy artifacts to `/tmp` in the same `scripts/linux` invocation that produces them, then fetch from there.
-- **Sudo on aibox03 requires a password.** Agents never sudo. The one root step on the host is loading the AppArmor profile (`sudo sh deploy/install-apparmor.sh`), which Doctor Biz runs by hand. Everything else runs in a container. The M0 fixture's NOPASSWD grant for `/usr/local/sbin/vmobs-root-helper` exists only inside the gate container, which writes it for itself and throws it away.
+- **No host installer or manual profile step.** Doctor Biz requires `docker compose up -d` to handle all Observatory setup and approved the short-lived policy loader. It loads AppArmor through the shared kernel from inside Docker; nothing installs under the host's `/etc`. The M0 fixture's NOPASSWD grant exists only inside the gate container.
 - **`mkfs.ext4 -d <dir>` builds ext4 filesystems rootless.** No mounts, no root required. Used for both rootfs and config disk assembly in the image pipeline and the fixture. The `-d` flag populates the filesystem from a directory tree at creation time.
 - **Fixture gate: `//go:build linux` + `VMOBS_FIXTURE=1` env var.** `tests/integration/boot_test.go` and `tests/integration/fixture/fixture.go` are linux-only; the integration test additionally requires `VMOBS_FIXTURE=1` to run. `scripts/vmobs-gate` sets it inside the gate container; unset → skip with a printed reason naming that script. Never claim the gate passed without running it.
 - **`ip -json route` shows the main table only — VPN routes are invisible.** On aibox03, tailscale routes live in routing table 52 (policy routing). Use `ip -json route show table all` to see all routes. ParseIPRoutes filters out non-transit entries (type=local/broadcast/multicast) by the "type" field. The blessed invocation is the table-all form everywhere §10.1 collision detection is needed.
@@ -564,23 +564,12 @@ did not exist, so the next reboot would have dropped it and
 the appliance at all. Worse in the middle: docker accepts a loaded profile *by
 name*, so a stale one starts the container clean and fails minutes later as a
 denied mount inside a launch — which is how four of the five denials on this
-branch were found, each costing an image rebuild and a full launch. Both halves
-are handled now. `deploy/install-apparmor.sh` installs to `/etc/apparmor.d/`
-**then** loads (loading first parses whatever copy was already there and reports
-success for the profile you were replacing), and `scripts/vmobs-container start`
-refuses when the installed file is missing or differs from the repo copy. It
-compares those two *files* because the kernel's own list,
-`/sys/kernel/security/apparmor/profiles`, is `0444` root-only — an operator
-cannot read what is actually loaded.
-`/sys/module/apparmor/parameters/enabled` is world-readable and is how the
-script tells "no AppArmor on this host" from "profile not installed".
-The distinction outlived the fix in two shipped files: `scripts/vmobs-container`'s
-docker-refused-the-profile branch and the profile's own header comment both still
-handed over `apparmor_parser -r` weeks after `install-apparmor.sh` existed, and
-each read correctly to anyone who already knew the difference.
-`tests/deploy/remedy_lines_test.go` now fails on any shipped file under
-`deploy/`, `scripts/` or `images/` whose runnable text starts with
-`apparmor_parser`, comment markers and prose lead-ins stripped.
+branch were found, each costing an image rebuild and a full launch. The current
+solution reloads the image's bundled profile through the Compose setup service
+on each `up`, including after profile loss. A host file comparison cannot prove
+what policy the kernel holds. The old host installer has been deleted;
+`tests/deploy/remedy_lines_test.go` rejects instructions to run it or invoke a
+host parser manually. Use Compose after reboot, not `docker start` alone.
 
 **A startup probe is worth exactly the production verbs it runs.** privd's jail
 probe checked mount propagation, netns creation, tap creation and `pivot_root`.
@@ -633,16 +622,16 @@ the likeliest thing to be wrong; `gh` is now checked immediately before the
 upload uses it. Run a new suite on both platforms before believing it: a test
 whose fixture is "an empty `PATH`" cannot tell you which check fired.
 
-**No compose file can load an AppArmor profile, so the one root step survives
-every attempt to package this as `docker compose up`.** Docker takes a profile
-by *name* and asks the kernel for one already loaded; there is no Docker API
-that loads a profile, so `security_opt: apparmor=vmobs-jailer` names something
-that must exist before compose runs. Seccomp is the opposite — measured with
+**Compose can load AppArmor through a setup container.** Docker takes a profile
+by *name*, but that does not require a separate host command. The `apparmor`
+service invokes the bundled parser with `MAC_ADMIN` and a writable securityfs
+bind; the appliance waits for successful completion. Measured on Docker 27.2.1
+and Compose 2.29.2: read-only rootfs, no network, all other capabilities dropped;
+removing `MAC_ADMIN` makes loading fail. The loader can change host policy, so
+this authority belongs only to that short-lived service. Seccomp is a path — measured with
 docker 29.6.1, a relative `seccomp=./deploy/seccomp/vmobs-jailer.json` resolves
 against the compose project directory and the daemon really applies it (a test
-profile denying `chmod` produced EPERM inside the container). That asymmetry is
-the whole shape of the install: two commands, and the first one is
-`sudo sh deploy/install-apparmor.sh`.
+profile denying `chmod` produced EPERM inside the container).
 
 **A compose volume needs an explicit `name:` when anything else mounts the same
 volume.** Compose prefixes the project name onto every volume it declares, and

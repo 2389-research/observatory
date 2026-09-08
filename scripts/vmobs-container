@@ -3,9 +3,8 @@
 # ABOUTME: Usage: scripts/vmobs-container up|build|start|stop|status|logs|init-auth
 #
 # The security profiles this passes to docker are the narrow ones in deploy/,
-# measured in docs/design/container-boundary.md. Nothing here runs as root on the
-# host; loading the AppArmor profile is the one root step and it is a documented
-# prerequisite, not something this script does behind your back.
+# measured in docs/design/container-boundary.md. The Compose setup service loads
+# the image's AppArmor policy into the kernel without installing host files.
 set -eu
 
 cd "$(dirname "$0")/.."
@@ -43,6 +42,7 @@ cmd_start() {
         die "container $NAME already exists — run: scripts/vmobs-container stop"
     fi
 
+    load_apparmor "$tag"
     note "starting $NAME from $tag"
     if [ "$APPARMOR_PROFILE" = unconfined ]; then
         note "WARNING: apparmor=unconfined — the jailer's mounts are not confined"
@@ -77,28 +77,15 @@ cmd_start() {
         "$tag" 2>&1 >/dev/null)"
     then
         docker rm -f "$NAME" >/dev/null 2>&1 || true
-        case "$err" in
-            *apparmor*|*AppArmor*)
-                die "docker refused the AppArmor profile:
-  $err
-  Install and load it once, as root:
-    sudo sh deploy/install-apparmor.sh" ;;
-            *)
-                die "docker run failed:
-  $err" ;;
-        esac
+        die "docker run failed:
+  $err"
     fi
     note "started; the API is at http://$LISTEN"
     note "follow it with: scripts/vmobs-container logs"
 }
 
-# cmd_up is the whole install: artifacts, prerequisites, image, container. It
-# does the steps in that order for one reason -- the AppArmor profile is the only
-# root step, and an operator who has to run it should learn that in the first few
-# seconds rather than after a ten-minute docker build.
-#
-# It installs nothing on the host and asks for no privilege. The root line it
-# stops on is a line for a human to read and run.
+# cmd_up fetches guest artifacts, checks host facilities, builds the image and
+# starts the container. cmd_start loads the image's policy through Compose.
 cmd_up() {
     need_docker
     if docker container inspect "$NAME" >/dev/null 2>&1; then

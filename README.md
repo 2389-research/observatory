@@ -13,24 +13,25 @@ and a remedy. Evidence is labelled by where it came from — `host_observed`,
 ## Install
 
 You need a Linux host with x86_64 hardware virtualisation (`/dev/kvm`) and
-Docker. Each VM takes a 4 GiB root disk and a 1 GiB workspace by default, so
-size the disk for how many you intend to run. Then:
+Docker with Compose and AppArmor enabled. Each VM takes a 4 GiB root disk and
+a 1 GiB workspace by default, so size the disk for how many you intend to run.
+Then:
 
-    sudo sh deploy/install-apparmor.sh   # once per host, the only root step
     docker compose up -d
 
-The second command pulls `ghcr.io/2389-research/observatory:latest`, which bakes
-in the guest kernel and root image — 384 MB over the wire, 1.8 GB on disk. The
-API comes up on `127.0.0.1:8787`; the UI is at `/ui/`.
+The command pulls `ghcr.io/2389-research/observatory:latest`, which includes
+the guest kernel, root image, AppArmor parser and profile. The API comes up on
+`127.0.0.1:8787`; the UI is at `/ui/`.
 
-Two commands, and the first one is root because Docker takes an AppArmor profile
-by *name* and asks the kernel for one already loaded — there is no Docker API
-that loads a profile, so no compose file can. `deploy/README.md` explains what
-the profile grants, and what running without it costs.
+A short-lived Compose service loads the profile into the shared host kernel
+before the appliance starts. It installs no host packages or configuration files.
+After a host reboot, run `docker compose up -d` again to reload the policy and
+start the appliance. `deploy/README.md` explains the loader's authority and the
+appliance's confinement.
 
 `scripts/vmobs-container up` does the same thing with preflight checks in front
-of it: it tests the devices, notices a stale profile rather than a missing one,
-and names the single thing to change. Prefer it when something is wrong.
+of it: it tests the devices, builds from the checkout, and uses the same Compose
+loader before starting the appliance. Prefer it for local builds.
 
 ## What is built
 
@@ -56,7 +57,7 @@ that are actually wired. Nothing pretends.
 | `docs/ACCEPTANCE.md` | Stable test IDs and their status. |
 | `docs/runbooks/` | Host bring-up and operation. |
 | `docs/design/` | Decisions with their measurements attached. |
-| `deploy/` | Container image, seccomp and AppArmor profiles, install script. |
+| `deploy/` | Container image, seccomp and AppArmor profiles, operator guide. |
 | `internal/` | The daemon: store, API, runtime, jailer, privd, guest, spool. |
 | `cmd/` | `vmobsd` (daemon), `vmobs` (CLI), `vmobs-privd`, `vmobs-runner`, `vmobs-guestd`. |
 | `web/` | The UI. Its build output is committed and embedded in the binary. |

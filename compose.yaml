@@ -1,21 +1,35 @@
-# ABOUTME: Runs the vmobs appliance under the measured container boundary.
-# ABOUTME: Two commands to install: deploy/install-apparmor.sh, then compose up.
+# ABOUTME: Loads the bundled AppArmor policy and runs the confined vmobs appliance.
+# ABOUTME: Start with docker compose up -d; no host configuration is installed.
 #
-#   sudo sh deploy/install-apparmor.sh    # once per host, loads the AppArmor profile
-#   docker compose up -d
-#
-# The AppArmor profile is the only step that needs root, and it needs root
-# because Docker takes a profile by *name* and asks the kernel for one already
-# loaded -- there is no Docker API that loads a profile, so there is no compose
-# directive for it either. Everything else here is a flag.
-#
-# This service is scripts/vmobs-container's `docker run` expressed in compose;
-# tests/deploy/compose_test.go fails if the two drift. Use the script when you
-# want the checks it runs first (/dev/kvm, /dev/net/tun, a stale profile) and
-# errors that name the one thing to change.
+# The loader changes kernel policy through securityfs before the appliance starts.
+# Its policy-management capability belongs only to this short-lived service.
 
 services:
+  apparmor:
+    image: ${VMOBS_IMAGE:-ghcr.io/2389-research/observatory:latest}
+    entrypoint: ["/usr/sbin/apparmor_parser"]
+    command: ["--replace", "--skip-cache", "/etc/apparmor.d/vmobs-jailer"]
+    cap_drop:
+      - ALL
+    cap_add:
+      - MAC_ADMIN
+    security_opt:
+      - apparmor=unconfined
+    read_only: true
+    network_mode: none
+    volumes:
+      - type: bind
+        source: /sys/kernel/security
+        target: /sys/kernel/security
+        read_only: false
+        bind:
+          create_host_path: false
+    restart: "no"
+
   vmobs:
+    depends_on:
+      apparmor:
+        condition: service_completed_successfully
     container_name: ${VMOBS_CONTAINER_NAME:-vmobs}
     image: ${VMOBS_IMAGE:-ghcr.io/2389-research/observatory:latest}
 
@@ -49,17 +63,10 @@ services:
       - /dev/kvm
       - /dev/net/tun
 
-    # The other half of §5. AppArmor is a name the kernel must already hold;
-    # seccomp is a path compose resolves against this directory and the daemon
-    # applies. Both are needed and they cover different calls: seccomp for
-    # pivot_root, AppArmor for mount.
-    #
-    # VMOBS_APPARMOR_PROFILE=unconfined starts on a host that has not loaded the
-    # profile. It is not a smaller boundary, it is close to none: this container
-    # holds CAP_SYS_ADMIN and a seccomp profile that permits mount, pivot_root,
-    # setns and unshare, and AppArmor is the only layer bounding where those
-    # mounts can land. §9 asked whether that container is a boundary worth having
-    # and answered no. Use it to get a look at the thing, not to run it.
+    # AppArmor names the policy loaded above; seccomp resolves against this
+    # project directory. Both are required: AppArmor bounds mount targets and
+    # seccomp bounds syscalls, including pivot_root.
+    # VMOBS_APPARMOR_PROFILE=unconfined explicitly drops mount confinement.
     security_opt:
       - apparmor=${VMOBS_APPARMOR_PROFILE:-vmobs-jailer}
       - seccomp=./deploy/seccomp/vmobs-jailer.json

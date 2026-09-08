@@ -6,22 +6,19 @@ container has to be given the same three things a bare-metal install has. This
 directory holds the narrow profiles that grant exactly those and nothing more,
 plus the image that carries the pinned binaries.
 
-From nothing to a running appliance, two commands:
+On a host with the prerequisites below:
 
-    sudo sh deploy/install-apparmor.sh   # once per host, the only root step
     docker compose up -d
 
-`compose.yaml` at the repository root carries the whole boundary: both
-capabilities, both devices, both security profiles, the tmpfs and the two
-volumes. Docker takes an AppArmor profile by *name* and asks the kernel for one
-already loaded, so no compose file can load it — that is the first line, and the
-reason it needs root.
+`compose.yaml` at the repository root carries the runtime boundary and a
+short-lived `apparmor` service. That service loads the bundled profile into the
+shared host kernel; the appliance depends on its successful completion. Docker
+then applies that profile by name to the appliance.
 
 `scripts/vmobs-container up` does the same thing with checks in front of it. It
-downloads the guest images, tests `/dev/kvm` and `/dev/net/tun`, notices a
-profile that is stale rather than missing, and names the one thing to change
-instead of letting Docker's error stand. Prefer it when something is wrong;
-prefer compose when nothing is.
+downloads the guest images, tests `/dev/kvm` and `/dev/net/tun`, builds from the
+checkout, and uses the same Compose loader. Prefer it for local builds; Compose
+uses the published appliance image.
 
 Afterwards, either way:
 
@@ -35,14 +32,15 @@ different things. `build` and `start` are still there as separate verbs; `up` is
 the two of them with the prerequisite checks moved to the front, where a missing
 one costs you seconds instead of a finished image.
 
-There is no installer. Nothing here writes to the host outside Docker's own
-storage and the one profile in `/etc/apparmor.d/`.
+No host packages, systemd units, sudoers entries or `/etc/apparmor.d` files are
+installed. The loader does change shared-kernel AppArmor policy, and the runtime
+creates host network interfaces as described below.
 
 ### Starting without the profile
 
-`VMOBS_APPARMOR_PROFILE=unconfined` starts on a host that has not loaded it —
-`docker compose up -d` reads the variable, and so does the script, which says so
-out loud on every start.
+`VMOBS_APPARMOR_PROFILE=unconfined` is an explicit development-only override.
+The wrappers skip policy loading for this override. The supported default
+loads `vmobs-jailer`; the loader does not manage arbitrary profile names.
 
 It is worth being plain about what that costs. This container holds
 `CAP_SYS_ADMIN` and a seccomp profile that deliberately permits `mount`,
@@ -59,13 +57,14 @@ the thing; do not run anything you care about behind it.
 | --- | --- | --- |
 | Linux with KVM | Firecracker is a KVM VMM | `test -c /dev/kvm` |
 | `/dev/net/tun` | one tap device per VM | `test -c /dev/net/tun`, else `modprobe tun` |
-| Docker with AppArmor enabled | the profile below has to load | `docker info \| grep apparmor` |
+| Docker with Compose and AppArmor enabled | Compose loads the profile before starting the appliance | `docker compose version` and `docker info \| grep apparmor` |
 | x86-64 | the lock pins `firecracker-<ver>-x86_64` | `uname -m` |
 | The guest kernel and root image | baked into the image | `ls images/dist/` |
 
-`scripts/vmobs-container up` checks the first two and the AppArmor profile, and
-refuses with the fix named. It does not check the rest, because Docker's own
-error is clearer.
+`scripts/vmobs-container up` checks the devices before building. Policy loading
+must then succeed before the confined appliance starts. For a failed Compose
+startup, inspect `docker compose logs apparmor`; wrappers print loader failures
+in their command output.
 
 ### The guest images
 
@@ -102,26 +101,26 @@ The appliance build copies both into the image and verifies all four pinned
 digests (firecracker, jailer, kernel, root image) in the final stage, so a build
 that succeeds cannot be shipping bytes nobody pinned.
 
-### The AppArmor profile — the one root command
+### The AppArmor loader
 
-    sudo sh deploy/install-apparmor.sh
+The approved design uses the same appliance image for `apparmor` and `vmobs`.
+The image contains the parser and the profile from `deploy/apparmor/vmobs-jailer`.
+The setup service invokes `apparmor_parser --replace --skip-cache` directly on that
+bundled profile. It replaces policy in the running kernel without writing host
+configuration or parser cache files.
 
-Once per host, and again whenever `deploy/apparmor/vmobs-jailer` changes.
+The setup service drops all capabilities and adds only `MAC_ADMIN`. It runs
+with `apparmor=unconfined`, no network, a read-only image filesystem, and a
+read-write bind of `/sys/kernel/security`. It has no Docker socket or host root
+mount. That authority belongs only to the short-lived loader: the appliance
+keeps its narrow AppArmor and seccomp profiles and existing capabilities.
 
-It installs the profile to `/etc/apparmor.d/vmobs-jailer` and then loads it.
-Both halves matter: `apparmor_parser` alone loads a profile into the running
-kernel and leaves nothing on disk, so after a reboot the host has no
-`vmobs-jailer` and `docker run --security-opt apparmor=vmobs-jailer` fails
-outright. Installing it under `/etc/apparmor.d` is what makes the host load it
-at boot.
-
-`up` and `start` refuse before running anything if the profile is missing from
-`/etc/apparmor.d` or differs from the copy in this repo, and names this script.
-It compares those two files because what the kernel actually holds is not
-readable without root: `/sys/kernel/security/apparmor/profiles` is `0444`
-root-only. A stale profile is the failure worth catching — docker accepts any
-loaded profile by name, so the container starts cleanly and the difference
-surfaces minutes later as a denied mount in the middle of a launch.
+Use `docker compose up -d` for startup, including after a host reboot. The
+design reloads the bundled policy before the appliance starts, even when the
+kernel has lost the profile. `docker start` and `docker restart` do not run
+Compose dependencies and cannot reload it. The loader's capability boundary
+and repeated-start behavior require the Linux measurements recorded in
+`docs/design/container-boundary.md`; this section describes the approved design.
 
 The profile is Docker's own `docker-default` template with one substitution.
 `docker-default` carries a blanket `deny mount,`, and an AppArmor `deny`
@@ -287,7 +286,7 @@ flag. Then:
 
 | Symptom | Cause |
 | --- | --- |
-| `profile "vmobs-jailer" not found` | install the profile: `sudo sh deploy/install-apparmor.sh` |
+| `profile "vmobs-jailer" not found` | inspect `docker compose logs apparmor`, check the AppArmor-enabled host prerequisites, then retry `docker compose up -d` |
 | probe fails at `pivot_root` with EPERM | the seccomp profile is not being passed |
 | probe fails at any step with EACCES | the AppArmor profile is not being applied |
 | probe fails at `tap_create` with ENOENT | `--device /dev/net/tun` missing, or the module is not loaded |

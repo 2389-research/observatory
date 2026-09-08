@@ -34,8 +34,8 @@
 # and chown of the jail tree -- is covered by the template's blanket `capability,`
 # and `file,` rules, which are unchanged.
 #
-# Install and load once, as root:  sudo sh deploy/install-apparmor.sh
-# Then:                            docker run --security-opt apparmor=vmobs-jailer ...
+# Bundled in the appliance image. Compose loads it into the kernel before
+# starting vmobs: docker compose up -d
 
 #include <tunables/global>
 
