@@ -352,3 +352,24 @@ func TestSecondPrivdIsRefusedThroughASymlinkedLedger(t *testing.T) {
 		t.Fatal("a symlink to the ledger directory started a second privd on it")
 	}
 }
+
+func TestPrivdRefusesWritableLedgerDirectory(t *testing.T) {
+	flags := flagsFor(t, shortTempDir(t))
+	if err := os.Mkdir(flags.ledgerDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(flags.ledgerDir, 0777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(flags.socket, []byte("predecessor"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	held, err := acquireSingleton(flags)
+	if err == nil {
+		held.release()
+		t.Fatal("privd accepted an untrusted ledger directory")
+	}
+	if _, err := os.Stat(flags.socket); err != nil {
+		t.Fatalf("refusal touched socket: %v", err)
+	}
+}

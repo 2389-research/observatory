@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 
 	"github.com/2389-research/observatory/internal/privd"
 )
@@ -53,11 +54,21 @@ func acquireSingleton(flags privdFlags) (*singleton, error) {
 		return nil, fmt.Errorf("another vmobs-privd owns the socket %s: %w", socketPath, err)
 	}
 
-	// privd owns the directory its ledger lives in; on the deployed host
-	// systemd's RuntimeDirectory has already made it.
+	// The ledger survives appliance replacement on the runtime volume.
 	if err := os.MkdirAll(ledgerDir, 0o700); err != nil {
 		_ = socketLock.Release()
 		return nil, fmt.Errorf("create ledger directory %s: %w", ledgerDir, err)
+	}
+
+	info, err := os.Stat(ledgerDir)
+	if err != nil {
+		_ = socketLock.Release()
+		return nil, fmt.Errorf("stat ledger directory: %w", err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || !info.IsDir() || info.Mode().Perm()&0o022 != 0 || stat.Uid != uint32(os.Geteuid()) {
+		_ = socketLock.Release()
+		return nil, fmt.Errorf("untrusted ledger directory %s: must belong to privd and deny other writers", ledgerDir)
 	}
 
 	// Inside the directory, not beside it: two names for one directory then take

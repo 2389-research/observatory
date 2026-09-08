@@ -172,12 +172,9 @@ jailer. What is left:
 - **The acceptance gate.** AT-002 and the live integration suite have never
   run in a container against v2. §10's VMs were driven through the API by
   hand — the gate's shape, not the gate.
-- **Reclaiming a jail chroot whose ledger entry is gone.** A container restart
-  empties privd's tmpfs ledger while the chroots survive, and no privileged
-  call can then remove one: privd reaches a chroot only through a ledger entry.
-  §10 records the case that made this concrete. A stop no longer reports a debt
-  that does not exist, and names the directory when one does — but clearing a
-  real strand still means removing the directory by hand.
+- **Restart recovery acceptance.** The durable-ledger and host-PID design is
+  chosen, but its live regression has not yet passed. §10 retains the historical
+  tmpfs-ledger failure that made this requirement concrete.
 
 ## 8. The options, with what each costs
 
@@ -292,8 +289,10 @@ teardown reaches through that directory and creates nothing, so a repair that
 only ran while starting a VM would leave an install unable to delete the VMs it
 inherited and unable to launch its way out of holding their capacity.
 
-### A container restart strands every VM it was running
+### Historical: a container restart stranded every VM it was running
 
+This measurement predates the durable-ledger and host-PID design. It remains as
+evidence of the failure that design must fix, not as current operating guidance.
 Measured on purpose after hitting it by accident: one VM `running`, then
 `scripts/vmobs-container stop` and `start`.
 
@@ -506,11 +505,12 @@ and `Origin: http://evil.example` are both refused `403 origin_rejected`
 against a `public_origin` of `http://127.0.0.1:8787`. What changed is that the
 configured origin now passes.
 
-### A restart could strand a VM permanently, and did
+### Historical: a restart could strand a VM permanently, and did
 
-§10's earlier note that a container restart strands every VM it was running
-described the shape. This is the measured case, and it was worse than the note
-said: the strand could not be cleared by any API call at all.
+This section records the old tmpfs-ledger design and is superseded by the
+recovery design below. §10's earlier note that a container restart strands every
+VM it was running described the shape. This is the measured case, and it was
+worse than the note said: the strand could not be cleared by any API call at all.
 
 privd's ledger is on `--tmpfs /run`, so a restart empties it while the jail
 chroots on the `vmobs-runtime` volume survive. `Manager.Delete` force-stops
@@ -532,11 +532,25 @@ survive. When it does, the debt now names the directory instead of repeating
 privd's answer, which is the difference between a leak an operator can find and
 one they cannot.
 
-The deeper half stands. A chroot whose ledger entry is gone is still
-unreclaimable by any privileged call — only privd may remove it, and privd
-reaches it only through a ledger entry. Clearing this one meant removing the
-directory by hand. Rebuilding the ledger from what is durable on disk, or
-letting a force-stop reclaim a chroot by path, is unbuilt.
+The measured system still had this limitation: a chroot whose ledger entry was
+gone was unreclaimable by any privileged call. Clearing this case required
+manual directory removal. The chosen successor design avoids that state by
+keeping the root-owned ledger at `/srv/vmobs/privd` on the runtime volume.
+
+Compose and the development wrappers also join the host PID namespace. Each VM
+record captures the host kernel boot identity and PID namespace identity, so a
+replacement privd can distinguish its VMM from PID reuse. A mismatch or
+unreadable record fails closed; it never authorizes a signal. This increases
+host process visibility inside the appliance. AppArmor, seccomp, capabilities
+and device grants are unchanged. The design requires no host install step and
+adds no supervisor. Its live recovery gate is still pending, so this document
+does not claim the restart defect fixed or measured green.
+
+Nor does the new ledger auto-import the legacy chroots described above. Once an
+old ephemeral record is gone, a manifest or jail pidfile cannot recreate trusted
+root signaling authority. Those preexisting resources remain unknown and fail
+closed until an operator resolves them; the design prevents the same loss for
+records created after it ships.
 
 ### The profile was never installed, only loaded
 

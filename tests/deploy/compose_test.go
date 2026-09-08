@@ -22,6 +22,7 @@ type composeService struct {
 	Image       string   `yaml:"image"`
 	Init        *bool    `yaml:"init"`
 	NetworkMode string   `yaml:"network_mode"`
+	PIDMode     string   `yaml:"pid"`
 	CapAdd      []string `yaml:"cap_add"`
 	Devices     []string `yaml:"devices"`
 	SecurityOpt []string `yaml:"security_opt"`
@@ -196,19 +197,29 @@ func TestComposeMountsTheSameState(t *testing.T) {
 	}
 }
 
-// TestComposeReapsAndSharesTheHostNetwork: --init because every VMM reparents to
-// PID 1 and a zombie answers kill(pid, 0), which the runtime reads as alive;
-// host networking because the API binds loopback.
+// Host PID 1 reaps daemonized VMMs; host networking exposes the loopback API.
 func TestComposeReapsAndSharesTheHostNetwork(t *testing.T) {
 	svc := loadService(t)
-	if svc.Init == nil || !*svc.Init {
-		t.Errorf("init = %v, want true -- without a reaper every exited VMM stays a zombie and reads as alive", svc.Init)
+	if svc.Init != nil && *svc.Init {
+		t.Error("init must be absent or false: host PID 1 reaps VMMs")
 	}
 	if svc.NetworkMode != "host" {
 		t.Errorf("network_mode = %q, want \"host\" -- the API binds loopback", svc.NetworkMode)
 	}
 	if svc.Restart != "no" {
 		t.Errorf("restart = %q, want \"no\"", svc.Restart)
+	}
+}
+
+// Persistent process ownership must name the same PID namespace after restart.
+func TestComposeUsesStableProcessIdentities(t *testing.T) {
+	if got := loadService(t).PIDMode; got != "host" {
+		t.Fatalf("pid = %q; persistent ownership requires the host PID namespace", got)
+	}
+	for _, script := range []string{containerPath, "../../scripts/vmobs-gate"} {
+		if got := dockerRunFlags(t, script, "--pid"); !slices.Equal(got, []string{"host"}) {
+			t.Errorf("%s PID namespace = %v, want host", script, got)
+		}
 	}
 }
 

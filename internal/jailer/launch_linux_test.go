@@ -1,5 +1,5 @@
-// ABOUTME: Linux integration test for the launch transaction: real privd server, real runner binary,
-// ABOUTME: real guestd agent on a UDS — verifies the full §5.3 launch sequence end to end.
+// ABOUTME: Linux launch integration tests use a real privd server, runner, and guestd over UDS.
+// ABOUTME: A sleep process stands in for Firecracker; these tests are not real-VM acceptance evidence.
 
 //go:build linux
 
@@ -66,7 +66,7 @@ func TestMain(m *testing.M) {
 }
 
 // testRecordingBackend implements privd.OpsBackend for tests.
-// StartVM spawns a real "sleep 300" as the fake VMM and records its real PID+starttime.
+// StartVM spawns a real "sleep 300" as the fake VMM and records its kernel identity.
 type testRecordingBackend struct {
 	allocateCalls  []string
 	releaseCalls   []string
@@ -111,6 +111,18 @@ func (b *testRecordingBackend) ReleaseNetwork(entry privd.VMEntry) error {
 }
 
 func (b *testRecordingBackend) StartVM(entry *privd.VMEntry, req privd.StartVMReq) (privd.StartVMResp, error) {
+	// The real privd server persists this entry. Match RealOps' ownership
+	// contract using the kernel that owns the stand-in, before spawning it.
+	boot, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		return privd.StartVMResp{}, fmt.Errorf("read boot identity: %w", err)
+	}
+	namespace, err := os.Readlink("/proc/self/ns/pid")
+	if err != nil {
+		return privd.StartVMResp{}, fmt.Errorf("read PID namespace: %w", err)
+	}
+	entry.BootID, entry.PIDNamespace = strings.TrimSpace(string(boot)), namespace
+
 	b.startCalls = append(b.startCalls, req.VMID)
 
 	cmd := exec.Command("sleep", "300")

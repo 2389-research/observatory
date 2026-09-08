@@ -427,7 +427,11 @@ func (s *Server) handleReleaseVM(raw json.RawMessage) Response {
 
 	// If the ledger says the VM has a PID and the process is still alive with the
 	// same identity, the caller must signal first.
-	if entry.PID != 0 && entry.StartTime != "" && PIDAlive(entry.PID, entry.StartTime) {
+	alive, err := entryAlive(entry)
+	if err != nil {
+		return errResp("invalid_state", err.Error())
+	}
+	if alive {
 		return errResp("invalid_state", "vm process is still alive; signal first")
 	}
 
@@ -441,6 +445,8 @@ func (s *Server) handleReleaseVM(raw json.RawMessage) Response {
 	entry.CID = 0
 	entry.PID = 0
 	entry.StartTime = ""
+	entry.BootID = ""
+	entry.PIDNamespace = ""
 	if entry.NetCIDR != "" {
 		// Network half still allocated — write the partial entry back.
 		if err := s.ledger.put(entry); err != nil {

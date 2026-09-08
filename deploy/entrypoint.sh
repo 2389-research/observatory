@@ -11,7 +11,7 @@ set -euo pipefail
 
 CONFIG="${VMOBS_CONFIG:-/etc/vmobs/config.yaml}"
 SOCKET=/run/vmobs/privd.sock
-LEDGER=/run/vmobs/privd
+LEDGER=/srv/vmobs/privd
 VMOBS_UID=2389
 VMOBS_GID=2389
 
@@ -22,12 +22,7 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-# privd's ledger is runtime state whose lifetime is one privd instance -- the
-# same thing systemd's RuntimeDirectory= gives it on a bare-metal host. An entry
-# that outlived its privd holds a jail uid, a guest CID and a subnet that no VM
-# is using, and the next launch is refused as a collision.
-rm -rf "$LEDGER"
-install -d -o root -g root -m 0755 /run/vmobs "$LEDGER"
+install -d -o root -g root -m 0755 /run/vmobs
 
 # Volumes mounted over these are empty on first use; a bind mount is empty every
 # time. Create what is missing without touching what is already there, so a
@@ -51,6 +46,10 @@ if [ "${1:-}" = "init-auth" ]; then
     exec setpriv --reuid "$VMOBS_UID" --regid "$VMOBS_GID" --init-groups -- \
         /usr/local/bin/vmobsd init-auth -config "$CONFIG" "$@"
 fi
+
+# Ownership must outlive the chroots on this volume. Only privd may read or
+# change it; the daemon's manifest is not authority for privileged cleanup.
+install -d -o root -g root -m 0700 "$LEDGER"
 
 # vmobsd opens /dev/kvm itself, for the arch_kvm preflight, as uid 2389. The
 # device node keeps the host's ownership inside the container -- root and the

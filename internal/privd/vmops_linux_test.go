@@ -167,6 +167,14 @@ func TestJailerArgv(t *testing.T) {
 //   - Reading our own process starttime succeeds and matches ProcStatPath output.
 //   - The identity gate refuses to signal when the ledger starttime differs from /proc.
 func TestSignalIdentityGate(t *testing.T) {
+	boot, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns, err := os.Readlink("/proc/self/ns/pid")
+	if err != nil {
+		t.Fatal(err)
+	}
 	selfPID := os.Getpid()
 
 	// Read our own starttime via the exported helper.
@@ -198,7 +206,8 @@ func TestSignalIdentityGate(t *testing.T) {
 		// CheckSignalIdentity with a wrong ledger starttime must return BackendError
 		// with cause "invalid_state" and message containing "pid recycled".
 		ledgerEntry := privd.VMEntry{
-			VMID:      "vm-ident-001",
+			VMID:   "vm-ident-001",
+			BootID: strings.TrimSpace(string(boot)), PIDNamespace: ns,
 			PID:       selfPID,
 			StartTime: "99999999", // deliberate mismatch
 		}
@@ -221,7 +230,8 @@ func TestSignalIdentityGate(t *testing.T) {
 	t.Run("identity_gate_passes_on_match", func(t *testing.T) {
 		// CheckSignalIdentity with the correct starttime must return nil.
 		ledgerEntry := privd.VMEntry{
-			VMID:      "vm-ident-002",
+			VMID:   "vm-ident-002",
+			BootID: strings.TrimSpace(string(boot)), PIDNamespace: ns,
 			PID:       selfPID,
 			StartTime: selfStartTime,
 		}

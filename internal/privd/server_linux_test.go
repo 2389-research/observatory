@@ -65,6 +65,15 @@ func (b *recordingBackend) ReleaseNetwork(entry privd.VMEntry) error {
 }
 
 func (b *recordingBackend) StartVM(entry *privd.VMEntry, req privd.StartVMReq) (privd.StartVMResp, error) {
+	boot, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		return privd.StartVMResp{}, err
+	}
+	ns, err := os.Readlink("/proc/self/ns/pid")
+	if err != nil {
+		return privd.StartVMResp{}, err
+	}
+	entry.BootID, entry.PIDNamespace = strings.TrimSpace(string(boot)), ns
 	b.startCalls = append(b.startCalls, recordedStart{*entry, req})
 	return b.startResp, b.startErr
 }
