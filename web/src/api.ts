@@ -23,8 +23,9 @@ export class ApiFailure extends Error {
  * Decoding leaves every value exactly as the daemon sent it: counters that can
  * outgrow Number.MAX_SAFE_INTEGER arrive as decimal strings and stay strings.
  */
-export async function getJSON<T>(path: string): Promise<T> {
+export async function getJSON<T>(path: string, signal?: AbortSignal): Promise<T> {
   const res = await fetch(BASE + path, {
+    signal,
     credentials: 'same-origin',
     headers: { accept: 'application/json' },
   })

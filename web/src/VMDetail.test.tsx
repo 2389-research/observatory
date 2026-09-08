@@ -34,6 +34,15 @@ function routeFetch(o: {
     const method = init?.method ?? 'GET'
     if (method === 'POST') return o.post ?? jsonResponse(testTerminalSession({ session_id: 'sess-new' }), 201)
     if (method === 'DELETE') return o.del ?? jsonResponse(undefined, 204)
+    if (url.endsWith('/coverage'))
+      return jsonResponse({
+        vm_id: 'vm-1',
+        boot_id: 'boot-1',
+        channel: { state: 'healthy', observed_dropped: '0' },
+        collectors: [],
+        gaps: [],
+      })
+    if (url.includes('/events?')) return jsonResponse({ events: [], next_after: '', latest_event_id: '' })
     if (url.endsWith('/terminals')) return o.terminals ?? jsonResponse({ terminals: [], next_after: '', limit: 20 })
     if (url.includes('/vms/')) return o.vm ?? jsonResponse(testVM({ name: 'agent-03' }))
     throw new Error(`unexpected fetch: ${url}`)
@@ -80,6 +89,22 @@ describe('VMDetail', () => {
     const head = await screen.findByTestId('vm-identity')
     expect(head).toHaveTextContent('running')
     expect(within(head).getByTestId('telemetry-health')).toHaveTextContent('unavailable')
+    expect(within(head).getByTestId('telemetry-health')).toHaveTextContent('telemetry')
+    expect(within(head).getByTestId('telemetry-health')).not.toHaveTextContent('transport')
+  })
+
+  it('keeps the terminal session attached while changing activity filters', async () => {
+    vi.stubGlobal(
+      'fetch',
+      routeFetch({ terminals: jsonResponse({ terminals: [openSession], next_after: '', limit: 20 }) }),
+    )
+    render(<VMDetail vmID="vm-1" onBack={() => {}} />)
+    await waitFor(() => expect(FakeWebSocket.last?.url).toContain('/terminals/sess-1/stream'))
+    const socket = FakeWebSocket.last
+    await userEvent.selectOptions(await screen.findByLabelText('Event family'), '')
+    expect(FakeWebSocket.last).toBe(socket)
+    expect(socket.readyState).not.toBe(FakeWebSocket.CLOSED)
+    expect(screen.getByTestId('channel-coverage')).toHaveTextContent('Transport healthy')
   })
 
   it('says no guest address is published rather than inventing one', async () => {

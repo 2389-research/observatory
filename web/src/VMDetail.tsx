@@ -7,6 +7,7 @@ import { neutralize, age } from './text'
 import { OperationFailure } from './components/OperationFailure'
 import { useFleetControls } from './components/BulkActions'
 import { VMActions } from './components/VMActions'
+import { ObservationWorkspace } from './components/ObservationWorkspace'
 
 // xterm.js and its addon are most of the bundle, and the fleet page never
 // draws a terminal. Loaded on demand, the landing page does not pay for it.
@@ -35,8 +36,7 @@ function Identity({ vm }: { vm: VM }) {
   return (
     <div className="vm-identity" data-testid="vm-identity">
       <h2>
-        VM: {neutralize(vm.name)}{' '}
-        <span className={`state state-${vm.observed_state}`}>{vm.observed_state}</span>
+        VM: {neutralize(vm.name)} <span className={`state state-${vm.observed_state}`}>{vm.observed_state}</span>
         {vm.desired_state !== vm.observed_state && <span className="drift">want {vm.desired_state}</span>}{' '}
         {/* Lifecycle and telemetry are two independent dimensions (§138): a
             running VM whose agent has gone quiet is running and unavailable at
@@ -81,7 +81,9 @@ function Network({ vm }: { vm: VM }) {
         <dt>Network profile</dt>
         <dd>{neutralize(vm.network_profile)}</dd>
         <dt>Policy</dt>
-        <dd>{vm.network_policy_id === '' ? <span className="unknown">none set</span> : neutralize(vm.network_policy_id)}</dd>
+        <dd>
+          {vm.network_policy_id === '' ? <span className="unknown">none set</span> : neutralize(vm.network_policy_id)}
+        </dd>
         <dt>Address</dt>
         <dd>
           {/* §13.2 asks for addresses. This API returns a profile and a policy
@@ -101,7 +103,11 @@ export interface VMDetailProps {
   onBack: () => void
 }
 
-export function VMDetail({ vmID, onBack }: VMDetailProps) {
+export function VMDetail(props: VMDetailProps) {
+  return <VMDetailWorkspace key={props.vmID} {...props} />
+}
+
+function VMDetailWorkspace({ vmID, onBack }: VMDetailProps) {
   const [vm, setVM] = useState<VM | null>(null)
   const [sessions, setSessions] = useState<TerminalSession[]>([])
   const [failure, setFailure] = useState<ApiFailure | null>(null)
@@ -147,7 +153,8 @@ export function VMDetail({ vmID, onBack }: VMDetailProps) {
   // Attach to whatever the VM already has. An operator who opened this page to
   // look at a running shell should not have to ask for it again.
   const open = sessions.filter(isOpen)
-  const current = attached !== null && open.some((s) => s.session_id === attached) ? attached : (open[0]?.session_id ?? null)
+  const current =
+    attached !== null && open.some((s) => s.session_id === attached) ? attached : (open[0]?.session_id ?? null)
 
   const openTerminalSession = async () => {
     mutations.current += 1
@@ -203,55 +210,68 @@ export function VMDetail({ vmID, onBack }: VMDetailProps) {
 
           <VMActions vm={vm} controls={controls} />
 
-          <section className="terminal-section">
-            <h2>Terminal</h2>
-            {!canOpenTerminal(vm) ? (
-              <p className="empty" data-testid="terminal-unavailable">
-                This VM is {vm.observed_state}. A terminal needs a running guest.
-              </p>
-            ) : (
-              <>
-                <div className="terminal-tabs" data-testid="terminal-tabs" role="tablist" aria-label="Terminal sessions">
-                  {open.map((s) => (
-                    <button
-                      key={s.session_id}
-                      type="button"
-                      role="tab"
-                      className={s.session_id === current ? 'terminal-tab active' : 'terminal-tab'}
-                      aria-selected={s.session_id === current}
-                      onClick={() => setAttached(s.session_id)}
-                    >
-                      {neutralize(s.session_id)} <span className="sub">pid {s.pid}</span>
-                    </button>
-                  ))}
-                  <button type="button" className="row-action" disabled={busy} onClick={() => void openTerminalSession()}>
-                    Open a terminal
-                  </button>
-                  {current !== null && (
+          <div className="vm-observation-grid">
+            <section className="terminal-section">
+              <h2>Terminal</h2>
+              {!canOpenTerminal(vm) ? (
+                <p className="empty" data-testid="terminal-unavailable">
+                  This VM is {vm.observed_state}. A terminal needs a running guest.
+                </p>
+              ) : (
+                <>
+                  <div
+                    className="terminal-tabs"
+                    data-testid="terminal-tabs"
+                    role="tablist"
+                    aria-label="Terminal sessions"
+                  >
+                    {open.map((s) => (
+                      <button
+                        key={s.session_id}
+                        type="button"
+                        role="tab"
+                        className={s.session_id === current ? 'terminal-tab active' : 'terminal-tab'}
+                        aria-selected={s.session_id === current}
+                        onClick={() => setAttached(s.session_id)}
+                      >
+                        {neutralize(s.session_id)} <span className="sub">pid {s.pid}</span>
+                      </button>
+                    ))}
                     <button
                       type="button"
                       className="row-action"
                       disabled={busy}
-                      onClick={() => void closeSession(current)}
+                      onClick={() => void openTerminalSession()}
                     >
-                      Close this session
+                      Open a terminal
                     </button>
-                  )}
-                </div>
+                    {current !== null && (
+                      <button
+                        type="button"
+                        className="row-action"
+                        disabled={busy}
+                        onClick={() => void closeSession(current)}
+                      >
+                        Close this session
+                      </button>
+                    )}
+                  </div>
 
-                {current === null ? (
-                  <p className="empty">No terminal is open on this VM.</p>
-                ) : (
-                  // Keyed by session: attaching to another tab must build a new
-                  // socket and a new screen, never reuse one holding another
-                  // session's scrollback.
-                  <Suspense fallback={<p className="empty">Loading the terminal…</p>}>
-                    <Terminal key={current} sessionId={current} rows={ROWS} cols={COLS} />
-                  </Suspense>
-                )}
-              </>
-            )}
-          </section>
+                  {current === null ? (
+                    <p className="empty">No terminal is open on this VM.</p>
+                  ) : (
+                    // Keyed by session: attaching to another tab must build a new
+                    // socket and a new screen, never reuse one holding another
+                    // session's scrollback.
+                    <Suspense fallback={<p className="empty">Loading the terminal…</p>}>
+                      <Terminal key={current} sessionId={current} rows={ROWS} cols={COLS} />
+                    </Suspense>
+                  )}
+                </>
+              )}
+            </section>
+            <ObservationWorkspace key={vmID} vmID={vmID} />
+          </div>
         </>
       )}
     </main>

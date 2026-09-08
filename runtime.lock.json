@@ -24,12 +24,12 @@
     "vmlinux_url": "https://github.com/2389-research/observatory/releases/download/guest-images-6.1.186/vmlinux"
   },
   "root_image": {
-    "sha256": "0d970896b92f5b4000f45074ba56a754efd1e43992c4ac0826275aaaa6d08858",
+    "sha256": "9a9c3b92d75422e5746945fef0aaa7b8ada10c4c914f4f2a0695a4d2117b70da",
     "path": "images/dist/rootfs.ext4",
     "base_image_ref": "ubuntu@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517",
     "apt_snapshot": "20260820T000000Z",
     "inventory": "images/dist/rootfs.inventory.txt",
-    "url": "https://github.com/2389-research/observatory/releases/download/guest-images-6.1.186/rootfs.ext4"
+    "url": ""
   },
   "guestd": {
     "protocol_version": 1

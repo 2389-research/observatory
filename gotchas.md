@@ -867,3 +867,25 @@ now proves recovery of a stored terminal run into a digest report. Also, a timed
 privd caller may leave host file work running beyond the adapter lock. Disk credit
 requires settled privileged inventory as well as that lock; query failure means
 zero materialization credit, never guessed cleanup.
+
+## Filesystem introspection gate fixtures
+
+The workspace is Firecracker's third block device, `/dev/vdc`; the guest rootfs
+must mount it before guestd starts. Root and workspace mutation tests now run
+through the actual terminal, sensor, spool and API. Fanotify overflow needs more
+distinct files than its kernel queue limit: the small workspace test disk runs
+out of inodes first, so run pressure on the root disk and test workspace separately.
+Keep runner socket fixture paths short enough for Linux's Unix socket limit.
+
+Linux 6.1's `open_by_handle_at` looks up its mount descriptor with `fdget`, which
+rejects O_PATH descriptors with EBADF. Open the sensor's mount directories with
+O_RDONLY; the returned target may still use O_PATH. Keep a real live-parent
+resolution assertion: accepting unresolved paths in every case hid this bug.
+
+## Network accounting without broader sysctl access
+
+Linux supports per-interface IPv4 forwarding via rtnetlink's IFLA_INET_CONF.
+An nftables ct bytes/packets expression enables conntrack accounting in that
+network namespace when the rule is installed (`nft_ct_get_init`). These are
+candidates for the routed gateway under the existing NET_ADMIN boundary; verify
+them in the confined gate before relying on them. No AppArmor relaxation is implied.

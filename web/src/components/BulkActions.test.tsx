@@ -26,6 +26,24 @@ function Fleet({ vms, onSettled = () => {} }: { vms: VM[]; onSettled?: () => voi
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 
+// Coverage reads are independent of the mutation fan-out these spies measure.
+function installFetch(handler: (url: string, init?: RequestInit) => Promise<Response>) {
+  vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
+    if (url.endsWith('/coverage') && (init?.method ?? 'GET') === 'GET') {
+      return Promise.resolve(
+        json({
+          vm_id: url.split('/')[4],
+          boot_id: 'boot-1',
+          channel: { state: 'healthy', observed_dropped: '0' },
+          collectors: [],
+          gaps: [],
+        }),
+      )
+    }
+    return handler(url, init)
+  })
+}
+
 const actionOK = (vm: VM, state: string, opID: string) =>
   json({ vm: { ...vm, observed_state: state }, operation: { operation_id: opID } })
 
@@ -69,7 +87,7 @@ describe('fan-out', () => {
     const spy = vi.fn((_url: string, _init?: RequestInit) =>
       Promise.resolve(actionOK(three[0]!, 'stopped', 'op-1')),
     )
-    vi.stubGlobal('fetch', spy)
+    installFetch(spy)
     render(<Fleet vms={three} />)
 
     await userEvent.click(selectAll())
@@ -99,7 +117,7 @@ describe('fan-out', () => {
           }, 5)
         }),
     )
-    vi.stubGlobal('fetch', spy)
+    installFetch(spy)
     render(<Fleet vms={six} />)
 
     await userEvent.click(selectAll())
@@ -110,7 +128,7 @@ describe('fan-out', () => {
   })
 
   it('calls back once the whole fan-out has settled, so the fleet re-reads', async () => {
-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(actionOK(three[0]!, 'stopped', 'op-1'))))
+    installFetch(vi.fn(() => Promise.resolve(actionOK(three[0]!, 'stopped', 'op-1'))))
     const settled = vi.fn()
     render(<Fleet vms={three} onSettled={settled} />)
 
@@ -128,7 +146,7 @@ describe('per-VM outcomes', () => {
       if (url.endsWith('/vms/vm-2')) return Promise.resolve(json({ ...three[1]!, revision: '9' }))
       return Promise.resolve(actionOK(three[0]!, 'stopped', 'op-777'))
     })
-    vi.stubGlobal('fetch', spy)
+    installFetch(spy)
     render(<Fleet vms={three} />)
 
     await userEvent.click(selectAll())
@@ -157,7 +175,7 @@ describe('per-VM outcomes', () => {
       if (url.endsWith('/vms/vm-2')) return Promise.resolve(json({ ...three[1]!, revision: '9' }))
       return Promise.resolve(actionOK(three[0]!, 'stopped', 'op-777'))
     })
-    vi.stubGlobal('fetch', spy)
+    installFetch(spy)
     render(<Fleet vms={three} />)
 
     await userEvent.click(selectAll())
@@ -189,7 +207,7 @@ describe('per-VM outcomes', () => {
         )
       return Promise.resolve(json({}))
     })
-    vi.stubGlobal('fetch', spy)
+    installFetch(spy)
     render(<Fleet vms={[three[0]!]} />)
 
     await userEvent.click(selectAll())
@@ -205,7 +223,7 @@ describe('per-VM outcomes', () => {
 describe('delete', () => {
   it('sends nothing until the confirm names the VMs and is accepted', async () => {
     const spy = vi.fn(() => Promise.resolve(json({ vm: three[0]! })))
-    vi.stubGlobal('fetch', spy)
+    installFetch(spy)
     render(<Fleet vms={three} />)
 
     await userEvent.click(selectAll())
@@ -226,7 +244,7 @@ describe('delete', () => {
     const live = testVM({ vm_id: 'vm-live', name: 'live', revision: '3', observed_state: 'running' })
     const cold = testVM({ vm_id: 'vm-cold', name: 'cold', revision: '4', observed_state: 'stopped' })
     const spy = vi.fn((_url: string, _init?: RequestInit) => Promise.resolve(json({ vm: cold })))
-    vi.stubGlobal('fetch', spy)
+    installFetch(spy)
     render(<Fleet vms={[live, cold]} />)
 
     await userEvent.click(selectAll())
@@ -267,7 +285,7 @@ describe('legality', () => {
     const spy = vi.fn((_url: string, _init?: RequestInit) =>
       Promise.resolve(actionOK(three[0]!, 'stopped', 'op-1')),
     )
-    vi.stubGlobal('fetch', spy)
+    installFetch(spy)
     const mixed = [
       testVM({ vm_id: 'vm-run', name: 'runner', revision: '3', observed_state: 'running' }),
       testVM({ vm_id: 'vm-off', name: 'sleeper', revision: '4', observed_state: 'stopped' }),

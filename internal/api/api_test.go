@@ -143,7 +143,7 @@ func TestMetaIsHonest(t *testing.T) {
 		"host_status": true, "templates": true, "vms": true, "operations": true,
 		"vm_batches": true,
 		"runs":       true, "terminals": false, "execs": false,
-		"events_stream": false,
+		"events_stream": true,
 	} {
 		got, present := meta.Features[feature]
 		if !present {
@@ -418,9 +418,8 @@ func TestUnbuiltEndpointsTeachCapability(t *testing.T) {
 	for _, probe := range []struct {
 		method, path, feature string
 	}{
-		{http.MethodGet, "/api/v1/events/stream", "events_stream"},
+		{http.MethodGet, "/api/v1/execs/not-built", "execs"},
 		// /runs is now built — remove it from the stub-teaching probe set.
-		{http.MethodGet, "/api/v1/vms/" + testUUID(1) + "/coverage", "coverage"},
 	} {
 		req, _ := http.NewRequest(probe.method, srv.URL+probe.path, nil)
 		resp, err := http.DefaultClient.Do(req)

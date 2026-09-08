@@ -109,7 +109,8 @@ ln -sf /etc/systemd/system/guestd.service \
     /etc/systemd/system/multi-user.target.wants/guestd.service
 
 echo '[rootfs] writing fstab...'
-printf '/dev/vda / ext4 defaults 0 1\n' > /etc/fstab
+mkdir -p /workspace
+printf '/dev/vda / ext4 defaults 0 1\n/dev/vdc /workspace ext4 defaults 0 2\n' > /etc/fstab
 
 echo '[rootfs] writing hostname...'
 echo 'vmobs-guest' > /etc/hostname

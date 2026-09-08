@@ -46,8 +46,8 @@ func TestAgentManifestDescribesMutationAndResume(t *testing.T) {
 				t.Fatal("action lacks revision binding")
 			}
 		}
-		if r.Feature == "events_stream" && r.Built {
-			t.Fatal("unbuilt stream advertised")
+		if r.Feature == "events_stream" && !r.Built {
+			t.Fatal("built stream missing from manifest")
 		}
 	}
 	if !found["launch"] || !found["action"] || meta.Agent["resume"] == nil {
@@ -84,7 +84,7 @@ func TestAgentSnapshotReportsOmissions(t *testing.T) {
 
 func TestAgentErrorsDeclareSafeRecovery(t *testing.T) {
 	srv, _, _ := newTemplateServer(t)
-	for _, tc := range []struct{ path, strategy string }{{"/api/v1/events?after=bad", "after_refresh"}, {"/api/v1/events/stream", "never"}, {"/api/v1/events?limit=1001", "after_precondition"}} {
+	for _, tc := range []struct{ path, strategy string }{{"/api/v1/events?after=bad", "after_refresh"}, {"/api/v1/execs/not-built", "never"}, {"/api/v1/events?limit=1001", "after_precondition"}} {
 		resp, err := http.Get(srv.URL + tc.path)
 		if err != nil {
 			t.Fatal(err)

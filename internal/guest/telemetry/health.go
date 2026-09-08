@@ -13,6 +13,9 @@ import (
 // healthy: §133 says a VM may be running while its telemetry is degraded, and
 // the same distinction applies one level down.
 const (
+	SensorUnsupported = "unsupported"
+	SensorDisabled    = "disabled"
+	SensorStarting    = "starting"
 	SensorHealthy     = "healthy"
 	SensorDegraded    = "degraded"
 	SensorUnavailable = "unavailable"
@@ -28,7 +31,12 @@ type Sensor struct {
 	Dropped              string   `json:"dropped"`
 	UnknownLossIntervals int      `json:"unknown_loss_intervals"`
 	CaptureMode          string   `json:"capture_mode,omitempty"`
+	EventClasses         []string `json:"event_classes,omitempty"`
+	Scope                []string `json:"scope,omitempty"`
 	Exclusions           []string `json:"exclusions,omitempty"`
+	Limitations          []string `json:"limitations,omitempty"`
+	LastSuccessAt        string   `json:"last_success_at,omitempty"`
+	Reason               string   `json:"reason,omitempty"`
 }
 
 // AgentInfo is the guest agent's own liveness. It answers "is guestd alive",
@@ -52,10 +60,9 @@ type Health struct {
 	Sensors []Sensor  `json:"sensors"`
 }
 
-// Registry holds the sensors a heartbeat reports. It is empty in M2a — no
-// sensor exists yet — and that empty list is the honest answer, rendered as
-// [] rather than null so a reader cannot mistake "none registered" for "the
-// agent does not know".
+// Registry holds the sensors a heartbeat reports. Before any sensor registers,
+// Snapshot returns [] rather than null so "none registered" remains distinct
+// from an absent report.
 type Registry struct {
 	mu      sync.Mutex
 	sensors map[string]Sensor

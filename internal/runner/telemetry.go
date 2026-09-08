@@ -10,6 +10,7 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -237,6 +238,18 @@ func (r *runner) newGuestEnvelope(streamID string, push proto.TelemetryPush, dat
 			Attribution:    events.AttributionNotApplicable,
 		},
 		Data: data,
+	}
+	if strings.HasPrefix(push.Kind, "fs.") {
+		env.Sensor = "filesystem"
+		if push.Kind != "fs.coverage" && push.Kind != "fs.loss" {
+			// File handles are resolved after notification delivery. Preserve
+			// that uncertainty even if the guest claims capture-time certainty.
+			env.Quality.PathResolution = events.PathUnresolved
+			env.Quality.Attribution = events.AttributionUnknown
+			if data["path_status"] == "inferred" {
+				env.Quality.PathResolution = events.PathInferred
+			}
+		}
 	}
 	if push.GuestWallAt != "" {
 		if t, err := time.Parse(time.RFC3339Nano, push.GuestWallAt); err == nil {

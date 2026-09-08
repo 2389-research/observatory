@@ -2,6 +2,7 @@
 // ABOUTME: Reads only what the API actually reports; never derives a number it wasn't given.
 import type { VM } from '../types'
 import { neutralize, age } from '../text'
+import { CaptureSummary } from './CaptureSummary'
 import { RowActions, RowResult, type FleetControls } from './BulkActions'
 
 /**
@@ -72,7 +73,7 @@ export function VMTable({ vms, controls, filtered = false, selectedVM, onSelectV
           <th>Name / ID</th>
           <th>Template</th>
           <th>Lifecycle</th>
-          <th>Telemetry</th>
+          <th>Transport / capture</th>
           <th>Allocation</th>
           <th>Usage</th>
           <th>Disk</th>
@@ -130,7 +131,7 @@ export function VMTable({ vms, controls, filtered = false, selectedVM, onSelectV
               <Lifecycle vm={vm} />
             </td>
             <td data-testid="vm-telemetry">
-              <span className={`state state-${vm.telemetry_health}`}>{vm.telemetry_health}</span>
+              <CaptureSummary vmID={vm.vm_id} />
             </td>
             <td>
               <div>{vm.resources.vcpu_count} vCPU</div>

@@ -187,6 +187,9 @@ export interface BatchReply {
  * reader that wants the VM must look in both places.
  */
 export interface EventEnvelope {
+  boot_id?: string | null
+  guest_wall_at?: string | null
+  quality?: Record<string, unknown>
   event_id: string
   kind: string
   vm_id: string | null
@@ -236,4 +239,36 @@ export interface TerminalSessionList {
   terminals: TerminalSession[]
   next_after: string
   limit: number
+}
+
+/** Capture health is separate from channel liveness and uses nullable unknown counters. */
+export interface CollectorCoverage {
+  id: string
+  state: string
+  enabled: boolean
+  event_classes: string[]
+  scope: string[]
+  exclusions: string[]
+  limitations: string[]
+  observed_dropped: string | null
+  unknown_loss_intervals: number | null
+  last_event_at?: string
+  last_success_at?: string
+  capture_mode?: string
+  reason?: string
+  source: string
+  provenance: string
+}
+export interface CaptureCoverage {
+  vm_id: string
+  boot_id?: string
+  channel: {
+    state: string
+    observed_dropped: string | null
+    reason?: string
+    last_heartbeat_at?: string
+    last_success_at?: string
+  }
+  collectors: CollectorCoverage[]
+  gaps: string[]
 }

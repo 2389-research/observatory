@@ -12,6 +12,14 @@ const okResponse = (body: unknown) =>
 afterEach(() => vi.unstubAllGlobals())
 
 describe('getJSON', () => {
+  it('passes cancellation to fetch for scoped polling', async () => {
+    const fetch = vi.fn().mockResolvedValue(okResponse({}))
+    vi.stubGlobal('fetch', fetch)
+    const controller = new AbortController()
+    await getJSON('/meta', controller.signal)
+    expect(fetch).toHaveBeenCalledWith('/api/v1/meta', expect.objectContaining({ signal: controller.signal }))
+  })
+
   it('returns the decoded body on success', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(okResponse({ vms: [], next_after: '' })))
     await expect(getJSON('/vms')).resolves.toEqual({ vms: [], next_after: '' })

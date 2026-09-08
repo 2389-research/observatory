@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"sync"
 	"sync/atomic"
 
 	"github.com/2389-research/observatory/internal/events"
@@ -33,9 +34,11 @@ type Config struct {
 // its durable cursor and queue in the store, so a fresh process resumes where
 // the last one stopped. Optional importer diagnostics are process-local.
 type Engine struct {
-	importer atomic.Pointer[spool.Importer]
-	st       *store.Store
-	cfg      Config
+	importer     atomic.Pointer[spool.Importer]
+	coverageMu   sync.RWMutex
+	hostCoverage HostCoverageSource
+	st           *store.Store
+	cfg          Config
 }
 
 func New(st *store.Store, cfg Config) *Engine {

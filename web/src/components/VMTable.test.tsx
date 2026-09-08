@@ -66,17 +66,17 @@ describe('VMTable', () => {
     expect(screen.queryByText('0%')).not.toBeInTheDocument()
   })
 
-  // §138: a running VM whose agent has gone quiet is running and unavailable at
-  // the same time. The Telemetry column carries the second answer; "not
-  // measured" there would now be false, because the heartbeat measures it.
-  it('reports telemetry health beside a lifecycle state that disagrees with it', () => {
+  // Capture is read independently; the legacy telemetry summary cannot answer
+  // whether a specific filesystem or network collector is available.
+  it('checks capture independently of the legacy telemetry summary', () => {
     render(
       <VMTable
         vms={[vm({ observed_state: 'running', telemetry_health: 'unavailable' })]}
         controls={inert}
       />,
     )
-    expect(screen.getByTestId('vm-telemetry')).toHaveTextContent('unavailable')
+    expect(screen.getByTestId('vm-telemetry')).toHaveTextContent('Files checking')
+    expect(screen.getByTestId('vm-telemetry')).not.toHaveTextContent('Files unavailable')
     expect(screen.getByText('running')).toBeInTheDocument()
   })
 

@@ -17,6 +17,7 @@ import (
 	"github.com/mdlayher/vsock"
 
 	"github.com/2389-research/observatory/internal/guest"
+	"github.com/2389-research/observatory/internal/guest/fswatch"
 )
 
 func main() {
@@ -77,6 +78,7 @@ func main() {
 	// The heartbeat runs whether or not the port bound: what piles up in the
 	// ring while nobody reads is the evidence that nobody was reading.
 	go agent.RunHeartbeat(ctx, guest.HeartbeatInterval)
+	go fswatch.Run(ctx, agent.Telemetry())
 
 	// Every listener closes on ctx, so whichever returns first, the others are
 	// on their way down too; the first non-nil error is the one worth reporting.

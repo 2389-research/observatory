@@ -18,21 +18,24 @@ type eventsResponse struct {
 	LatestEventID string             `json:"latest_event_id"`
 }
 
-func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
+func parseEventQuery(w http.ResponseWriter, r *http.Request) (store.Query, bool) {
 	q := store.Query{}
 	params := r.URL.Query()
 
-	if vm := params.Get("vm_id"); vm != "" {
-		if !events.UUIDString(vm) {
-			writeError(w, http.StatusBadRequest, Error{
-				Code:      "malformed_request",
-				Message:   fmt.Sprintf("vm_id %q is not a lowercase uuid", vm),
-				Retryable: false,
-				Cause:     "query_parameter_invalid",
-			})
-			return
+	for _, filter := range []struct {
+		name   string
+		target **string
+	}{{"vm_id", &q.VMID}, {"boot_id", &q.BootID}} {
+		if value := params.Get(filter.name); value != "" {
+			if !events.UUIDString(value) {
+				writeError(w, http.StatusBadRequest, Error{
+					Code: "malformed_request", Message: fmt.Sprintf("%s %q is not a lowercase uuid", filter.name, value),
+					Retryable: false, Cause: "query_parameter_invalid",
+				})
+				return q, false
+			}
+			*filter.target = &value
 		}
-		q.VMID = &vm
 	}
 	if kind := params.Get("kind"); kind != "" {
 		if _, ok := events.LookupKind(kind); !ok {
@@ -47,7 +50,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 					Rationale: "the registry lists every kind this build can store, with semantics and caveats",
 				}},
 			})
-			return
+			return q, false
 		}
 		q.Kind = kind
 	}
@@ -64,7 +67,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 					Rationale: "each kind entry lists its family; filter by kind for a single kind or by family for all kinds in a group",
 				}},
 			})
-			return
+			return q, false
 		}
 		if events.KindsByFamily(family) == nil {
 			writeError(w, http.StatusBadRequest, Error{
@@ -78,7 +81,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 					Rationale: "the registry lists every kind and its family; only registered families match events",
 				}},
 			})
-			return
+			return q, false
 		}
 		q.Family = family
 	}
@@ -95,7 +98,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 					Rationale: "cursors are opaque decimal event ids issued by the store, not client-invented values",
 				}},
 			})
-			return
+			return q, false
 		}
 		q.Until = raw
 	}
@@ -108,7 +111,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 				Retryable: false,
 				Cause:     "query_parameter_invalid",
 			})
-			return
+			return q, false
 		}
 		q.Limit = limit
 	}
@@ -133,10 +136,19 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 					Rationale: "tail=true returns the newest page in the range; leaving it off pages forward from after",
 				}},
 			})
-			return
+			return q, false
 		}
 	}
 	q.After = params.Get("after")
+
+	return q, true
+}
+
+func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
+	q, ok := parseEventQuery(w, r)
+	if !ok {
+		return
+	}
 
 	result, err := s.store.Query(r.Context(), q)
 	if err != nil {

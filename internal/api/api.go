@@ -35,15 +35,16 @@ const (
 // the lifecycle manager. The manager is required; future refactors that make
 // it optional should be explicit (not a nil-guard, which hides bugs).
 type Server struct {
-	store     *store.Store
-	engine    *situation.Engine
-	manager   *runtime.Manager
-	mux       *http.ServeMux
-	features  map[string]bool
-	routes    []routeDescription
-	links     map[string]string
-	auth      authState
-	preflight PreflightFunc // nil = no preflight block in /host/status
+	store        *store.Store
+	engine       *situation.Engine
+	manager      *runtime.Manager
+	mux          *http.ServeMux
+	features     map[string]bool
+	routes       []routeDescription
+	links        map[string]string
+	auth         authState
+	preflight    PreflightFunc // nil = no preflight block in /host/status
+	eventStreams atomic.Int64  // bounded long-lived event readers
 
 	// terminals is nil when this build serves no terminal registry; the four
 	// terminal routes then answer 501 missing_capability, as they did before
@@ -123,7 +124,7 @@ func New(
 
 		{"POST", "/vm-batches", "vm_batches", s.handleCreateBatch},
 		{"GET", "/vm-batches/{id}", "vm_batches", s.handleGetBatch},
-		{"", "/events/stream", "events_stream", nil},
+		{"GET", "/events/stream", "events_stream", s.handleEventsStream},
 		{"", "/vms/{id}/execs", "execs", nil},
 		{"", "/execs/{id}", "execs", nil},
 		{"", "/execs/{id}/cancel", "execs", nil},
@@ -133,7 +134,7 @@ func New(
 		{"GET", "/runs/{id}", "runs", s.handleGetRun},
 		{"GET", "/runs/{id}/report", "runs", s.handleGetRunReport},
 		{"POST", "/runs/{id}/conclude", "runs", s.handleConcludeRun},
-		{"", "/vms/{id}/coverage", "coverage", nil},
+		{"GET", "/vms/{id}/coverage", "coverage", s.handleCoverage},
 		{"", "/vms/{id}/filesystem/diff", "filesystem_diff", nil},
 		{"", "/vms/{id}/exports", "exports", nil},
 		{"", "/artifacts/{id}", "artifacts", nil},
@@ -233,12 +234,15 @@ func notFound(w http.ResponseWriter, r *http.Request) {
 }
 
 type limits struct {
-	EventsPageDefault         int   `json:"events_page_default"`
-	EventsPageMax             int   `json:"events_page_max"`
-	AnnotationTextMaxBytes    int   `json:"annotation_text_max_bytes"`
-	AttentionQueueMaxItems    int   `json:"attention_queue_max_items"`
-	SituationMaxResponseBytes int64 `json:"situation_max_response_bytes"`
-	MaxBatchSize              int   `json:"max_batch_size"`
+	EventsPageDefault          int   `json:"events_page_default"`
+	EventsPageMax              int   `json:"events_page_max"`
+	EventsStreamPageMax        int   `json:"events_stream_page_max"`
+	EventsStreamConnectionsMax int   `json:"events_stream_connections_max"`
+	EventsStreamFrameMaxBytes  int   `json:"events_stream_frame_max_bytes"`
+	AnnotationTextMaxBytes     int   `json:"annotation_text_max_bytes"`
+	AttentionQueueMaxItems     int   `json:"attention_queue_max_items"`
+	SituationMaxResponseBytes  int64 `json:"situation_max_response_bytes"`
+	MaxBatchSize               int   `json:"max_batch_size"`
 }
 
 type metaAuth struct {
@@ -266,12 +270,15 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 		APIVersion: APIVersion,
 		Features:   s.features,
 		Limits: limits{
-			EventsPageDefault:         store.DefaultPageLimit,
-			EventsPageMax:             store.MaxPageLimit,
-			AnnotationTextMaxBytes:    store.AnnotationTextMaxBytes,
-			AttentionQueueMaxItems:    s.engine.Config().QueueMaxItems,
-			SituationMaxResponseBytes: s.engine.Config().SituationMaxResponseBytes,
-			MaxBatchSize:              s.maxBatchSize(),
+			EventsPageDefault:          store.DefaultPageLimit,
+			EventsPageMax:              store.MaxPageLimit,
+			EventsStreamPageMax:        eventStreamPageLimit,
+			EventsStreamConnectionsMax: eventStreamConnections,
+			EventsStreamFrameMaxBytes:  eventStreamFrameLimit,
+			AnnotationTextMaxBytes:     store.AnnotationTextMaxBytes,
+			AttentionQueueMaxItems:     s.engine.Config().QueueMaxItems,
+			SituationMaxResponseBytes:  s.engine.Config().SituationMaxResponseBytes,
+			MaxBatchSize:               s.maxBatchSize(),
 		},
 		// The active set is enabled-intersect-implemented, straight from the
 		// engine: config alone must not claim a watch no code performs (P-03).

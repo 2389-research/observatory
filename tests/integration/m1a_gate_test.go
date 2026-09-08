@@ -207,6 +207,8 @@ type daemonOptions struct {
 	password string
 	// stateDir, when set, is Paths.State instead of a fresh temp dir.
 	stateDir string
+	// lockFile selects a trusted fixture image without changing the published template.
+	lockFile string
 	// scratchMiB reserves actual free space for a low-headroom admission gate.
 	scratchMiB int64
 	// privdSocket allows a real transport fault proxy in acceptance tests.
@@ -354,6 +356,9 @@ func startDaemon(t *testing.T, repoRoot, daemonBin, runnerBin, label string, opt
 	// Write a minimal config file.
 	configPath := filepath.Join(t.TempDir(), "vmobsd.yaml")
 	lockPath := filepath.Join(repoRoot, "runtime.lock.json")
+	if o.lockFile != "" {
+		lockPath = o.lockFile
+	}
 	lk, err := lock.Load(lockPath)
 	if err != nil {
 		t.Fatalf("startDaemon %s: load %s: %v", label, lockPath, err)

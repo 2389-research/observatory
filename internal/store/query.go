@@ -44,6 +44,7 @@ func (e *BoundError) Error() string {
 // Query selects events in ingestion order, strictly after the After cursor.
 type Query struct {
 	VMID   *string // nil: no vm filter
+	BootID *string // nil: no boot filter; payload linkage only for host-wide events
 	Kind   string  // "": no kind filter
 	Family string  // "": no family filter; mutually exclusive with Kind
 	After  string  // "": from the start
@@ -123,6 +124,11 @@ func (s *Store) Query(ctx context.Context, q Query) (QueryResult, error) {
 		// host-wide stream with a NULL vm_id column). No knob; always both arms.
 		where += " AND (vm_id = ? OR json_extract(payload, '$.data.vm_id') = ?)"
 		args = append(args, *q.VMID, *q.VMID)
+	}
+	if q.BootID != nil {
+		// A guest's payload cannot override the envelope's boot identity.
+		where += " AND (boot_id = ? OR (vm_id IS NULL AND boot_id IS NULL AND json_extract(payload, '$.data.boot_id') = ?))"
+		args = append(args, *q.BootID, *q.BootID)
 	}
 	if q.Kind != "" {
 		where += " AND kind = ?"

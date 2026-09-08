@@ -35,7 +35,13 @@ func describeRoute(r route) routeDescription {
 		d.Purpose = "capacity"
 	case "GET /events":
 		d.Purpose = "events"
-		d.Instructions = "Use after=<saved cursor>&limit=<events_page_max or smaller>. Process all events, then persist next_after. An empty page preserves after. Do not advance to latest_event_id: a bounded page may omit intervening events. Optional until freezes the event upper bound. Preserve filters when resuming."
+		d.Instructions = "Use after=<saved cursor>&limit=<events_page_max or smaller>. Process all events, then persist next_after. An empty page preserves after. Do not advance to latest_event_id: a bounded page may omit intervening events. Optional until freezes the event upper bound. Optional vm_id and boot_id scope observation identity; kind and family are mutually exclusive. Preserve filters when resuming."
+	case "GET /events/stream":
+		d.Purpose = "live_events"
+		d.Instructions = "SSE messages carry one event envelope and its durable event_id as id. Resume with Last-Event-ID, which overrides after, and preserve vm_id, boot_id and kind or family filters. Limit is at most 32 per query; tail applies only to the initial page; until is not supported. Idle comments do not advance the cursor. stream_error terminates the connection. This is authenticated shared host observation, not an owner-private feed. Cursors require the same database installation; retention-gap detection is unavailable."
+	case "GET /vms/{id}/coverage":
+		d.Purpose = "capture_coverage"
+		d.Instructions = "Read boot_id before querying a VM's current observations. Channel health describes guest transport; each collector reports its own scope, limitations and loss. Null counts mean unknown, not zero. A healthy collector does not promise complete capture."
 	case "POST /vms":
 		d.Purpose = "launch"
 		key := "$idempotency_key"

@@ -794,3 +794,10 @@ Updated the appliance contract and deployment instructions for HTTP on
 `0.0.0.0:8787`, preserving optional authentication, explicit loopback mode,
 HTTPS requirements, and exact terminal origin checks.
 `uv run docs/validation/check.py` passed **47/47** (exit 0).
+
+## Revision — 2026-09-08, VM introspection work plan
+
+Added the active `s8e2` plan and recorded source-level progress plus the first
+real root/workspace mutation gate. `uv run docs/validation/check.py` passed
+**47/47** (exit 0). Coverage, sensor, browser and network work remain under
+validation; this documentation check does not close the epic or its children.
