@@ -34,6 +34,12 @@ CONFIG_BPF_JIT=y
 CONFIG_DEBUG_INFO_BTF=y
 CONFIG_KPROBES=y
 CONFIG_PERF_EVENTS=y
+# Raw scheduler and syscall hooks require BPF_EVENTS, derived from tracing and
+# kprobe event support. BPF_SYSCALL alone does not enable these program types.
+CONFIG_FTRACE=y
+CONFIG_KPROBE_EVENTS=y
+CONFIG_FTRACE_SYSCALLS=y
+CONFIG_BPF_EVENTS=y
 
 # fanotify
 CONFIG_FANOTIFY=y

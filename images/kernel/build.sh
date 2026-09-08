@@ -115,6 +115,8 @@ docker pull --quiet "$BASE_IMAGE_REF"
 echo "[kernel/build.sh] starting kernel build in docker..."
 
 docker run --rm \
+    -e HOST_UID="$(id -u)" \
+    -e HOST_GID="$(id -g)" \
     -v "$KDIR":/build/linux \
     -v "$FC_CONFIG_PATH":/build/fc.config:ro \
     -v "$FRAGMENT":/build/vmobs.fragment:ro \
@@ -123,6 +125,23 @@ docker run --rm \
     "$BASE_IMAGE_REF" \
     bash -euo pipefail -c '
 set -euo pipefail
+
+# Docker creates files as root; return them even after a failed build so the
+# invoking user can remove the source tree and overwrite artifacts next time.
+restore_ownership() {
+    status=$?
+    trap - EXIT
+    for path in /build/linux /build/dist/vmlinux /build/dist/kernel.config /build/dist/kernel.config.sha256; do
+        if [ -e "$path" ]; then
+            if ! chown -R "$HOST_UID:$HOST_GID" "$path"; then
+                echo "[docker] ERROR: could not restore caller ownership of $path" >&2
+                if [ "$status" -eq 0 ]; then status=1; fi
+            fi
+        fi
+    done
+    exit "$status"
+}
+trap restore_ownership EXIT
 
 echo "[docker] installing build deps..."
 apt-get update -qq

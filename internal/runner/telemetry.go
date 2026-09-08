@@ -251,6 +251,9 @@ func (r *runner) newGuestEnvelope(streamID string, push proto.TelemetryPush, dat
 			}
 		}
 	}
+	if strings.HasPrefix(push.Kind, "proc.") || strings.HasPrefix(push.Kind, "socket.") {
+		normalizeGuestProcess(env, bootID)
+	}
 	if push.GuestWallAt != "" {
 		if t, err := time.Parse(time.RFC3339Nano, push.GuestWallAt); err == nil {
 			env.GuestWallAt = &events.Timestamp{Time: t}
@@ -261,6 +264,35 @@ func (r *runner) newGuestEnvelope(streamID string, push proto.TelemetryPush, dat
 		env.GuestMonotonicNS = &ns
 	}
 	return env
+}
+
+// normalizeGuestProcess binds an observed calling task to its guest lifetime.
+// It does not correlate a file or a host flow, nor grant host process authority.
+func normalizeGuestProcess(env *events.Envelope, bootID string) {
+	env.Sensor = "process"
+	if env.Kind == "proc.loss" {
+		return
+	}
+	env.Quality.Attribution = events.AttributionUnknown
+	env.Quality.Truncated, _ = env.Data["argv_truncated"].(bool)
+	process, ok := env.Data["process"].(map[string]any)
+	if !ok || process["boot_id"] != bootID {
+		return
+	}
+	tgid, ok := process["tgid"].(float64)
+	if !ok || tgid < 1 || tgid > 2147483647 || tgid != float64(int64(tgid)) {
+		return
+	}
+	start, _ := process["process_start_monotonic_ns"].(string)
+	generation, _ := process["exec_generation"].(string)
+	startNS, startErr := strconv.ParseUint(start, 10, 64)
+	_, generationErr := strconv.ParseUint(generation, 10, 64)
+	if !events.DecimalString(start) || !events.DecimalString(generation) || startErr != nil || generationErr != nil || startNS == 0 {
+		return
+	}
+	key := bootID + ":" + strconv.FormatInt(int64(tgid), 10) + ":" + start
+	env.ProcessKey = &key
+	env.Quality.Attribution = events.AttributionExact
 }
 
 // refuseTelemetryKind records one guest event the runner will not spool. Two

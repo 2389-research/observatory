@@ -35,8 +35,15 @@ func TestFilesystemIntrospectionGate(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(stateDir) })
 	opts := []daemonOption{withStateDir(stateDir), withRequiredAuth(m1bOperator, m1bPassword)}
+	if os.Getenv("VMOBS_GUEST_SENSOR_TESTS") == "1" && os.Getenv("VMOBS_PROCESS_SENSOR_TESTS") == "1" {
+		t.Fatal("select one supplemental guest test executable per fixture")
+	}
 	if os.Getenv("VMOBS_GUEST_SENSOR_TESTS") == "1" {
-		fixtureLock := filesystemSensorTestImage(t, findRepoRoot(t))
+		fixtureLock := guestSensorTestImage(t, findRepoRoot(t), "fswatch")
+		opts = append(opts, func(o *daemonOptions) { o.lockFile = fixtureLock })
+	}
+	if os.Getenv("VMOBS_PROCESS_SENSOR_TESTS") == "1" {
+		fixtureLock := guestSensorTestImage(t, findRepoRoot(t), "procwatch")
 		opts = append(opts, func(o *daemonOptions) { o.lockFile = fixtureLock })
 	}
 	d := startDaemon(t, findRepoRoot(t),
@@ -141,10 +148,65 @@ func TestFilesystemIntrospectionGate(t *testing.T) {
 			t.Fatal("guest filesystem sensor tests failed or skipped")
 		}
 	}
+	if os.Getenv("VMOBS_PROCESS_CAPTURE_TESTS") == "1" {
+		t.Run("process_capture", func(t *testing.T) { verifyGuestProcessCapture(t, d, term, id, bootID) })
+	}
+	if os.Getenv("VMOBS_PROCESS_SENSOR_TESTS") == "1" {
+		output := term.runGuest("VMOBS_PROCWATCH_INTEGRATION=1 /usr/local/bin/vmobs-procwatch.test -test.v -test.timeout=90s; result=$?; printf '\\nprocess-fixture-result=%s\\n' \"$result\"", 2*time.Minute)
+		output = strings.ReplaceAll(output, "\r", "")
+		t.Logf("guest process sensor tests: %s", tailOf(output, 16000))
+		if !strings.Contains(output, "\nprocess-fixture-result=0\n") || strings.Contains(output, "--- SKIP:") {
+			t.Fatal("guest process sensor tests failed or skipped")
+		}
+	}
 	if reviewRoot := os.Getenv("VMOBS_BROWSER_REVIEW_DIR"); reviewRoot != "" {
 		term.close()
 		waitFilesystemBrowserReview(t, d, id, reviewRoot)
 	}
+}
+
+func verifyGuestProcessCapture(t *testing.T, d *m1aDaemon, term *gateTerm, id, bootID string) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	var coverage map[string]any
+	for {
+		coverage = d.apiGet(t, "/vms/"+id+"/coverage")
+		ready := false
+		for _, raw := range coverage["collectors"].([]any) {
+			collector := raw.(map[string]any)
+			if stringField(collector, "id") == "process" && stringField(collector, "state") == "healthy" && stringField(collector, "last_success_at") != "" {
+				ready = true
+			}
+		}
+		if ready {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("guestd did not start healthy process capture: %v", coverage)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	term.runGuest(`/bin/sh -c 'exit 0' vmobs-process-proof`, m1bCommandTimeout)
+	deadline = time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		page := d.apiGet(t, "/events?vm_id="+id+"&boot_id="+bootID+"&kind=proc.exec&tail=true&limit=1000")
+		for _, raw := range page["events"].([]any) {
+			event := raw.(map[string]any)
+			data := mapField(event, "data")
+			args, _ := data["argv_display"].([]any)
+			if len(args) != 4 || args[3] != "vmobs-process-proof" {
+				continue
+			}
+			process := mapField(data, "process")
+			if stringField(event, "vm_id") != id || stringField(event, "boot_id") != bootID || stringField(process, "boot_id") != bootID || stringField(event, "sensor") != "process" || stringField(event, "provenance") != "guest_reported" || stringField(mapField(event, "quality"), "attribution") != "exact" || stringField(event, "process_key") == "" {
+				t.Fatalf("durable process evidence lost identity: %v", event)
+			}
+			t.Logf("guestd command reached durable API: event=%s process=%s", stringField(event, "event_id"), stringField(event, "process_key"))
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("terminal command did not reach durable process API")
 }
 
 func waitFilesystemCoverage(t *testing.T, d *m1aDaemon, id string) string {
@@ -214,14 +276,18 @@ func waitFilesystemBrowserReview(t *testing.T, d *m1aDaemon, id, root string) {
 	}
 }
 
-// filesystemSensorTestImage inserts the Linux test executable into a disposable
+// guestSensorTestImage inserts the Linux test executable into a disposable
 // trusted rootfs copy. debugfs operates in userspace; no guest disk is mounted on
 // the host, and the shipped template never contains the test executable.
-func filesystemSensorTestImage(t *testing.T, repoRoot string) string {
+func guestSensorTestImage(t *testing.T, repoRoot, sensor string) string {
 	t.Helper()
+	if sensor != "fswatch" && sensor != "procwatch" {
+		t.Fatal("unrecognized guest sensor fixture")
+	}
 	dir := t.TempDir()
-	binary := filepath.Join(dir, "vmobs-fswatch.test")
-	cmd := exec.CommandContext(t.Context(), "go", "test", "-c", "-o", binary, "./internal/guest/fswatch")
+	executable := "vmobs-" + sensor + ".test"
+	binary := filepath.Join(dir, executable)
+	cmd := exec.CommandContext(t.Context(), "go", "test", "-c", "-o", binary, "./internal/guest/"+sensor)
 	cmd.Dir = repoRoot
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("compile guest sensor tests: %v\n%s", err, out)
@@ -235,8 +301,8 @@ func filesystemSensorTestImage(t *testing.T, repoRoot string) string {
 		t.Fatal(err)
 	}
 	for _, request := range []string{
-		"write " + binary + " /usr/local/bin/vmobs-fswatch.test",
-		"set_inode_field /usr/local/bin/vmobs-fswatch.test mode 0100755",
+		"write " + binary + " /usr/local/bin/" + executable,
+		"set_inode_field /usr/local/bin/" + executable + " mode 0100755",
 	} {
 		cmd := exec.CommandContext(t.Context(), "debugfs", "-w", "-R", request, rootfs)
 		if out, err := cmd.CombinedOutput(); err != nil {

@@ -187,6 +187,7 @@ export interface BatchReply {
  * reader that wants the VM must look in both places.
  */
 export interface EventEnvelope {
+  process_key?: string
   boot_id?: string | null
   guest_wall_at?: string | null
   quality?: Record<string, unknown>

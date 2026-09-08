@@ -8,6 +8,8 @@ import { EventTimeline } from './EventTimeline'
 
 const collectorForFamily: Record<string, string> = {
   fs: 'filesystem',
+  proc: 'process',
+  socket: 'process',
   'net.flow': 'flow',
   dns: 'dns',
   policy: 'denial',
@@ -29,6 +31,8 @@ export function ObservationWorkspace({ vmID }: { vmID: string }) {
           <select value={family} onChange={(event) => setFamily(event.target.value)}>
             <option value="fs">Filesystem Activity</option>
             <option value="">All events</option>
+            <option value="proc">Processes</option>
+            <option value="socket">Connect attempts</option>
             <option value="net.flow">Network flows</option>
             <option value="dns">DNS</option>
             <option value="policy">Policy</option>

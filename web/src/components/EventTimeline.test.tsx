@@ -14,13 +14,89 @@ const event = {
   data: { path: '/workspace/<img src=x>\u202e\u001b', path_status: 'inferred', pid: 42 },
 }
 afterEach(() => vi.unstubAllGlobals())
+it('keeps the selected operation visible after its last event leaves the window', async () => {
+  let advance = false
+  let nextID = 1
+  vi.stubGlobal('fetch', vi.fn(async () => {
+    let events = nextID === 1 ? [event] : []
+    if (advance && nextID <= 601) {
+      events = Array.from({ length: 100 }, () => ({ ...event, event_id: String(++nextID), kind: 'fs.modify' }))
+    }
+    return { ok: true, json: async () => ({ events, next_after: String(nextID), latest_event_id: String(nextID) }) }
+  }))
+  render(<EventTimeline vmID="vm-a" bootID="boot-a" family="fs" captureState="healthy" interval={10} />)
+  await screen.findByRole('button', { name: /closed after write-open/i })
+  await userEvent.selectOptions(screen.getByLabelText('Operation'), 'fs.close_write')
+  advance = true
+  await screen.findByText('No retained events match these filters.')
+  expect(screen.getByLabelText('Operation')).toHaveValue('fs.close_write')
+  expect(screen.getByRole('option', { name: 'Closed after write-open' })).toBeInTheDocument()
+})
+it('shows captured argv and the normalized process identity without claiming a file path', async () => {
+  const processEvent = {
+    ...event,
+    kind: 'proc.exec',
+    process_key: 'boot-a:42:9007199254740993',
+    quality: { path_resolution: 'not_applicable', attribution: 'exact' },
+    data: {
+      pid: 42,
+      argv_display: ['/bin/sh', '<img src=x>\u202e'],
+      argv_status: 'captured',
+      argv_truncated: true,
+    },
+  }
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ events: [processEvent], next_after: '1', latest_event_id: '1' }),
+    })),
+  )
+  const { container } = render(<EventTimeline vmID="vm-a" bootID="boot-a" family="proc" captureState="healthy" />)
+  const row = await screen.findByRole('button', { name: /executable image replaced/i })
+  expect(row).toHaveTextContent('<img src=x><U+202E>')
+  expect(row).toHaveTextContent('arguments truncated')
+  expect(row).toHaveTextContent('PID 42 · exact guest process identity')
+  expect(row).not.toHaveTextContent('Path unresolved')
+  expect(container.querySelector('img')).toBeNull()
+  expect(screen.getByRole('option', { name: 'Executable image replaced' })).toHaveValue('proc.exec')
+})
+
+it('does not promote a process identity claim in guest data', async () => {
+  const processEvent = {
+    ...event,
+    kind: 'socket.connect_result',
+    quality: { attribution: 'unknown' },
+    data: {
+      pid: 42,
+      process_key: 'forged',
+      attribution: 'exact',
+      socket: { destination: '8.8.8.8', destination_port: 443, host_flow_attribution: 'unknown' },
+    },
+  }
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ events: [processEvent], next_after: '1', latest_event_id: '1' }),
+    })),
+  )
+  render(<EventTimeline vmID="vm-a" bootID="boot-a" family="socket" captureState="healthy" />)
+  const row = await screen.findByRole('button', { name: /connect syscall returned/i })
+  expect(row).toHaveTextContent('8.8.8.8:443')
+  expect(row).toHaveTextContent('process identity unknown')
+  expect(row).not.toHaveTextContent('exact guest process identity')
+})
 it('renders hostile paths as inert evidence and distinguishes close-write from content comparison', async () => {
   vi.stubGlobal(
     'fetch',
-    vi.fn(async () => ({ ok: true, json: async () => ({ events: [event], next_after: '1', latest_event_id: '1' }) })),
+    vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ events: [event], next_after: '1', latest_event_id: '1' }),
+    })),
   )
   const { container } = render(<EventTimeline vmID="vm-a" bootID="boot-a" family="fs" captureState="healthy" />)
-  expect(await screen.findByText('Closed after write-open')).toBeInTheDocument()
+  expect(await screen.findByRole('button', { name: /closed after write-open/i })).toBeInTheDocument()
   expect(screen.getByText(/<U\+202E><U\+001B>/)).toBeInTheDocument()
   expect(container.querySelector('img')).toBeNull()
   await userEvent.click(screen.getByRole('button', { name: /closed after write-open/i }))
@@ -46,7 +122,7 @@ it('pauses the displayed window while continuing cursor collection and counting 
     })),
   )
   render(<EventTimeline vmID="vm-a" bootID="boot-a" family="fs" captureState="healthy" interval={10} />)
-  await screen.findByText('Closed after write-open')
+  await screen.findAllByRole('button', { name: /closed after write-open/i })
   await userEvent.click(screen.getByRole('button', { name: 'Pause scrolling' }))
   await waitFor(() => expect(screen.getByText(/unread.*collection continues/i)).toBeInTheDocument())
   expect(screen.getByRole('button', { name: 'Resume scrolling' })).toBeInTheDocument()

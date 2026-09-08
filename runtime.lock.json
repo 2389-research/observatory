@@ -18,13 +18,13 @@
     "version": "6.1.186",
     "source_url": "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.1.186.tar.xz",
     "source_sha256": "eeedc32bbf2448205aff50ee2760a4d87172cf8f8279c1e5930069ad36f6236e",
-    "config_sha256": "dfe94fab204973d13c8bdaebe32153f1ea62cb7301a30a1a24f13ae61036b780",
-    "vmlinux_sha256": "b606768652b4ecf5d8a2651d258e70d8f1892fca9f74c6b5fc2c9031a50ddd31",
+    "config_sha256": "7439d9116d7aea08f33d9ca7e4fc01459511d3d0adee6e398b2abac041e6f1df",
+    "vmlinux_sha256": "90f1ffba91252c70be098bfb37e1b41af6e300a42c1719bac9782bdfbfd52f1c",
     "vmlinux_path": "images/dist/vmlinux",
-    "vmlinux_url": "https://github.com/2389-research/observatory/releases/download/guest-images-6.1.186/vmlinux"
+    "vmlinux_url": ""
   },
   "root_image": {
-    "sha256": "9a9c3b92d75422e5746945fef0aaa7b8ada10c4c914f4f2a0695a4d2117b70da",
+    "sha256": "51fcc41cdf13b94442796f902614e77f8095b462089b0ec7649d01120e6e1ed2",
     "path": "images/dist/rootfs.ext4",
     "base_image_ref": "ubuntu@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517",
     "apt_snapshot": "20260820T000000Z",

@@ -3,6 +3,7 @@ module github.com/2389-research/observatory
 go 1.26.6
 
 require (
+	github.com/cilium/ebpf v0.22.0
 	github.com/coder/websocket v1.8.15
 	github.com/google/uuid v1.6.0
 	github.com/mdlayher/vsock v1.3.0

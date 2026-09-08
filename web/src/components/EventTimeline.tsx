@@ -2,7 +2,15 @@
 // ABOUTME: Pause freezes the display boundary while capture continues; details preserve normalized evidence.
 import { useState } from 'react'
 import { useEventFeed } from '../useObservation'
-import { eventPath, field, HISTORY_LIMIT, matchesEvent, operationLabel, ROW_LIMIT } from '../observation'
+import {
+  eventProcess,
+  eventSubject,
+  field,
+  HISTORY_LIMIT,
+  matchesEvent,
+  operationLabel,
+  ROW_LIMIT,
+} from '../observation'
 import { neutralize } from '../text'
 
 export function EventTimeline({
@@ -104,16 +112,7 @@ export function EventTimeline({
             }}
           >
             <option value="">All operations</option>
-            {[
-              'fs.create',
-              'fs.modify',
-              'fs.close_write',
-              'fs.rename',
-              'fs.delete',
-              'fs.metadata',
-              'fs.loss',
-              'fs.coverage',
-            ].map((kind) => (
+            {[...new Set([...feed.events.map((event) => event.kind), ...(operation ? [operation] : [])])].sort().map((kind) => (
               <option key={kind} value={kind}>
                 {operationLabel(kind)}
               </option>
@@ -151,13 +150,10 @@ export function EventTimeline({
                   <strong>{operationLabel(event.kind)}</strong>
                   <time>{neutralize(event.host_received_at)}</time>
                 </span>
-                <span className="event-path">{eventPath(event)}</span>
+                <span className="event-path">{eventSubject(event)}</span>
                 <span className="observation-note">
                   {neutralize(event.provenance)} · path {neutralize(field(event.quality?.path_resolution) || 'unknown')}{' '}
-                  ·{' '}
-                  {field(event.data.pid)
-                    ? `PID ${neutralize(field(event.data.pid))} · process identity unknown`
-                    : 'Process unknown'}
+                  · {eventProcess(event)}
                 </span>
               </button>
             </li>

@@ -887,5 +887,40 @@ resolution assertion: accepting unresolved paths in every case hid this bug.
 Linux supports per-interface IPv4 forwarding via rtnetlink's IFLA_INET_CONF.
 An nftables ct bytes/packets expression enables conntrack accounting in that
 network namespace when the rule is installed (`nft_ct_get_init`). These are
-candidates for the routed gateway under the existing NET_ADMIN boundary; verify
-them in the confined gate before relying on them. No AppArmor relaxation is implied.
+primitives verified in the real confined Docker gate: namespace-local forwarding,
+TCP/UDP accounting, and denied traffic all passed while parent settings stayed
+unchanged. They still need production gateway wiring. No AppArmor relaxation is implied.
+
+## Guest BPF tracing requires the tracing event configuration
+
+BPF_SYSCALL, BPF_JIT, PERF_EVENTS and BTF alone did not let the pinned guest load
+even a two-instruction raw tracepoint program: Linux returned EINVAL. Enabling
+FTRACE, KPROBE_EVENTS, FTRACE_SYSCALLS and BPF_EVENTS fixed the real guest tests.
+Test production guestd startup separately: a passing supplemental sensor binary
+does not prove that the image starts or transports that collector.
+
+## Descriptor rejection must survive io.ReadFull
+
+A Reader returning all requested bytes plus an error can lose that error through
+io.ReadFull. The privileged descriptor reader returns zero bytes on rejected
+ancillary data, closes received descriptors, and tests split reads and over-limit
+rights. A passed netlink descriptor does not grant the receiver NET_ADMIN;
+privileged snapshots must originate in privd. A sent dump request is not a healthy
+baseline: validate kernel sender, sequence, DONE status and interrupted-dump flags.
+
+## A forwarding connection may be the shared SSH master
+
+Killing the PID that owns a local forwarded port can close other multiplexed SSH
+sessions, including a running gate observer. Wait for the gate's final status and
+remove only its forwarding registration. A browser pass plus truncated teardown
+output is not a complete gate pass; inspect remote ownership and repeat the
+automated gate when its final result was lost.
+
+## Process identity across nonleader exec
+
+Linux `de_thread` changes the executing thread's start time to the former group
+leader's start time. Matching pre-exec argv by that post-exec task start silently
+loses nonleader arguments; dropping the start check lets reused TIDs borrow old
+arguments. Carry an opaque kernel exec-entry token across the transition, retain
+the process lifetime/generation checks, and never expose the task pointer used
+internally as the map key. Keep the actual nonleader `unix.Exec` guest regression.

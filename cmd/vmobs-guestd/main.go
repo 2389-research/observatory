@@ -18,6 +18,7 @@ import (
 
 	"github.com/2389-research/observatory/internal/guest"
 	"github.com/2389-research/observatory/internal/guest/fswatch"
+	"github.com/2389-research/observatory/internal/guest/procwatch"
 )
 
 func main() {
@@ -79,6 +80,7 @@ func main() {
 	// ring while nobody reads is the evidence that nobody was reading.
 	go agent.RunHeartbeat(ctx, guest.HeartbeatInterval)
 	go fswatch.Run(ctx, agent.Telemetry())
+	go procwatch.Run(ctx, agent.Telemetry(), cfg.BootID)
 
 	// Every listener closes on ctx, so whichever returns first, the others are
 	// on their way down too; the first non-nil error is the one worth reporting.

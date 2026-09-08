@@ -76,8 +76,47 @@ export function operationLabel(kind: string): string {
     'fs.metadata': 'Metadata changed',
     'fs.loss': 'Capture loss',
     'fs.coverage': 'Coverage changed',
+    'proc.fork': 'Task created',
+    'proc.exec': 'Executable image replaced',
+    'proc.exec_attempt': 'Exec attempted',
+    'proc.exec_failed': 'Exec failed',
+    'proc.exit': 'Task exited',
+    'proc.loss': 'Process capture loss',
+    'socket.connect_attempt': 'Connect attempted',
+    'socket.connect_result': 'Connect syscall returned',
   }
   return labels[kind] ?? neutralize(kind)
+}
+
+export function eventSubject(event: EventEnvelope): string {
+  if (event.kind.startsWith('proc.')) {
+    const args = event.data.argv_display
+    if (Array.isArray(args) && args.length) {
+      const display = args.slice(0, 4).map((value) => neutralize(field(value).slice(0, 256)))
+      return `${JSON.stringify(display)}${event.data.argv_truncated ? ' · arguments truncated' : ''} · ${neutralize(field(event.data.argv_status) || 'argument status unknown')}`
+    }
+    const comm = field(event.data.comm_display)
+    return comm ? `Task label ${neutralize(comm.slice(0, 256))} · arguments unavailable` : 'Process capture evidence'
+  }
+  if (event.kind.startsWith('socket.')) {
+    const socket = event.data.socket
+    if (socket && typeof socket === 'object') {
+      const data = socket as Record<string, unknown>
+      const destination = field(data.destination)
+      if (destination)
+        return `${neutralize(destination.slice(0, 256))}:${neutralize(field(data.destination_port))} · host flow attribution unknown`
+    }
+    return 'Connect destination unavailable · host flow attribution unknown'
+  }
+  return eventPath(event)
+}
+
+export function eventProcess(event: EventEnvelope): string {
+  const pid = field(event.data.pid)
+  if (!pid) return 'Process unknown'
+  const quality = field(event.quality?.attribution)
+  const identified = field(event.process_key) !== '' && (quality === 'exact' || quality === 'inferred')
+  return `PID ${neutralize(pid)} · ${identified ? `${quality} guest process identity` : 'process identity unknown'}`
 }
 export interface EventFilters {
   path: string

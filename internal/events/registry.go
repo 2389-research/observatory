@@ -19,6 +19,46 @@ type KindInfo struct {
 // kinds absent from this table (SPEC §17: unregistered event kind).
 var registry = []KindInfo{
 	{
+		Kind: "proc.fork", Family: "proc", SchemaVersion: 1, Provenance: GuestReported,
+		Semantics: "A guest kernel task was created, with its process lifetime and reported parent identity.",
+		Caveats:   []string{"A task may be a thread; PID alone is not a process identity.", "Guest-reported hooks can lose events; capture does not establish host process authority."},
+	},
+	{
+		Kind: "proc.exec", Family: "proc", SchemaVersion: 1, Provenance: GuestReported,
+		Semantics: "The guest kernel reported a successful executable image replacement.",
+		Caveats:   []string{"Arguments are bounded and may be unavailable when entry correlation is missing.", "The kernel task label is not an executable path; exec generation is inherited kernel self_exec_id."},
+	},
+	{
+		Kind: "proc.exit", Family: "proc", SchemaVersion: 1, Provenance: GuestReported,
+		Semantics: "A guest task exited with its reported wait status and process lifetime identity.",
+		Caveats:   []string{"Task exit does not prove that every thread in the process has exited.", "Missing observations can leave an incomplete lifecycle."},
+	},
+	{
+		Kind: "proc.exec_attempt", Family: "proc", SchemaVersion: 1, Provenance: GuestReported,
+		Semantics: "A native guest execve or execveat syscall began with bounded argument capture.",
+		Caveats:   []string{"An attempt does not prove successful execution.", "Only four arguments and 63 bytes per argument are captured; truncation and read failures are explicit.", "Arguments are observed user memory at syscall entry and may change before the kernel consumes them."},
+	},
+	{
+		Kind: "proc.exec_failed", Family: "proc", SchemaVersion: 1, Provenance: GuestReported,
+		Semantics: "A native guest exec syscall returned a negative result.",
+		Caveats:   []string{"Arguments are attached only when bounded entry/result correlation matches the exact task lifetime.", "The return value is syscall evidence, not a shell exit code."},
+	},
+	{
+		Kind: "proc.loss", Family: "proc", SchemaVersion: 1, Provenance: GuestReported,
+		Semantics: "The guest task collector reported measured observation loss or an unknown failure interval.",
+		Caveats:   []string{"An unknown loss interval is not zero lost events; recovery does not reconstruct missed activity."},
+	},
+	{
+		Kind: "socket.connect_attempt", Family: "socket", SchemaVersion: 1, Provenance: GuestReported,
+		Semantics: "A native guest connect syscall began with bounded destination and calling-process evidence.",
+		Caveats:   []string{"A descriptor is not a stable socket identity; this event does not prove a packet or host flow.", "Unconnected UDP sends and other socket operations are outside this capture."},
+	},
+	{
+		Kind: "socket.connect_result", Family: "socket", SchemaVersion: 1, Provenance: GuestReported,
+		Semantics: "A native guest connect syscall returned, with its result and available entry correlation.",
+		Caveats:   []string{"A nonblocking in-progress result is not connection completion.", "Socket lifetime and host flow attribution remain unknown without separate matching evidence."},
+	},
+	{
 		Kind:          "fs.create",
 		Family:        "fs",
 		SchemaVersion: 1,
