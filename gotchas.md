@@ -770,3 +770,37 @@ stale, not that it fought.
 The general shape: when a product changes how it is installed, its tests carry
 the old install in their skip messages and prerequisites, and nothing fails.
 Grep the test tree for the old path as part of the move.
+
+## A root build poisons a shared Go cache
+
+The gate container starts as root, builds `vmobs-privd`, then drops to the
+operator's uid to run the suite. Both used the same `GOCACHE`, a named docker
+volume kept across runs so the compile is not paid twice. The root build wrote
+cache entries the gate user could not overwrite, and `go test` died before a
+single test ran:
+
+    FAIL	./tests/integration [setup failed]
+    open /gocache/8e/8e2e...088-d: permission denied
+
+The message names a hash, not an owner, and points at nothing you changed. The
+entrypoint now builds privd under `setpriv` as the gate uid and `install`s the
+binary as root afterwards, so one uid owns every cache entry. A cache volume
+already poisoned by an older run stays poisoned — `docker volume rm
+vmobs-gate-cache` clears it.
+
+Two processes at different uids sharing a build cache is the general shape.
+Whoever writes first decides who can build.
+
+## .dockerignore and a Dockerfile are two files that must agree
+
+`.dockerignore` excludes `tests/` because the appliance image needs none of it.
+`deploy/Dockerfile.gate` copies one file out of `tests/` — the M0 root helper —
+and an excluded COPY source is not a parse error. It fails minutes into a build,
+on the machine with the KVM, saying `"/tests/integration/fixture/
+vmobs-root-helper": not found` about a file that is plainly there.
+
+Docker applies the ignore patterns in order and the last match wins, so a
+negation after a directory exclusion puts one file back. That is how the pinned
+guest images survive the `images` line, and it is how the root helper survives
+`tests/`. `TestDockerfilesCopyFromTheBuildContext` checks every context COPY in
+both Dockerfiles against the ignore file.

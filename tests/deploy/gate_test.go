@@ -207,3 +207,103 @@ func TestGateEvidenceOutlivesTheContainer(t *testing.T) {
 		t.Errorf("VMOBS_EVIDENCE_ROOT=%q is not a mounted directory; --volume destinations are %v", root, dest)
 	}
 }
+
+// TestDockerfilesCopyFromTheBuildContext: .dockerignore was written for the
+// appliance image, which needs no tests and no docs, so it excludes tests/
+// wholesale. The gate Dockerfile copies one file out of tests/ -- the root
+// helper the M0 fixture execs -- and an excluded COPY source is not a parse
+// error. It fails minutes into a build, on the machine with the KVM, saying only
+// "not found" about a file that is plainly there. Two files have to agree and
+// nothing checked that they did.
+func TestDockerfilesCopyFromTheBuildContext(t *testing.T) {
+	patterns := dockerignorePatterns(t)
+	for _, dockerfile := range []string{gateDockerfilePath, "../../deploy/Dockerfile"} {
+		for _, src := range contextCopySources(t, dockerfile) {
+			if pat, excluded := excludedBy(patterns, src); excluded {
+				t.Errorf("%s copies %s, but .dockerignore %q keeps it out of the build context", dockerfile, src, pat)
+			}
+		}
+	}
+}
+
+// dockerignorePatterns reads .dockerignore in file order. Docker applies the
+// patterns in sequence and the last one that matches a path decides its fate, so
+// the order is the meaning.
+func dockerignorePatterns(t *testing.T) []string {
+	raw, err := os.ReadFile(filepath.Join(repoRoot, ".dockerignore"))
+	if err != nil {
+		t.Fatalf("read .dockerignore: %v", err)
+	}
+	var out []string
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
+// contextCopySources returns the COPY sources a Dockerfile takes from the build
+// context. `COPY --from=<stage>` reads out of an image instead, and
+// .dockerignore has nothing to say about those.
+func contextCopySources(t *testing.T, dockerfile string) []string {
+	raw, err := os.ReadFile(dockerfile)
+	if err != nil {
+		t.Fatalf("read %s: %v", dockerfile, err)
+	}
+	var out []string
+	for _, line := range strings.Split(string(raw), "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "COPY ")
+		if !ok {
+			continue
+		}
+		fields := strings.Fields(rest)
+		var args []string
+		fromImage := false
+		for _, f := range fields {
+			if strings.HasPrefix(f, "--") {
+				fromImage = fromImage || strings.HasPrefix(f, "--from=")
+				continue
+			}
+			args = append(args, f)
+		}
+		// The last argument is the destination; everything before it is a source.
+		if fromImage || len(args) < 2 {
+			continue
+		}
+		out = append(out, args[:len(args)-1]...)
+	}
+	return out
+}
+
+// excludedBy answers whether .dockerignore keeps p out of the build context, and
+// names the pattern that decided. Every pattern is tried and the last match
+// wins, so a negation after a directory exclusion puts one file back -- which is
+// how the pinned guest images survive the `images` line.
+func excludedBy(patterns []string, p string) (string, bool) {
+	p = strings.Trim(p, "/")
+	decided, excluded := "", false
+	for _, pat := range patterns {
+		negated := strings.HasPrefix(pat, "!")
+		if !matchesPath(strings.TrimPrefix(pat, "!"), p) {
+			continue
+		}
+		decided, excluded = pat, !negated
+	}
+	return decided, excluded
+}
+
+// matchesPath reports whether a .dockerignore pattern covers a path: either it
+// matches the path itself, or it matches one of its parent directories, because
+// excluding a directory excludes everything under it.
+func matchesPath(pattern, p string) bool {
+	pattern = strings.Trim(pattern, "/")
+	for cur := p; cur != "." && cur != "/"; cur = filepath.Dir(cur) {
+		if ok, err := filepath.Match(pattern, cur); err == nil && ok {
+			return true
+		}
+	}
+	return false
+}

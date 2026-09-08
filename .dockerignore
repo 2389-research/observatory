@@ -15,9 +15,14 @@
 
 bin/
 docs/
-tests/
 web/node_modules/
 web/tsconfig.tsbuildinfo
+
+# tests/ is excluded and one file is put back: the narrow root helper the M0
+# network fixture execs through sudo. deploy/Dockerfile.gate installs it into a
+# throwaway gate image, which is the only place it ever runs.
+tests/
+!tests/integration/fixture/vmobs-root-helper
 
 images
 !images/dist/vmlinux

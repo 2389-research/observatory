@@ -16,6 +16,7 @@ set -euo pipefail
 SRC="${VMOBS_GATE_SRC:-/src}"
 SOCKET=/run/vmobs/privd.sock
 LEDGER=/run/vmobs/privd
+BUILD_DIR=/run/vmobs-gate-build
 UID_WANTED="${VMOBS_GATE_UID:?VMOBS_GATE_UID not set; scripts/vmobs-gate supplies it}"
 GID_WANTED="${VMOBS_GATE_GID:?VMOBS_GATE_GID not set; scripts/vmobs-gate supplies it}"
 
@@ -90,8 +91,17 @@ install -d -o "$UID_WANTED" -g "$GID_WANTED" -m 0755 "${GOCACHE:-/gocache}"
 # privd comes from the checkout under test, not from the appliance image. A gate
 # that ran the image's privd would report on whatever was compiled weeks ago --
 # every privd change would look verified while never having been run.
+#
+# It builds as the gate uid, not as root. The build cache is a named volume
+# shared with the test run that follows, and a root-written cache entry is one
+# the gate user cannot overwrite -- `go test` then dies at setup with a bare
+# "permission denied" naming a hash, which says nothing about who wrote it.
 log "building vmobs-privd from $SRC"
-( cd "$SRC" && go build -o /usr/local/sbin/vmobs-privd ./cmd/vmobs-privd )
+install -d -o "$UID_WANTED" -g "$GID_WANTED" -m 0700 "$BUILD_DIR"
+setpriv --reuid "$UID_WANTED" --regid "$GID_WANTED" --init-groups \
+    env HOME="$SRC" sh -c 'cd "$0" && exec go build -o "$1"/vmobs-privd ./cmd/vmobs-privd' \
+    "$SRC" "$BUILD_DIR"
+install -o root -g root -m 0755 "$BUILD_DIR/vmobs-privd" /usr/local/sbin/vmobs-privd
 
 log "starting vmobs-privd"
 /usr/local/sbin/vmobs-privd \
