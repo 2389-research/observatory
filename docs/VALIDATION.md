@@ -750,3 +750,9 @@ Recorded the merged revision, successful image publication and the real Compose
 test against the registry image. `uv run docs/validation/check.py` returned
 **47/47 package checks passed** (exit 0). No implementation or acceptance verdict
 was changed by this documentation update.
+
+## Revision — 2026-09-07, archive the P4 plan
+
+Added the previously untracked P4 implementation plan with a historical-status
+note pointing to `PLAN.md` and `gotchas.md`. The original plan text remains
+unchanged. `uv run docs/validation/check.py` passed **47/47** (exit 0).
