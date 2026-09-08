@@ -23,6 +23,15 @@ interface StoredKey {
   key: string
 }
 
+/** Mint a UUIDv4 with the Web Crypto primitive available on HTTP origins. */
+function randomUUID(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16))
+  bytes[6] = (bytes[6]! & 0x0f) | 0x40
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0'))
+  return `${hex.slice(0, 4).join('')}-${hex.slice(4, 6).join('')}-${hex.slice(6, 8).join('')}-${hex.slice(8, 10).join('')}-${hex.slice(10).join('')}`
+}
+
 /**
  * The idempotency key for a form's current request.
  *
@@ -42,7 +51,7 @@ export function idempotencyKeyFor(formKey: string, request: unknown): string {
   const fingerprint = JSON.stringify(request)
   const stored = readStoredKey(storageKey)
   if (stored && stored.request === fingerprint) return stored.key
-  const fresh: StoredKey = { request: fingerprint, key: crypto.randomUUID() }
+  const fresh: StoredKey = { request: fingerprint, key: randomUUID() }
   sessionStorage.setItem(storageKey, JSON.stringify(fresh))
   return fresh.key
 }
