@@ -4,24 +4,21 @@
 # To change it, mount your own over this one -- the image never rewrites it:
 #   -v /path/to/my-config.yaml:/etc/vmobs/config.yaml:ro
 #
-# server.mode is loopback_only, so the API binds 127.0.0.1 and is reachable only
-# from this host. That is why deploy/README.md runs the container with
-# --network host: the container's loopback is the host's, and the mode's promise
-# holds. Publishing a port instead would make an unauthenticated API reachable
-# off-host, which config.Validate refuses for exactly that reason -- serving
-# beyond loopback requires mode: https with require_authentication: true.
+# The API listens on every IPv4 interface over HTTP with authentication off.
+# Set public_origin to the URL used by your browser for terminal origin checks.
+# Host networking gives the VM runtime access to host routes and interfaces.
 config_version: 1
 
 server:
-  listen: "127.0.0.1:8787"
+  listen: "0.0.0.0:8787"
   public_origin: "http://127.0.0.1:8787"
-  mode: loopback_only
+  mode: http
   trust_forwarded_identity: false
   tls_cert_file: ""
   tls_key_file: ""
 
 auth:
-  # Host-ACL trust: loopback is the boundary. Turn this on (and run
+  # Any client that can reach the listener can use the API. Turn this on (and run
   # `vmobs-container init-auth`) to require a credential as well.
   mode: local_operator
   require_authentication: false

@@ -810,6 +810,13 @@ When Doctor Biz explicitly delegates a task's design and says to proceed without
 discussion, choose within that scope, state the tradeoff, and finish the work.
 Do not ask again for the design decision he just delegated.
 
+## Remote appliance listener
+
+Doctor Biz expects the appliance to be reachable on the remote host. The shipped
+HTTP listener binds `0.0.0.0:8787` with authentication disabled by request.
+Host networking is a VM runtime requirement, not a reason to bind loopback.
+Set `server.public_origin` to the browser's exact origin for remote terminals.
+
 ## Disk capacity after restart (n0vw)
 
 The restart regression exposed a separate admission limit: startup samples free

@@ -1,5 +1,5 @@
-// ABOUTME: End-to-end smoke tests for the daemon: config in, loopback bind,
-// ABOUTME: real store, /meta answering; non-loopback refused even past config.
+// ABOUTME: End-to-end daemon tests with real listeners, stores, and HTTP requests.
+// ABOUTME: They pin explicit HTTP modes and loopback-only bind enforcement.
 package main
 
 import (
@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -86,14 +87,75 @@ func TestServeAnswersMetaOverLoopback(t *testing.T) {
 	}
 }
 
-// A config object that skipped Validate (or a future bug there) still must not
-// get a non-loopback socket: serve re-checks the address it actually bound.
+// A loopback_only config object that skipped Validate (or a future bug there)
+// still must not get a non-loopback socket: serve checks the address it bound.
 func TestServeRefusesNonLoopbackBind(t *testing.T) {
 	err := serve(context.Background(), testConfig(t, "0.0.0.0:0"), quietLogger(), func(string) {
 		t.Error("ready called for a non-loopback bind")
 	})
 	if err == nil {
 		t.Fatal("serve accepted a non-loopback listen address")
+	}
+}
+
+func TestServeHTTPAnswersMetaOnAllInterfaces(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cfg := testConfig(t, "0.0.0.0:0")
+	cfg.Server.Mode = "http"
+	addrCh := make(chan string, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- serve(ctx, cfg, quietLogger(), func(addr string) { addrCh <- addr })
+	}()
+
+	var addr string
+	select {
+	case addr = <-addrCh:
+	case err := <-errCh:
+		t.Fatalf("serve exited before ready: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("daemon never became ready")
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("split bound address %q: %v", addr, err)
+	}
+	if host != "0.0.0.0" {
+		t.Fatalf("bound host = %q, want 0.0.0.0", host)
+	}
+
+	resp, err := http.Get("http://" + net.JoinHostPort("127.0.0.1", port) + "/api/v1/meta")
+	if err != nil {
+		t.Fatalf("GET /meta through all-interface listener: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GET /meta status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Errorf("serve returned %v on graceful shutdown", err)
+		}
+	case <-time.After(shutdownWait):
+		t.Fatal("daemon did not shut down")
+	}
+}
+
+func TestServeRefusesUnknownModeWhenValidationWasSkipped(t *testing.T) {
+	cfg := testConfig(t, "127.0.0.1:0")
+	cfg.Server.Mode = "unknown"
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := serve(ctx, cfg, quietLogger(), func(string) {
+		t.Error("ready called for an unknown server mode")
+	})
+	if err == nil || !strings.Contains(err.Error(), "server.mode") {
+		t.Fatalf("serve error = %v, want unsupported server.mode error", err)
 	}
 }
 

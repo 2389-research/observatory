@@ -211,14 +211,33 @@ visible by PID. It does not change the appliance's AppArmor profile, seccomp
 profile, capabilities or device grants. privd still authorizes signaling from
 its root-owned ledger; visibility alone grants no VM ownership.
 
+### HTTP listener
+
+The shipped config uses `server.mode: http` and `server.listen: 0.0.0.0:8787`.
+The API and `/ui/` are reachable through the host's IPv4 addresses.
+Authentication remains disabled: any client that can reach port 8787 can use
+the API. `loopback_only` remains available for local access, and `https`
+requires certificates and authentication.
+
+For browser terminals, set `server.public_origin` to the exact browser origin,
+for example `http://192.0.2.10:8787`, without a path or trailing slash. The
+bundled value is `http://127.0.0.1:8787`; listening on all interfaces does not
+relax the terminal's origin check. Copy `deploy/config.yaml`, edit this value,
+and mount it read-only at `/etc/vmobs/config.yaml`. With Compose, add a
+`compose.override.yaml` alongside `compose.yaml`:
+
+```yaml
+services:
+  vmobs:
+    volumes:
+      - ./config.yaml:/etc/vmobs/config.yaml:ro
+```
+
 ### `--network host`, and what it costs
 
-`server.mode: loopback_only` means the API binds `127.0.0.1` and is reachable
-only from this host; `config.Validate` refuses a non-loopback bind in that mode,
-and refuses to serve beyond loopback without TLS and authentication. Publishing
-a port from a bridge network would put an unauthenticated API on the host's
-external interfaces, so the container shares the host's network namespace
-instead and the mode's promise stays literally true.
+The runtime creates host-side VM interfaces and reads host routes from its own
+network namespace, so the container shares the host's network namespace.
+This requirement comes from VM networking, independently of the API listener.
 
 The cost, stated plainly: each VM's `veth-<id>` and its network namespace are
 created in the host's network namespace, not in one of the container's own. They

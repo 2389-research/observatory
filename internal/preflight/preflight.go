@@ -54,7 +54,7 @@ type Config struct {
 	LockPath    string
 	DataDir     string // path to the state data directory (for disk/permissions checks)
 	ProcRoot    string // root for /proc reads; defaults to "/proc" if empty
-	APIMode     string // "loopback_only" or "https"
+	APIMode     string // "loopback_only", "http", or "https"
 	RequireAuth bool   // from config.Auth.RequireAuthentication
 
 	// PrivdSocket is the unix socket path for vmobs-privd. Empty → guest_channel fails.

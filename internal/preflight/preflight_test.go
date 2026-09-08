@@ -484,6 +484,26 @@ func TestAPIBindingHTTPSWithAuth(t *testing.T) {
 	}
 }
 
+func TestAPIBindingHTTP(t *testing.T) {
+	for _, requireAuth := range []bool{false, true} {
+		t.Run(fmt.Sprintf("require_auth=%v", requireAuth), func(t *testing.T) {
+			r := preflight.New(preflight.Config{DataDir: t.TempDir(), APIMode: "http", RequireAuth: requireAuth})
+			report := r.Run(t.Context())
+
+			ab := findCheck(report.Checks, "api_binding")
+			if ab == nil {
+				t.Fatal("api_binding not in report")
+			}
+			if ab.Status != preflight.StatusPass {
+				t.Errorf("api_binding http+auth=%v = %q, want pass", requireAuth, ab.Status)
+			}
+			if !strings.Contains(ab.Summary, "plain HTTP") {
+				t.Errorf("api_binding summary = %q, want plain HTTP disclosure", ab.Summary)
+			}
+		})
+	}
+}
+
 // Loopback with authentication is the strictest binding this daemon can hold:
 // unreachable from the network AND credentialed. config.Validate accepts it —
 // it makes require_authentication: false the exception on loopback, not the

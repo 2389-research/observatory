@@ -787,3 +787,10 @@ revision, actual appliance verification, backup and rollback facts, and zero
 remaining open kata. `uv run docs/validation/check.py` passed **47/47** (exit 0).
 The runtime results come from the separately recorded tests and deployment;
 this package check validates the documentation only.
+
+## Revision — 2026-09-08, remote HTTP listener
+
+Updated the appliance contract and deployment instructions for HTTP on
+`0.0.0.0:8787`, preserving optional authentication, explicit loopback mode,
+HTTPS requirements, and exact terminal origin checks.
+`uv run docs/validation/check.py` passed **47/47** (exit 0).

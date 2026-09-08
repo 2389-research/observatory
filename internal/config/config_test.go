@@ -148,6 +148,14 @@ func TestAuthAndModeValidation(t *testing.T) {
 			c.Auth.SessionCookieSecure = true
 			c.Server.Listen = "0.0.0.0:8787"
 		}, ""},
+		{"http allows non-loopback listen without auth", func(c *config.Config) {
+			c.Server.Mode = "http"
+			c.Server.Listen = "0.0.0.0:8787"
+		}, ""},
+		{"http refuses tls files", func(c *config.Config) {
+			c.Server.Mode = "http"
+			c.Server.TLSCertFile = "c.pem"
+		}, "tls_cert_file"},
 		{"loopback mode refuses tls files", func(c *config.Config) { c.Server.TLSCertFile = "c.pem" }, "tls_cert_file"},
 		{"unknown mode refused", func(c *config.Config) { c.Server.Mode = "tailscale" }, "server.mode"},
 	}

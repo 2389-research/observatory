@@ -21,7 +21,9 @@ Then:
 
 The command pulls `ghcr.io/2389-research/observatory:latest`, which includes
 the guest kernel, root image, AppArmor parser and profile. The API comes up on
-`127.0.0.1:8787`; the UI is at `/ui/`.
+`0.0.0.0:8787`; open `http://<host>:8787/ui/`. Authentication is disabled by
+default. Set `server.public_origin` to your browser's origin in a mounted
+config to use the terminal; see [deployment configuration](deploy/README.md#http-listener).
 
 A short-lived Compose service loads the profile into the shared host kernel
 before the appliance starts. It installs no host packages or configuration files.

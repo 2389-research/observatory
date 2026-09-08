@@ -228,12 +228,12 @@ func managerConfig(cfg *config.Config, tpls map[string]runtime.Template, host ru
 // applied to the lock: the doctor names the file a launch would stage from, and
 // reads it when asked rather than holding a copy from startup.
 // authConfig builds the API's auth boundary from the daemon's config. When auth
-// is off (the dev default: loopback only) the API injects a local_operator/none
-// identity on every request, and the /auth/* routes refuse to log anyone in.
+// is off the API injects a local_operator/none identity on every request, and
+// the /auth/* routes refuse to log anyone in.
 //
 // PublicOrigin is set in both cases. It is not an authentication field: the
 // WebSocket origin gate compares it on every upgrade, so leaving it empty when
-// auth is off refuses every terminal in the configuration the appliance ships.
+// auth is off refuses every terminal in a configuration without this origin.
 func authConfig(cfg *config.Config) (api.AuthConfig, error) {
 	if !cfg.AuthEnabled() {
 		return api.AuthConfig{Enabled: false, PublicOrigin: cfg.Server.PublicOrigin}, nil
@@ -274,6 +274,11 @@ func preflightConfig(cfg *config.Config) preflight.Config {
 func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready func(addr string)) (retErr error) {
 	ctx, cancelWork := context.WithCancel(ctx)
 	defer cancelWork()
+	switch cfg.Server.Mode {
+	case "loopback_only", "http", "https":
+	default:
+		return fmt.Errorf("server.mode %q is not supported: loopback_only, http, or https", cfg.Server.Mode)
+	}
 	if err := verifyRuntimeLock(cfg.Runtime.LockFile, logger); err != nil {
 		return err
 	}
@@ -300,17 +305,21 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready f
 	}
 	logger.Info("store open", "database", cfg.Storage.Database, "journal_mode", diag.JournalMode, "synchronous", diag.Synchronous)
 
-	ln, err := net.Listen("tcp", cfg.Server.Listen)
+	network := "tcp"
+	if host, _, splitErr := net.SplitHostPort(cfg.Server.Listen); splitErr == nil && host == "0.0.0.0" {
+		network = "tcp4"
+	}
+	ln, err := net.Listen(network, cfg.Server.Listen)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", cfg.Server.Listen, err)
 	}
-	// Loopback-only mode: enforce loopback even if config validation was
-	// bypassed (defense in depth). HTTPS mode legitimately binds non-loopback —
-	// config validation already required auth+TLS there.
-	if cfg.Server.Mode != "https" {
+	// Enforce loopback_only against the address actually bound even if config
+	// validation was bypassed. The explicit http and https modes may bind beyond
+	// the host.
+	if cfg.Server.Mode == "loopback_only" {
 		if tcp, ok := ln.Addr().(*net.TCPAddr); !ok || !tcp.IP.IsLoopback() {
 			ln.Close()
-			return fmt.Errorf("bound %s which is not loopback; refusing to serve without an authentication boundary", ln.Addr())
+			return fmt.Errorf("bound %s which is not loopback; server.mode loopback_only refuses to serve", ln.Addr())
 		}
 	}
 
@@ -496,7 +505,7 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready f
 	switch cfg.Server.Mode {
 	case "https":
 		go func() { serveErr <- srv.ServeTLS(ln, cfg.Server.TLSCertFile, cfg.Server.TLSKeyFile) }()
-	default: // loopback_only — bound-address check already ran above
+	case "http", "loopback_only":
 		go func() { serveErr <- srv.Serve(ln) }()
 	}
 	ready(ln.Addr().String())

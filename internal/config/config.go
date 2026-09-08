@@ -62,7 +62,7 @@ type Server struct {
 	PublicOrigin           string `yaml:"public_origin"`
 	Mode                   string `yaml:"mode"`
 	TrustForwardedIdentity bool   `yaml:"trust_forwarded_identity"`
-	// TLSCertFile and TLSKeyFile are required in mode: https; must be empty in loopback_only.
+	// TLSCertFile and TLSKeyFile are required in mode: https; must be empty in plain HTTP modes.
 	TLSCertFile string `yaml:"tls_cert_file"`
 	TLSKeyFile  string `yaml:"tls_key_file"`
 }
@@ -395,8 +395,12 @@ func (c *Config) Validate() error {
 		if c.Server.TLSCertFile != "" || c.Server.TLSKeyFile != "" {
 			add("tls_cert_file/tls_key_file are set but server.mode is loopback_only; a cert nothing serves is a config lie")
 		}
-		// require_authentication: false is legal here and only here —
-		// loopback + host ACLs, the P1–P4 trust model, kept for dev.
+		// require_authentication: false is legal here: loopback + host ACLs,
+		// the P1–P4 trust model, kept for dev.
+	case "http":
+		if c.Server.TLSCertFile != "" || c.Server.TLSKeyFile != "" {
+			add("tls_cert_file/tls_key_file are set but server.mode is http; a cert nothing serves is a config lie")
+		}
 	case "https":
 		if c.Server.TLSCertFile == "" {
 			add("server.mode https requires tls_cert_file")
@@ -414,7 +418,7 @@ func (c *Config) Validate() error {
 			add("server.mode https requires an https:// public_origin, got %q", c.Server.PublicOrigin)
 		}
 	default:
-		add("server.mode %q is not supported: loopback_only or https", c.Server.Mode)
+		add("server.mode %q is not supported: loopback_only, http, or https", c.Server.Mode)
 	}
 	if c.Server.TrustForwardedIdentity {
 		add("server.trust_forwarded_identity is not built in this version; only direct local_operator auth exists")
@@ -479,7 +483,7 @@ func requireLoopback(listen string) error {
 		return fmt.Errorf("%q is not an IP address; use an explicit loopback IP such as 127.0.0.1", host)
 	}
 	if !ip.IsLoopback() {
-		return fmt.Errorf("%s is not a loopback address; loopback_only mode always binds loopback — use server.mode https to serve beyond this host", ip)
+		return fmt.Errorf("%s is not a loopback address; loopback_only mode always binds loopback — use server.mode http or https to serve beyond this host", ip)
 	}
 	return nil
 }
