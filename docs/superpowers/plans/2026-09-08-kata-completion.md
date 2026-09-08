@@ -23,33 +23,33 @@ The live Kata bodies and comments supply each unit's complete acceptance criteri
 
 ## Batch 1: independent safety fixes
 
-- [ ] **8bdk / ryvx — credential lifetime and durability.** `internal/auth`, `internal/api/auth.go`, `cmd/vmobs/auth.go`. One checked maximum; omitted/zero remains permanent, negatives/overflow refuse without minting. Reuse durable file/directory publication; ambiguous revocation retries must confirm durability. Verify real HTTP/CLI/files, reopen, permissions and process-crash behavior; do not claim power-loss testing.
-- [ ] **bxm8 — bounded HTTP.** `cmd/vmobs/main.go`, `cmd/vmobsd/main.go`, `internal/api/terminal_stream.go`. Finite configurable CLI timeout, context-bound requests, bounded responses, retained transport defaults, server body/idle/header bounds and explicit terminal heartbeat. Verify real HTTP/TLS slow peers and WebSocket sessions.
-- [ ] **exf0 — importer health.** `internal/spool`, `internal/situation`, importer status API. Isolate failing VMs, retain bounded diagnostics/counts/success time, coalesce attention and retry with backoff while healthy VMs progress. Verify actual SQLite, segment/cursor faults, recovery and public status. Root wires the importer into the engine in daemon main after HTTP changes land.
+- [x] **8bdk / ryvx — credential lifetime and durability.** `internal/auth`, `internal/api/auth.go`, `cmd/vmobs/auth.go`. One checked maximum; omitted/zero remains permanent, negatives/overflow refuse without minting. Reuse durable file/directory publication; ambiguous revocation retries must confirm durability. Verify real HTTP/CLI/files, reopen, permissions and process-crash behavior; do not claim power-loss testing.
+- [x] **bxm8 — bounded HTTP.** `cmd/vmobs/main.go`, `cmd/vmobsd/main.go`, `internal/api/terminal_stream.go`. Finite configurable CLI timeout, context-bound requests, bounded responses, retained transport defaults, server body/idle/header bounds and explicit terminal heartbeat. Verify real HTTP/TLS slow peers and WebSocket sessions.
+- [x] **exf0 — importer health.** `internal/spool`, `internal/situation`, importer status API. Isolate failing VMs, retain bounded diagnostics/counts/success time, coalesce attention and retry with backoff while healthy VMs progress. Verify actual SQLite, segment/cursor faults, recovery and public status. Root wires the importer into the engine in daemon main after HTTP changes land.
 
 Each implementer owns its named files, reports red/green evidence and leaves commits/closure to root after review. Global docs and daemon main wiring are coordinated to avoid concurrent edits.
 
 ## Batch 2: owned resources and capacity
 
-- [ ] **00e7 — network lease restoration/release.** `internal/network/alloc.go`, `internal/jailer/launch.go`, `internal/jailer/stop.go`, `cmd/vmobsd/runtime_linux.go`. Allocate by VM owner, restore from existing authoritative resources, preserve host-route exclusions and privileged collision checks. Return prefixes only after proven durable teardown. Verify small-pool exhaustion/reuse, failed launch/cleanup, restart with survivors and real Linux networking.
-- [ ] **n0vw — disk admission after restart/reclamation.** `internal/runtime/admission.go`, manager capacity/admission wiring and reservation queries. Refresh real filesystem availability and distinguish already materialized allocation from outstanding reservations conservatively. Do not subtract allocated disk twice or weaken inspection scratch reserves. Verify concurrent creates, surviving allocations, failed observation, and low-headroom real restart/delete/successor admission.
+- [x] **00e7 — network lease restoration/release.** `internal/network/alloc.go`, `internal/jailer/launch.go`, `internal/jailer/stop.go`, `cmd/vmobsd/runtime_linux.go`. Allocate by VM owner, restore from existing authoritative resources, preserve host-route exclusions and privileged collision checks. Return prefixes only after proven durable teardown. Verify small-pool exhaustion/reuse, failed launch/cleanup, restart with survivors and real Linux networking.
+- [x] **n0vw — disk admission after restart/reclamation.** `internal/runtime/admission.go`, manager capacity/admission wiring and reservation queries. Refresh real filesystem availability and distinguish already materialized allocation from outstanding reservations conservatively. Do not subtract allocated disk twice or weaken inspection scratch reserves. Verify concurrent creates, surviving allocations, failed observation, and low-headroom real restart/delete/successor admission.
 
 ## Batch 3: bounded lifecycle and uncertain effects
 
-- [ ] **bm7v / 3dnv — recoverable mutations and shutdown.** `internal/privd/client.go`, `server.go`, `proto.go`, `vmops.go`, `internal/jailer`, `internal/runtime/manager.go`, `batch.go`. First make lost mutation replies distinguishable from failure through queryable identity/outcome or verified host recovery. Preserve atomic UID/CID/subnet claims. Then bound initial/batch launches and shutdown cancellation/drain, retaining independent finalization contexts and preventing workers from accessing closed storage. Verify real socket disconnect/lost reply/duplicate/restart, late effects, queued cancellation and real KVM fault coverage.
-- [ ] **apwk — stalled cleanup retries.** Add a bounded retry pass for unowned stalled work using fresh host observations and per-VM claims. Do not call startup Reconcile from a ticker. Preserve active operations, reservations and manual retry; test transient failures, competing lifecycle work, stale observations and shutdown against real components and real Linux cleanup.
+- [x] **bm7v / 3dnv — recoverable mutations and shutdown.** `internal/privd/client.go`, `server.go`, `proto.go`, `vmops.go`, `internal/jailer`, `internal/runtime/manager.go`, `batch.go`. First make lost mutation replies distinguishable from failure through queryable identity/outcome or verified host recovery. Preserve atomic UID/CID/subnet claims. Then bound initial/batch launches and shutdown cancellation/drain, retaining independent finalization contexts and preventing workers from accessing closed storage. Verify real socket disconnect/lost reply/duplicate/restart, late effects, queued cancellation and real KVM fault coverage.
+- [x] **apwk — stalled cleanup retries.** Add a bounded retry pass for unowned stalled work using fresh host observations and per-VM claims. Do not call startup Reconcile from a ticker. Preserve active operations, reservations and manual retry; test transient failures, competing lifecycle work, stale observations and shutdown against real components and real Linux cleanup.
 
 ## Batch 4: agent control contract
 
-- [ ] **3tn6 — bounded agent vertical slice.** Audit the existing gap map against current code and pinned v1 reference `d432cdced2a346974bf3ca1afa20b56c96c890be`. Preserve v2 routes, boot/revision authority and exact approval/budget semantics. Complete the smallest discoverable executable slice with typed recovery, safe retries and cursor resume; label remaining proposed mechanisms truthfully and record precise follow-up scope rather than importing the v1 roadmap. Verify docs and cold-agent scenarios against actual routes.
+- [x] **3tn6 — bounded agent vertical slice.** Audit the existing gap map against current code and pinned v1 reference `d432cdced2a346974bf3ca1afa20b56c96c890be`. Preserve v2 routes, boot/revision authority and exact approval/budget semantics. Complete the smallest discoverable executable slice with typed recovery, safe retries and cursor resume; label remaining proposed mechanisms truthfully and record precise follow-up scope rather than importing the v1 roadmap. Verify docs and cold-agent scenarios against actual routes.
 
 ## Completion audit
 
-- [ ] Review every issue's numbered acceptance requirements against current code and direct evidence.
-- [ ] Run final canonical and Linux suites, relevant real Docker/KVM and terminal flows, and docs validation.
-- [ ] Commit, PR, publish and deploy verified changes; preserve known limits honestly.
-- [ ] Re-read live Kata inventory. Every remaining issue must be actually completed; new defects discovered in scope cannot disappear into a status summary.
-- [ ] Mark the thread goal complete only after the full backlog and completion audit pass.
+- [x] Review every issue's numbered acceptance requirements against current code and direct evidence.
+- [x] Run final canonical and Linux suites, relevant real Docker/KVM and terminal flows, and docs validation.
+- [x] Commit, PR, publish and deploy verified changes; preserve known limits honestly.
+- [x] Re-read live Kata inventory. Every remaining issue must be actually completed; new defects discovered in scope cannot disappear into a status summary.
+- [x] Mark the thread goal complete only after the full backlog and completion audit pass.
 
 ## Session state
 
@@ -149,3 +149,32 @@ quota guarantees or adding receipt pruning.
 Next: commit and PR, publish the exact merge SHA, back up idle deployment volumes,
 deploy through the existing Compose checkout, verify actual container stop and
 restart, then attach evidence and close the ten live kata. Compaction count1.
+
+
+## Completed — 2026-09-08
+
+All ten kata closed with individual scope, reviewed paths, merged commit, PR and
+test evidence. Fresh live `kata list --status open --json` reports **0 open**.
+Implementation commit `77b6c67` merged through PR #6 as
+`7ac71d8270cdbcb2f198ec39bcbc8dc0c18a2bc3`; both Git trees are identical.
+The PR image build and merged image publication passed. Published image
+`ghcr.io/2389-research/observatory:7ac71d8` runs on aibox03 through
+`/home/harper/observatory-compose-install`, with the original `vmobs-state` and
+`vmobs-runtime` volumes, AppArmor confinement and a 90-second stop grace.
+
+Before migration, the idle appliance was stopped and both volumes archived at
+`/home/harper/vmobs-backups/20260908T154918Z-056bcf6/volumes.tar` (0600 beneath a
+0700 directory). Archive checksum and readability were verified. The previous
+immutable image is
+`ghcr.io/2389-research/observatory@sha256:cd8bde2aa7ba9ea4d7990ac1a92e4100f46320f256383e2e606b0efa55f116d5`.
+Rollback must stop the candidate and restore the cold archive into new named
+volumes, preserving the migrated originals. Review any intervening user work
+before switching to the older snapshot; do not restore over live volumes.
+
+The actual published appliance launched VM
+`d5b33a45-530a-49de-876d-ddaf95a89c6f`, reached running, then fully deleted it;
+all three reservation counters returned to their previous values. The actual
+Compose wrapper subsequently exited 0 without OOM in 128 ms and restarted the
+same release successfully. No smoke VM remains live. No host installation ran.
+The limits described above remain; this completes the ten kata, not unimplemented
+later project milestones or deferred approval/budget mechanisms.
