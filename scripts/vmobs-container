@@ -47,9 +47,8 @@ cmd_start() {
     if [ "$APPARMOR_PROFILE" = unconfined ]; then
         note "WARNING: apparmor=unconfined — the jailer's mounts are not confined"
     fi
-    # --init: firecracker is daemonized by the jailer, so every VMM reparents to
-    #   PID 1. Without a reaper they linger as zombies, and a zombie answers
-    #   kill(pid, 0) — the runtime's liveness check would call a dead VM alive.
+    # --pid host: persisted ownership keeps stable PIDs across container starts.
+    #   Host PID 1 reaps the VMMs daemonized by the jailer.
     # --network host: the API binds loopback (server.mode: loopback_only), so the
     #   container's loopback has to be the host's for anyone to reach it. See the
     #   note at the top of deploy/config.yaml.
@@ -62,7 +61,7 @@ cmd_start() {
     # is removed here -- otherwise the next start reports "already exists" and
     # buries the real reason.
     if ! err="$(docker run --detach --name "$NAME" \
-        --init \
+        --pid host \
         --network host \
         --cap-add SYS_ADMIN \
         --cap-add NET_ADMIN \

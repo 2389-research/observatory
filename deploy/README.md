@@ -147,17 +147,17 @@ was added against a measured denial, recorded in
 
 ## What `start` passes, and why
 
-    --init                     reap the daemonized VMMs
     --network host             the API binds loopback; see below
+    --pid host                 recover VMM ownership across container restarts
     --cap-add SYS_ADMIN        setns, and the jailer's mounts
     --cap-add NET_ADMIN        tap and veth
     --device /dev/kvm          the VMM
     --device /dev/net/tun      the tap devices
     --security-opt apparmor=vmobs-jailer
     --security-opt seccomp=deploy/seccomp/vmobs-jailer.json
-    --tmpfs /run               privd's ledger lives for one privd
+    --tmpfs /run               ephemeral sockets and network-namespace mounts
     -v vmobs-state:/var/lib/vmobs
-    -v vmobs-runtime:/srv/vmobs
+    -v vmobs-runtime:/srv/vmobs # chroots, staging and privd's durable ledger
 
 The three gates, in the order the kernel applies them, are measured in
 `docs/design/container-boundary.md` §5. Short version:
@@ -198,11 +198,18 @@ finds it. The gid differs between hosts; nothing hardcodes it.
 
 Measured in `docs/design/container-boundary.md` §10.
 
-### `--init`
+### `--pid host`
 
-The jailer daemonizes each Firecracker, so every VMM reparents to PID 1. With no
-reaper they stay as zombies, and a zombie answers `kill(pid, 0)` — the runtime's
-liveness check would call a dead VM alive.
+The jailer daemonizes each Firecracker. Sharing the host PID namespace lets the
+host's PID 1 reap those VMMs and lets a replacement privd inspect the same
+process identities after a container restart. Compose and the development
+wrappers therefore use host PID visibility and do not add a container init
+process.
+
+This expands the container's view: processes elsewhere on the host become
+visible by PID. It does not change the appliance's AppArmor profile, seccomp
+profile, capabilities or device grants. privd still authorizes signaling from
+its root-owned ledger; visibility alone grants no VM ownership.
 
 ### `--network host`, and what it costs
 
@@ -237,14 +244,22 @@ Two volumes, and they hold different things:
 
 - `vmobs-state` → `/var/lib/vmobs`: the SQLite database, artifacts, the
   credential store. This is the data worth keeping.
-- `vmobs-runtime` → `/srv/vmobs`: staging directories and the jailer's chroots.
-  Scratch, recreated per VM.
+- `vmobs-runtime` → `/srv/vmobs`: staging directories, jailer chroots and
+  privd's root-owned ledger at `/srv/vmobs/privd`. The ledger directory is mode
+  `0700` and survives container restarts with the resources it authorizes.
 
-`/run` is a tmpfs on purpose. privd's ledger records which jail uid, guest CID
-and subnet each VM holds, and its lifetime is one privd instance — the same
-thing systemd's `RuntimeDirectory=` gives it on bare metal. An entry that
-outlived its privd would hold a slot no VM is using and the next launch would be
-refused as a collision, so the entrypoint clears it at start too.
+Each VM ledger record binds the VM allocation to the host kernel boot and PID
+namespace in which its VMM was created. A replacement privd may signal a
+recorded PID only when those identities still match. A host reboot makes the
+record stale without risking a signal to an unrelated process; unreadable or
+ambiguous ownership fails closed and keeps the allocation reserved for
+operator review.
+
+The durable ledger prevents future restart loss. It does not import legacy
+chroots whose old `/run` ledger has already disappeared, because their files
+cannot establish trusted process ownership. Resolve those unknown resources
+before reusing their allocations; do not create ledger records from manifests
+or jail pidfiles.
 
 `stop` keeps both volumes. To discard them:
 
@@ -291,4 +306,4 @@ flag. Then:
 | probe fails at any step with EACCES | the AppArmor profile is not being applied |
 | probe fails at `tap_create` with ENOENT | `--device /dev/net/tun` missing, or the module is not loaded |
 | probe fails with EPERM elsewhere | `--cap-add SYS_ADMIN` missing |
-| launches fail as a slot collision | a stale ledger; `/run` must be a tmpfs |
+| launches fail as a slot collision | inspect `/srv/vmobs/privd`; do not delete a record while its resources may exist |

@@ -396,20 +396,12 @@ func openProcess(pid int) (*os.Process, error) {
 //
 // This is a host check done at signal time — the server's in-memory ledger may be stale.
 func CheckSignalIdentity(entry VMEntry) error {
-	data, err := os.ReadFile(ProcStatPath(entry.PID))
+	alive, err := entryAlive(entry)
 	if err != nil {
-		// Process gone — starttime cannot match.
-		return &BackendError{
-			Cause:   "invalid_state",
-			Message: "pid recycled",
-		}
+		return &BackendError{Cause: "invalid_state", Message: err.Error()}
 	}
-	cur := ParseStartTime(string(data))
-	if cur == "" || cur != entry.StartTime {
-		return &BackendError{
-			Cause:   "invalid_state",
-			Message: "pid recycled",
-		}
+	if !alive {
+		return &BackendError{Cause: "invalid_state", Message: "pid recycled"}
 	}
 	return nil
 }
@@ -424,6 +416,14 @@ func CheckSignalIdentity(entry VMEntry) error {
 //     Wait up to 10s for <root>/v.sock, then chmod root 0750.
 //  4. Read <root>/firecracker.pid, read /proc/<pid>/stat field 22, return both.
 func (r *RealOps) StartVM(entry *VMEntry, req StartVMReq) (StartVMResp, error) {
+	// Capture kernel identity before launching; neither the caller nor a guest
+	// pidfile supplies the ownership context persisted alongside the process.
+	boot, namespace, err := hostIdentity()
+	if err != nil {
+		return StartVMResp{}, err
+	}
+	entry.BootID, entry.PIDNamespace = boot, namespace
+
 	// Step 1: verify all staged files, keeping each fd open (single-open pipeline).
 	// All files are verified before any jail dir is touched; on any mismatch we
 	// close all open fds and abort.

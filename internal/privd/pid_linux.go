@@ -8,6 +8,8 @@ package privd
 import (
 	"fmt"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -49,13 +51,79 @@ func ParseComm(statLine string) string {
 	return statLine[lparen+1 : rparen]
 }
 
-// PIDAlive reports whether the process at pid is still running with the given starttime.
-// A missing /proc entry, or a mismatched starttime, means not alive.
-func PIDAlive(pid int, starttime string) bool {
+// processAlive distinguishes a dead process from an unreadable identity. Only
+// absence or a different starttime proves the owned process is gone.
+func processAlive(pid int, starttime string) (bool, error) {
+	if pid <= 0 {
+		return false, fmt.Errorf("invalid process ID")
+	}
+	if _, err := strconv.ParseUint(starttime, 10, 64); err != nil {
+		return false, fmt.Errorf("invalid process starttime")
+	}
 	data, err := os.ReadFile(ProcStatPath(pid))
+	if os.IsNotExist(err) {
+		return false, nil
+	}
 	if err != nil {
-		return false
+		return false, fmt.Errorf("read process identity: %w", err)
 	}
 	cur := ParseStartTime(string(data))
-	return cur != "" && cur == starttime
+	if _, err := strconv.ParseUint(cur, 10, 64); err != nil {
+		return false, fmt.Errorf("unreadable process starttime")
+	}
+	if cur != starttime {
+		return false, nil
+	}
+	fields := strings.Fields(string(data)[strings.LastIndex(string(data), ")")+1:])
+	// A zombie has exited and cannot use its jail or identities.
+	return fields[0] != "Z" && fields[0] != "X", nil
+}
+
+// PIDAlive reports whether a process with this starttime is alive. Callers that
+// authorize cleanup must use entryAlive, which preserves observation failures.
+func PIDAlive(pid int, starttime string) bool {
+	alive, err := processAlive(pid, starttime)
+	return err == nil && alive
+}
+
+var bootIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+var pidNamespacePattern = regexp.MustCompile(`^pid:\[[0-9]+\]$`)
+
+func hostIdentity() (string, string, error) {
+	data, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		return "", "", fmt.Errorf("read host boot identity: %w", err)
+	}
+	boot := strings.TrimSpace(string(data))
+	ns, err := os.Readlink("/proc/self/ns/pid")
+	if err != nil {
+		return "", "", fmt.Errorf("read PID namespace identity: %w", err)
+	}
+	if !bootIDPattern.MatchString(boot) || !pidNamespacePattern.MatchString(ns) {
+		return "", "", fmt.Errorf("invalid kernel identity")
+	}
+	return boot, ns, nil
+}
+
+// entryAlive never treats an unknown ownership context as proof of death. A
+// different host boot proves the predecessor exited; a different PID namespace
+// on the same boot cannot prove anything about a process outside our view.
+func entryAlive(entry VMEntry) (bool, error) {
+	if entry.PID == 0 {
+		return false, nil
+	}
+	if !bootIDPattern.MatchString(entry.BootID) || !pidNamespacePattern.MatchString(entry.PIDNamespace) {
+		return false, fmt.Errorf("missing or malformed trusted process ownership")
+	}
+	boot, ns, err := hostIdentity()
+	if err != nil {
+		return false, err
+	}
+	if entry.BootID != boot {
+		return false, nil
+	}
+	if entry.PIDNamespace != ns {
+		return false, fmt.Errorf("process PID namespace differs; ownership cannot be observed")
+	}
+	return processAlive(entry.PID, entry.StartTime)
 }

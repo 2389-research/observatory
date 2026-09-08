@@ -106,7 +106,7 @@ run_gate() {
     note "running the gate as uid $uid against $APPLIANCE"
     note "records land in $EVIDENCE_DIR"
     docker run --rm \
-        --init \
+        --pid host \
         --network host \
         --cap-add SYS_ADMIN \
         --cap-add NET_ADMIN \

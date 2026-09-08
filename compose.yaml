@@ -45,10 +45,9 @@ services:
         # stamps the image "unknown" rather than guessing at a revision.
         SOURCE_REVISION: ${VMOBS_SOURCE_REVISION:-unknown}
 
-    # firecracker is daemonized by the jailer, so every VMM reparents to PID 1.
-    # Without a reaper they linger as zombies, and a zombie answers kill(pid, 0) --
-    # the runtime's liveness check would call a dead VM alive.
-    init: true
+    # The root-owned ledger survives container replacement. Host PIDs keep its
+    # process identities meaningful across starts; host PID 1 reaps jailed VMMs.
+    pid: host
 
     # The API binds loopback (server.mode: loopback_only), so the container's
     # loopback has to be the host's for anyone to reach it.

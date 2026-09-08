@@ -29,7 +29,7 @@ func TestEntrypointArgvParses(t *testing.T) {
 		exp  string
 	}{
 		{"--socket", flags.socket, "/run/vmobs/privd.sock"},
-		{"--ledger-dir", flags.ledgerDir, "/run/vmobs/privd"},
+		{"--ledger-dir", flags.ledgerDir, "/srv/vmobs/privd"},
 		{"--stage-root", flags.stageRoot, "/srv/vmobs/stage"},
 		{"--jail-base", flags.jailBase, "/srv/vmobs/jail"},
 		{"--firecracker", flags.firecracker, "/usr/local/bin/firecracker"},

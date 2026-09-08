@@ -5,6 +5,8 @@
 
 package privd
 
+import "fmt"
+
 // ProcStatPath is a no-op stub on non-linux platforms.
 func ProcStatPath(pid int) string { return "" }
 
@@ -16,3 +18,11 @@ func ParseComm(statLine string) string { return "" }
 
 // PIDAlive always returns false on non-linux platforms (no /proc).
 func PIDAlive(pid int, starttime string) bool { return false }
+
+// entryAlive refuses to infer process death on a platform without Linux procfs.
+func entryAlive(entry VMEntry) (bool, error) {
+	if entry.PID == 0 {
+		return false, nil
+	}
+	return false, fmt.Errorf("process ownership requires Linux procfs")
+}

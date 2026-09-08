@@ -793,3 +793,27 @@ negation after a directory exclusion puts one file back. That is how the pinned
 guest images survive the `images` line, and it is how the root helper survives
 `tests/`. `TestDockerfilesCopyFromTheBuildContext` checks every context COPY in
 both Dockerfiles against the ignore file.
+
+## Restart cleanup needs trusted process ownership (7p8m)
+
+The old container discarded privd's ledger but preserved VM chroots. Recovery
+now persists root-owned ownership under `/srv/vmobs/privd` and uses host PIDs,
+bound to the kernel boot and PID namespace. Unknown identity fails closed;
+daemon manifests and guest-owned pidfiles cannot become root signaling authority.
+Host process visibility increases; AppArmor/seccomp/caps stay unchanged. Old
+orphans without trusted records still need operator resolution. See
+`docs/design/privd-restart-recovery.md`; deployment remains entirely Compose.
+
+## Delegated design decisions
+
+When Doctor Biz explicitly delegates a task's design and says to proceed without
+discussion, choose within that scope, state the tradeoff, and finish the work.
+Do not ask again for the design decision he just delegated.
+
+## Disk capacity after restart (n0vw)
+
+The restart regression exposed a separate admission limit: startup samples free
+disk while existing VMs occupy space; successful deletion releases reservations
+but does not refresh that capacity figure. Near the inspection scratch reserve,
+an equal-size successor can still be refused. Kata `n0vw` tracks the fix; keep
+the actual capacity failure evidence separate from ownership recovery results.

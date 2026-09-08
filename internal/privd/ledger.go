@@ -5,11 +5,15 @@ package privd
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/2389-research/observatory/internal/durable"
+	"golang.org/x/sys/unix"
 )
 
 // VMEntry holds the per-VM identity and resource record stored in the ledger.
@@ -20,6 +24,8 @@ type VMEntry struct {
 	CID           uint32 `json:"cid"`
 	PID           int    `json:"pid"`
 	StartTime     string `json:"start_time"` // decimal string: /proc/<pid>/stat field 22
+	BootID        string `json:"boot_id"`
+	PIDNamespace  string `json:"pid_namespace"`
 	NetCIDR       string `json:"net_cidr"`
 	CreatedAtUnix int64  `json:"created_at_unix"`
 }
@@ -31,14 +37,9 @@ type VMEntry struct {
 // complete entry or none — never a torn one whose uid, cid and pid could be
 // handed to a second VM.
 //
-// Honest limit on what that buys here. The deployed ledger directory is
-// /run/vmobs/privd, a tmpfs (M1a decision D8: VMs never survive a host reboot,
-// so a record that clears at reboot is the correct one, and §5.5 cold reconcile
-// reads the resulting empty ledger). fsync on a tmpfs is a no-op that returns
-// success, so on the deployed path these barriers cost nothing and prove
-// nothing about power loss. What they do buy is that the ledger stays correct
-// if --ledger-dir is ever pointed at a real filesystem, rather than being
-// correct only by accident of where systemd puts /run.
+// The deployed directory lives on the runtime volume and survives appliance
+// replacement. BootID and PIDNamespace bound process identity before any PID
+// observation can authorize signaling or resource cleanup.
 type ledger struct {
 	dir string
 }
@@ -53,13 +54,41 @@ func (l *ledger) path(vmID string) string {
 
 // get returns the entry for vmID, or an error wrapping fs.ErrNotExist if absent.
 func (l *ledger) get(vmID string) (VMEntry, error) {
-	data, err := os.ReadFile(l.path(vmID))
+	// Refuse links and non-regular files before reading, then check the opened
+	// inode. Only privd's uid may supply persistent signaling authority.
+	fd, err := unix.Open(l.path(vmID), unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return VMEntry{}, err
+	}
+	f := os.NewFile(uintptr(fd), l.path(vmID))
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil {
+		return VMEntry{}, err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 || stat.Uid != uint32(os.Geteuid()) {
+		return VMEntry{}, fmt.Errorf("ledger %s: untrusted ownership file", vmID)
+	}
+	data, err := io.ReadAll(f)
 	if err != nil {
 		return VMEntry{}, err
 	}
 	var e VMEntry
 	if err := json.Unmarshal(data, &e); err != nil {
 		return VMEntry{}, fmt.Errorf("ledger decode %s: %w", vmID, err)
+	}
+	if e.VMID != vmID || e.PID < 0 {
+		return VMEntry{}, fmt.Errorf("ledger %s: invalid ownership record", vmID)
+	}
+	// Network-only records carry no VM ownership fields. A missing PID in an
+	// otherwise populated VM record is corruption, never evidence of exit.
+	if e.PID == 0 {
+		if e.UID != 0 || e.GID != 0 || e.CID != 0 || e.StartTime != "" || e.BootID != "" || e.PIDNamespace != "" {
+			return VMEntry{}, fmt.Errorf("ledger %s: incomplete process ownership", vmID)
+		}
+	} else if _, err := strconv.ParseUint(e.StartTime, 10, 64); err != nil || e.CID < minGuestCID || e.UID < 0 || e.GID < 0 {
+		return VMEntry{}, fmt.Errorf("ledger %s: incomplete process ownership", vmID)
 	}
 	return e, nil
 }
@@ -117,7 +146,7 @@ func (l *ledger) all() ([]VMEntry, error) {
 	var out []VMEntry
 	for _, e := range entries {
 		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, ".json") {
+		if !strings.HasSuffix(name, ".json") {
 			continue
 		}
 		id := strings.TrimSuffix(name, ".json")

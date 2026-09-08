@@ -118,7 +118,8 @@ func TestComposeLive(t *testing.T) {
 		t.Fatal("appliance ran despite failed policy load")
 	}
 	compose("up", "-d", "--no-build")
-	client := &http.Client{Timeout: 5 * time.Second}
+	// Forced deletion can wait for both VMM death and privileged cleanup.
+	client := &http.Client{Timeout: 60 * time.Second}
 	request := func(method, route, body string) (map[string]any, error) {
 		req, err := http.NewRequestWithContext(ctx, method, "http://127.0.0.1:8787/api/v1"+route, bytes.NewBufferString(body))
 		if err != nil {
@@ -163,24 +164,133 @@ func TestComposeLive(t *testing.T) {
 	if got := strings.TrimSpace(mustDocker("exec", name, "cat", "/proc/self/attr/current")); got != "vmobs-jailer (enforce)" {
 		t.Fatalf("runtime profile = %q", got)
 	}
-	vm, err := request("POST", "/vms", `{"name":"compose-proof","template_id":"standard","vcpu_count":1,"memory_mib":512,"root_disk_mib":2048,"workspace_disk_mib":1024}`)
-	if err != nil {
-		t.Fatal(err)
+	createVM := func() string {
+		t.Helper()
+		vm, err := request("POST", "/vms", `{"name":"compose-proof","template_id":"standard","vcpu_count":1,"memory_mib":512,"root_disk_mib":2048,"workspace_disk_mib":1024}`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		created, ok := vm["vm"].(map[string]any)
+		if !ok {
+			t.Fatalf("create returned no vm object: %v", vm)
+		}
+		id, ok := created["vm_id"].(string)
+		if !ok || id == "" {
+			t.Fatalf("create returned no vm_id: %v", vm)
+		}
+		await("/vms/"+id, "observed_state", "running")
+		t.Logf("real VM %s reached running under vmobs-jailer", id)
+		return id
 	}
-	created, ok := vm["vm"].(map[string]any)
-	if !ok {
-		t.Fatalf("create returned no vm object: %v", vm)
+	resources := func(id string, present bool) {
+		t.Helper()
+		check := `for resource do test -e "$resource" || exit 1; done`
+		if !present {
+			check = `for resource do test ! -e "$resource" && test ! -L "$resource" || exit 1; done`
+		}
+		mustDocker("exec", name, "sh", "-c", check, "check-vm-resources",
+			"/srv/vmobs/jail/firecracker/"+id,
+			"/srv/vmobs/jail/firecracker/"+id+"/root",
+			"/srv/vmobs/stage/"+id,
+			"/var/lib/vmobs/vms/"+id+"/manifest.json")
 	}
-	id, ok := created["vm_id"].(string)
-	if !ok || id == "" {
-		t.Fatalf("create returned no vm_id: %v", vm)
+	deleteVM := func(id string) {
+		t.Helper()
+		if _, err := request("DELETE", "/vms/"+id+"?force=true", ""); err != nil {
+			t.Fatal(err)
+		}
+		await("/vms/"+id, "observed_state", "deleted")
+		resources(id, false)
 	}
-	await("/vms/"+id, "observed_state", "running")
-	t.Logf("real VM %s reached running under vmobs-jailer", id)
-	if _, err := request("DELETE", "/vms/"+id+"?force=true", ""); err != nil {
-		t.Fatal(err)
+	readManifest := func(id string) map[string]any {
+		t.Helper()
+		data := mustDocker("exec", name, "cat", "/var/lib/vmobs/vms/"+id+"/manifest.json")
+		var manifest map[string]any
+		if err := json.Unmarshal([]byte(data), &manifest); err != nil {
+			t.Fatal(err)
+		}
+		return manifest
 	}
-	await("/vms/"+id, "observed_state", "deleted")
+	capacity := func() map[string]any {
+		t.Helper()
+		status, err := request("GET", "/host/status", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, ok := status["capacity"].(map[string]any)
+		if !ok {
+			t.Fatalf("host status lacks capacity: %v", status)
+		}
+		return result
+	}
+	baseline := capacity()
+	assertReservationsReleased := func() {
+		t.Helper()
+		got := capacity()
+		for _, key := range []string{"reserved_memory_mib", "reserved_vcpu", "reserved_disk_mib"} {
+			if baseline[key] == nil || got[key] != baseline[key] {
+				t.Errorf("%s after deletion = %v, initial = %v", key, got[key], baseline[key])
+			}
+		}
+	}
+	id := createVM()
+	resources(id, true)
+	predecessor := readManifest(id)
+	ledgerPath := "/srv/vmobs/privd/" + id + ".json"
+	ownership := mustDocker("exec", name, "cat", ledgerPath)
+	if mode := strings.TrimSpace(mustDocker("exec", name, "stat", "-c", "%u:%g:%a", "/srv/vmobs/privd")); mode != "0:0:700" {
+		t.Fatalf("privileged ledger ownership/mode = %s", mode)
+	}
+	if out, err := docker("exec", "--user", "2389:2389", name, "cat", ledgerPath); err == nil || !strings.Contains(out, "Permission denied") {
+		t.Fatalf("unprivileged daemon must not read ownership ledger: %v: %s", err, out)
+	}
+
+	// Docker ends the VMM and clears /run. Persistent ownership must still
+	// authorize cleanup of the chroot and manifest on the surviving volumes.
+	compose("restart", "--timeout", "10", "vmobs")
+	await("/meta", "", "")
+	await("/vms/"+id, "observed_state", "failed")
+	resources(id, true)
+	if got := mustDocker("exec", name, "cat", ledgerPath); got != ownership {
+		t.Fatalf("restart changed privileged ownership: before=%s after=%s", ownership, got)
+	}
+	t.Logf("VM %s failed after container restart with its chroot, stage and manifest still present", id)
+	deleteVM(id)
+	assertReservationsReleased()
+
+	// The next VM should reuse the released slot. Retrying the predecessor's
+	// deletion must preserve the new process even though its UID/CID are reused.
+	successorID := createVM()
+	resources(successorID, true)
+	successor := readManifest(successorID)
+	for _, key := range []string{"slot", "uid", "cid"} {
+		if predecessor[key] == nil || successor[key] != predecessor[key] {
+			t.Fatalf("successor did not reuse released %s: predecessor=%v successor=%v", key, predecessor[key], successor[key])
+		}
+	}
+	pid, ok := successor["vmm_pid"].(float64)
+	start, startOK := successor["vmm_starttime"].(string)
+	if !ok || pid <= 0 || !startOK || start == "" {
+		t.Fatalf("successor manifest lacks VMM identity: %v", successor)
+	}
+	assertSuccessorAlive := func() {
+		t.Helper()
+		stat := mustDocker("exec", name, "cat", fmt.Sprintf("/proc/%.0f/stat", pid))
+		// Fields after comm start at field 3; starttime is field 22. Read the
+		// kernel directly so a stale API state cannot hide a killed successor.
+		end := strings.LastIndex(stat, ")")
+		fields := strings.Fields(stat[end+1:])
+		if end < 0 || len(fields) < 20 || fields[0] == "Z" || fields[0] == "X" || fields[19] != start {
+			t.Fatalf("successor VMM identity is no longer live: %s", stat)
+		}
+	}
+	assertSuccessorAlive()
+	deleteVM(id)
+	assertSuccessorAlive()
+	resources(successorID, true)
+	await("/vms/"+successorID, "observed_state", "running")
+	deleteVM(successorID)
+	assertReservationsReleased()
 
 	// Keep the exited setup container: a later up must rerun it rather than
 	// trust yesterday's exit zero after the kernel has lost its policy.
@@ -196,5 +306,5 @@ func TestComposeLive(t *testing.T) {
 	if _, err := os.Stat("/etc/apparmor.d/vmobs-jailer"); !os.IsNotExist(err) {
 		t.Fatal("startup installed a host policy file")
 	}
-	t.Log("PASS: failed loader blocks startup; confined VM lifecycle; profile-loss recovery; repeat up; no host policy file")
+	t.Log("PASS: failed loader blocks startup; confined VM lifecycle; restart orphan reclamation; successor survives delete retry; profile-loss recovery; repeat up; no host policy file")
 }

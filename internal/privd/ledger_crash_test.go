@@ -102,6 +102,7 @@ func TestLedgerCrashChild(t *testing.T) {
 			GID:           2000,
 			CID:           uint32(uid - 10000 + 3),
 			PID:           4000 + i%2,
+			StartTime:     "123",
 			NetCIDR:       "10.199.0.0/30",
 			CreatedAtUnix: 1,
 		}

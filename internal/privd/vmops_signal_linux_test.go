@@ -98,7 +98,8 @@ func TestSignalVMKillsTheProcessTheLedgerNames(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read %s: %v", ProcStatPath(f.pid), err)
 	}
-	entry := VMEntry{VMID: "vm-signal-001", PID: f.pid, StartTime: ParseStartTime(string(statData))}
+	boot, ns := recoveryHost(t)
+	entry := VMEntry{BootID: boot, PIDNamespace: ns, VMID: "vm-signal-001", PID: f.pid, StartTime: ParseStartTime(string(statData))}
 
 	if err := ops.SignalVM(entry, "kill"); err != nil {
 		t.Fatalf("SignalVM: %v", err)
@@ -118,7 +119,8 @@ func TestSignalVMSignalsNothingWhenTheIdentityIsWrong(t *testing.T) {
 	ops, _, _ := guardOps(t)
 	f := spawnFakeFirecracker(t, "--id", "vm-signal-002")
 
-	entry := VMEntry{VMID: "vm-signal-002", PID: f.pid, StartTime: "99999999"}
+	boot, ns := recoveryHost(t)
+	entry := VMEntry{BootID: boot, PIDNamespace: ns, VMID: "vm-signal-002", PID: f.pid, StartTime: "99999999"}
 
 	err := ops.SignalVM(entry, "kill")
 	if err == nil {
@@ -149,7 +151,8 @@ func TestSignalPathsGiveBackTheirDescriptors(t *testing.T) {
 	ops, jailBase, _ := guardOps(t)
 	f := spawnFakeFirecracker(t, "--id", "vm-signal-003")
 
-	stale := VMEntry{VMID: "vm-signal-003", PID: f.pid, StartTime: "99999999"}
+	boot, ns := recoveryHost(t)
+	stale := VMEntry{BootID: boot, PIDNamespace: ns, VMID: "vm-signal-003", PID: f.pid, StartTime: "99999999"}
 	// The pid file names our stand-in, but the jail dir belongs to another VM,
 	// so the argv check withholds the kill.
 	writeJailedPID(t, jailBase, "vm-signal-neighbour", f.pid)

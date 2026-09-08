@@ -756,3 +756,10 @@ was changed by this documentation update.
 Added the previously untracked P4 implementation plan with a historical-status
 note pointing to `PLAN.md` and `gotchas.md`. The original plan text remains
 unchanged. `uv run docs/validation/check.py` passed **47/47** (exit 0).
+
+## Revision — 2026-09-07, privileged restart recovery
+
+Updated the deployment boundary and recovery design for persistent privileged
+ownership and host PID identity. Recorded the real Compose restart/delete/reuse
+result and its limits, including the separate `n0vw` disk-capacity issue.
+`uv run docs/validation/check.py` passed **47/47** (exit 0).

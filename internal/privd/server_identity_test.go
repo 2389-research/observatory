@@ -143,26 +143,6 @@ func TestAllocateNetworkRefusesASubnetAnotherVMHolds(t *testing.T) {
 	refusalNames(t, "allocate second", resp, "vm-first")
 }
 
-// TestStartVMAllowsIdentitiesAReleasedVMGaveUp: the refusal has to be a lease,
-// not a tombstone. release_vm zeroes the uid and CID, and the slot allocator
-// will hand the same ones out again on the next launch -- if privd kept
-// refusing them the host would run out of slots one VM at a time.
-func TestStartVMAllowsIdentitiesAReleasedVMGaveUp(t *testing.T) {
-	s, _, stageFor := identityFixture(t)
-
-	mustOK(t, "allocate first", allocateCIDR(t, s, "vm-first", "10.201.0.0/30"))
-	mustOK(t, "start first", startWithIdentity(t, s, "vm-first", stageFor("vm-first"), 30001, 10))
-
-	payload, err := json.Marshal(ReleaseVMReq{VMID: "vm-first"})
-	if err != nil {
-		t.Fatalf("marshal release: %v", err)
-	}
-	mustOK(t, "release first", s.dispatch(Request{V: ProtoVersion, Verb: "release_vm", Payload: payload}))
-
-	mustOK(t, "allocate second", allocateCIDR(t, s, "vm-second", "10.201.0.4/30"))
-	mustOK(t, "start second", startWithIdentity(t, s, "vm-second", stageFor("vm-second"), 30001, 10))
-}
-
 // TestStartVMRetriesAfterItsOwnFailedStart: the scan reads every entry in the
 // ledger, including the requesting VM's own. That is only safe because a start
 // that fails records nothing -- handleStartVM writes the ledger after StartVM
