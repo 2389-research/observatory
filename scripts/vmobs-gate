@@ -2,15 +2,9 @@
 # ABOUTME: Runs the acceptance gate inside a container built on the appliance image.
 # ABOUTME: Usage: scripts/vmobs-gate [build] [-- <command>]   (default: the gate suite)
 #
-# The gate used to need a host install: a script that put a sudoers file, a
-# systemd unit and two binaries on the operator's machine and enabled a host
-# vmobs-privd. It predated the container by five days and outlived it, so running
-# the gate quietly reinstalled the very thing the container replaced.
-#
-# Everything it did happens here instead, inside a container `docker run --rm`
-# throws away. The host prerequisites are the ones a user installing vmobs
-# already has: docker, /dev/kvm, /dev/net/tun and the loaded AppArmor profile.
-# Nothing here writes to the host.
+# The gate runs in a disposable container. Its host prerequisites are Docker,
+# KVM, TUN and AppArmor; the Compose service loads the appliance image's policy.
+# Nothing here installs host configuration.
 #
 # The container gets exactly the boundary the appliance runs under -- same
 # capabilities, devices, seccomp and AppArmor -- because a gate holding
@@ -56,7 +50,7 @@ environment:
   VMOBS_IMAGE                 appliance image to build on (default: the published one)
   VMOBS_GATE_IMAGE            tag for the gate image
   VMOBS_GATE_EVIDENCE_DIR     host directory the execution records are written to
-  VMOBS_APPARMOR_PROFILE      set to `unconfined` on a host with no profile loaded
+  VMOBS_APPARMOR_PROFILE      explicitly drop mount confinement with `unconfined`
 USAGE
     exit 3
 }
@@ -108,6 +102,7 @@ run_gate() {
 
     mkdir -p "$EVIDENCE_DIR"
 
+    load_apparmor "$APPLIANCE"
     note "running the gate as uid $uid against $APPLIANCE"
     note "records land in $EVIDENCE_DIR"
     docker run --rm \

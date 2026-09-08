@@ -735,3 +735,11 @@ Revision 1 ran several boundary cases the current script does not repeat (invali
 ## Explicitly not established
 
 Runtime correctness, safety against attacks, TLS-client compatibility, actual resource overhead, supported concurrent-VM count, terminal latency, event throughput, durable recovery and final-diff accuracy all require implementation and the real acceptance evidence described in `ACCEPTANCE.md`. The source verification ledger establishes external design premises only. The agent-interface additions raise the bar further: interaction-budget compliance (AT-102), situation/attention correctness (AT-089..091) and run-report truthfulness (AT-092..095) are all implementation claims that only the acceptance suite can establish.
+
+## Revision — 2026-09-07, Compose policy loader
+
+Updated the installation and gate guidance to use the short-lived Compose
+AppArmor loader, with no host installer. `uv run docs/validation/check.py`
+returned **47/47 package checks passed** (exit 0). This validates the docs
+package; the real Compose and VM measurements are recorded in
+`docs/design/container-boundary.md` §11 and `PLAN.md`.

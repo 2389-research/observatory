@@ -1,52 +1,12 @@
-// ABOUTME: Checks the AppArmor profile is installed to survive a reboot, and
-// ABOUTME: that start refuses when the host's copy is missing or out of date.
+// ABOUTME: Checks startup loads the bundled AppArmor policy through Compose.
+// ABOUTME: Host configuration files are neither prerequisites nor install targets.
 package deploy_test
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
-
-const (
-	installScriptPath = "../../deploy/install-apparmor.sh"
-	// Where AppArmor looks at boot. A profile loaded with apparmor_parser and
-	// nothing else lives only in the running kernel.
-	profileInstallDir = "/etc/apparmor.d/"
-)
-
-// TestInstallScriptPutsTheProfileWhereBootLooks is the whole point of the
-// script. `apparmor_parser -r deploy/apparmor/vmobs-jailer` loads a profile into
-// the running kernel and leaves nothing behind, so the next reboot has no
-// vmobs-jailer and `docker run --security-opt apparmor=vmobs-jailer` fails
-// outright -- the appliance does not come up until someone remembers the
-// command. Measured 2026-09-06 on aibox03: the profile had been loaded five
-// times that day and /etc/apparmor.d/vmobs-jailer did not exist.
-func TestInstallScriptPutsTheProfileWhereBootLooks(t *testing.T) {
-	s := readFile(t, installScriptPath)
-
-	if !strings.Contains(s, profileInstallDir) {
-		t.Errorf("%s never writes to %s; a profile it only parses is gone after a reboot",
-			installScriptPath, profileInstallDir)
-	}
-	if !strings.Contains(s, "apparmor_parser") {
-		t.Errorf("%s installs the file but never loads it; the running kernel would keep the old profile until a reboot",
-			installScriptPath)
-	}
-	// Installing after loading would load whatever was there before. The order
-	// is read from the code alone: the comments above it name both steps, in the
-	// order they are explained rather than the order they run.
-	code := shellCode(s)
-	install := strings.Index(code, profileInstallDir)
-	parse := strings.Index(code, "apparmor_parser")
-	if install < 0 || parse < 0 {
-		t.Fatalf("%s: install at %d, load at %d in its executable lines; both have to be there",
-			installScriptPath, install, parse)
-	}
-	if install > parse {
-		t.Errorf("%s loads the profile before installing it; the load would read the previous copy",
-			installScriptPath)
-	}
-}
 
 // shellCode drops comment lines so an assertion about what a script does is not
 // answered by what its comments say.
@@ -62,8 +22,7 @@ func shellCode(s string) string {
 }
 
 // operatorScripts are the two commands an operator runs to start a container:
-// the appliance and the acceptance gate. Both hand docker the same profile, so
-// both owe the operator the same refusals when the host's copy is wrong.
+// the appliance and the acceptance gate. Both use the Compose policy loader.
 var operatorScripts = []string{
 	"../../scripts/vmobs-container",
 	"../../scripts/vmobs-gate",
@@ -97,50 +56,47 @@ func readShellUnit(t *testing.T, path string) string {
 	return strings.Join(parts, "\n")
 }
 
-// TestStartChecksTheInstalledProfileMatchesTheRepo: a stale profile is the
-// expensive failure, because it is silent. docker accepts any loaded profile by
-// name, so the container starts, privd's probe passes whatever the old rules
-// allowed, and the mismatch surfaces later as a denial in the middle of a launch.
-// That cost several rebuild-and-restart cycles on 2026-09-06.
-//
-// The check compares the repo's profile with the copy in /etc/apparmor.d,
-// because that is all an operator can read: /sys/kernel/security/apparmor/profiles
-// is 0444 root-only, so what the kernel actually holds is not observable here.
-// The message has to say which of the two it compared.
-func TestStartChecksTheInstalledProfileMatchesTheRepo(t *testing.T) {
+// The image and kernel are the sources of policy; an installed host file can
+// survive independently and must never be used to decide whether startup is safe.
+func TestStartupUsesComposePolicyLoader(t *testing.T) {
 	for _, path := range operatorScripts {
-		s := readShellUnit(t, path)
-
-		if !strings.Contains(s, profileInstallDir) {
-			t.Errorf("%s never looks at %s; a stale loaded profile starts fine and fails mid-launch",
-				path, profileInstallDir)
-			continue
+		s := shellCode(readShellUnit(t, path))
+		const invoke = `VMOBS_IMAGE="$1" docker compose -f "$REPO/compose.yaml" run --rm --no-deps apparmor`
+		if !strings.Contains(s, invoke) {
+			t.Errorf("%s does not invoke the shared Compose loader with the selected image", path)
 		}
-		if !strings.Contains(s, "install-apparmor.sh") {
-			t.Errorf("%s does not name deploy/install-apparmor.sh; the refusal has to carry the command that fixes it",
-				path)
+		for _, forbidden := range []string{"/etc/apparmor.d/", "cmp -s", "apparmor_parser", "install-apparmor.sh"} {
+			if strings.Contains(s, forbidden) {
+				t.Errorf("%s still manages host policy directly with %q", path, forbidden)
+			}
+		}
+		body := shellCode(readFile(t, path))
+		image := "$tag"
+		if path == gateScriptPath {
+			image = "$APPLIANCE"
+		}
+		load := strings.Index(body, `load_apparmor "`+image+`"`)
+		run := strings.Index(body, "docker run")
+		if load < 0 || run < load {
+			t.Errorf("%s must load policy from %s before starting the container", path, image)
 		}
 	}
 }
 
-// TestStartSaysSoWhenTheHostHasNoAppArmor: preflight_host checked that the
-// profile file was in the repo, which says nothing about the host. On a host
-// without AppArmor that check passes and docker then refuses with its own error
-// about a profile it cannot find -- which reads like a missing profile rather
-// than a kernel that has no AppArmor at all.
+func TestNoAppArmorHostInstallerRemains(t *testing.T) {
+	if _, err := os.Stat("../../deploy/install-apparmor.sh"); !os.IsNotExist(err) {
+		t.Fatalf("host policy installer must be absent, stat returned %v", err)
+	}
+}
+
 func TestStartSaysSoWhenTheHostHasNoAppArmor(t *testing.T) {
 	for _, path := range operatorScripts {
 		s := readShellUnit(t, path)
-
-		const enabledFlag = "/sys/module/apparmor/parameters/enabled"
-		if !strings.Contains(s, enabledFlag) {
-			t.Errorf("%s never reads %s; it cannot tell a host without AppArmor from an unloaded profile",
-				path, enabledFlag)
+		if !strings.Contains(s, "/sys/module/apparmor/parameters/enabled") {
+			t.Errorf("%s does not distinguish a host without AppArmor", path)
 		}
-		// The escape hatch has to be named, or the only advice is "install AppArmor".
 		if !strings.Contains(s, "VMOBS_APPARMOR_PROFILE=unconfined") {
-			t.Errorf("%s does not name VMOBS_APPARMOR_PROFILE=unconfined; an operator on a host without AppArmor is left with no way to run at all",
-				path)
+			t.Errorf("%s omits the existing explicit unconfined override", path)
 		}
 	}
 }

@@ -26,39 +26,37 @@
 
 `scripts/linux '<command>'` rsyncs the working tree to `$HOST:$DEST/` (excluding `.git` and `.superpowers`; gitignored paths are excluded from transfer AND shielded from `--delete`, so build outputs such as `images/dist/` survive re-syncs), then SSH-execs `<command>` inside the remote copy. Every task in the Linux track uses it for remote compilation and testing.
 
-## One-time setup
+## Host prerequisites
 
-Two things, and only the first needs root:
+The host needs Docker with Compose, AppArmor enabled, `/dev/kvm`,
+`/dev/net/tun`, and an operator with access to Docker. No manual profile load or
+host package installation is part of Observatory setup.
 
-```
-ssh -t "$VMOBS_LINUX_HOST" 'cd vmobs-build && sudo sh deploy/install-apparmor.sh'
-sudo usermod -aG docker "$USER"    # if not already; re-login to take effect
-```
-
-The AppArmor step is root because Docker takes a profile by *name* and asks the
-kernel for one already loaded — there is no Docker API that loads a profile, so
-no compose file or script can. It is the only privileged step in the whole
-install, and `apparmor_parser -r` alone does not survive a reboot: the script
-also writes the profile to `/etc/apparmor.d/`.
-
-Nothing else is installed on this host. Firecracker, the jailer, `vmobs-privd`,
-the guest kernel and the root image all live inside the appliance image, and the
-acceptance gate builds its own throwaway container on top of that image. There is
-no host installer, no sudoers fragment and no systemd unit — a host install would
-put a second privd underneath the container and quietly answer for it.
+Firecracker, the jailer, `vmobs-privd`, the guest kernel, root image and AppArmor
+parser/profile live inside the appliance image. A short-lived Compose service
+loads that profile into the shared host kernel before the appliance starts.
+This changes kernel policy but installs no `/etc/apparmor.d` file, sudoers
+fragment or systemd unit. The acceptance gate uses the same loader and builds
+its own throwaway test container on top of the appliance image.
 
 ## Running the appliance
 
 ```
 scripts/linux 'true'                       # sync
-ssh "$VMOBS_LINUX_HOST" 'cd vmobs-build && scripts/vmobs-container up'
+ssh "$VMOBS_LINUX_HOST" 'cd vmobs-build && docker compose up -d'
 ```
 
-`up` fetches the guest images, runs the host preflight, builds the image from the
-checkout and starts the container. `docker compose up -d` does the same against
-the published image instead. `scripts/vmobs-container status` reports container
+Compose uses the published image and waits for the AppArmor loader to succeed.
+For a local build, `scripts/vmobs-container up` fetches the guest images, runs
+the host preflight, builds from the checkout and uses the same loader before
+starting the container. `scripts/vmobs-container status` reports container
 state, image revision, whether privd's socket is bound, and whether the API
 answers. `deploy/README.md` explains what the container is granted and why.
+
+After a host reboot, run `docker compose up -d` again. The profile lives in the
+running kernel, so startup must reload it; `docker start` and `docker restart`
+do not run the loader. Inspect a failed setup with `docker compose logs apparmor`
+and retry Compose startup after fixing the reported cause.
 
 ## Running the acceptance gate
 
@@ -70,7 +68,8 @@ The gate builds a container on the appliance image, adds a Go toolchain and the
 M0 fixture's root helper, provisions the fixture group and `/srv/vmobs` tree
 inside it, builds `vmobs-privd` from the mounted source and runs it, then runs
 the suite as the operator's own uid. `docker run --rm` throws all of it away. See
-`tests/integration/README.md`.
+`tests/integration/README.md`. Before starting the test container, it loads the
+profile through the same Compose service.
 
 The gate builds privd from source on every run rather than using the image's
 copy, so a privd change is always the one under test.

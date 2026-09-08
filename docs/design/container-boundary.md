@@ -20,6 +20,10 @@ The review chose option 4 (§8), and §10 records what the build measured. Where
 §10 and an earlier section disagree, §10 is what a machine did and the earlier
 section is what someone expected it to do; §10 wins and says so.
 
+The Compose loader design in §11 supersedes §10's final host-installer remedy.
+The earlier measurements remain evidence of the runtime boundary, not evidence
+that the loader has passed its separate Linux checks.
+
 ## 1. Method, and why it is the part that matters
 
 v1 has a plan doc with container measurements
@@ -542,12 +546,55 @@ checkout, which loads into the running kernel and leaves nothing behind:
 every reboot, and `docker run --security-opt apparmor=vmobs-jailer` would have
 refused to start the appliance until someone reran the command by hand.
 
-`deploy/install-apparmor.sh` installs it where the host loads it at boot and
-then loads it, and `start` refuses up front when the installed copy is missing
-or differs from the repo's. The comparison is between those two files because
+The initial remedy was a host installer that copied the profile into
+`/etc/apparmor.d` and loaded it, with `start` refusing when that copy was missing
+or differed from the repo's. That remedy is superseded by §11; no host installer
+ships now. The comparison was between those two files because
 what the kernel holds is not readable without root — `/sys/kernel/security/apparmor/profiles`
 is `0444` root-only — and the refusal says which two it compared. A stale
 profile is the case worth catching: docker accepts any loaded profile by name,
 so the container starts clean and the mismatch surfaces minutes later as a
 denied mount in the middle of a launch. Four of this document's five denials
 were found that way.
+
+## 11. Compose policy loader (2026-09-07)
+
+Doctor Biz approved a short-lived Compose service with policy-management
+authority so installation is `docker compose up -d`. Docker still selects the
+runtime profile by name. A helper can load that name into the shared kernel
+before Docker starts the appliance; the earlier conclusion that Compose could
+not arrange this was too broad.
+
+The `apparmor` service uses the same appliance image as `vmobs`, containing the
+parser and bundled profile. It invokes `apparmor_parser --replace --skip-cache`
+directly, with all capabilities dropped except `MAC_ADMIN`,
+`apparmor=unconfined` on the loader only, no network, a read-only image
+filesystem, and a read-write securityfs bind. It receives no Docker socket or
+host root mount. No host packages, configuration files, systemd units or sudoers
+entries are installed. Loading policy still changes the shared host kernel and
+can affect other processes using the same profile name.
+
+The appliance depends on the loader's successful completion and retains its
+existing AppArmor/seccomp profiles, capabilities, devices, uid split and named
+volumes. The developer wrappers and integration gate use this same loader for
+the supported default `vmobs-jailer` profile. The explicit `unconfined` override
+remains for development only; the loader does not manage arbitrary profiles.
+
+The startup command after a host reboot is also `docker compose up -d`, which
+must reload the bundled policy before the appliance starts. Plain `docker
+start` or `docker restart` cannot run that dependency. No claim of automatic
+boot-time loading is made.
+
+Measured on aibox03 with Docker 27.2.1, Compose 2.29.2 and AppArmor parser 4.0.1:
+the loader needs only `MAC_ADMIN`; removing it refuses policy replacement.
+A separate container reported the probe profile in enforce mode.
+
+`TestComposeLive` then passed against the built appliance image. Starting from
+an absent policy and fresh volumes, an invalid parser input blocked appliance
+startup. Correcting that input started the appliance under `vmobs-jailer
+(enforce)`, with a passing preflight, and a real VM reached `running` then
+`deleted`. Stopping the appliance and unloading its unused policy simulated
+the kernel state after reboot. A later `compose up -d` reloaded it despite the
+previous setup container's successful exit; a further `up` also succeeded.
+The host's `/etc/apparmor.d/vmobs-jailer` remained absent throughout. No host
+reboot was performed. The test owns and removes its named containers and volumes.

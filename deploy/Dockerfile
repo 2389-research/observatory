@@ -71,10 +71,11 @@ FROM ${RUNTIME_IMAGE}
 
 # iproute2 and nftables are the network verbs privd runs; e2fsprogs is mkfs.ext4,
 # which the daemon runs to build each VM's config and workspace disks; jq reads
-# the lock in the entrypoint. util-linux (setpriv) ships in the base image.
+# the lock in the entrypoint. apparmor provides the Compose policy loader.
+# util-linux (setpriv) ships in the base image.
 RUN apt-get update -qq \
- && apt-get install -y --no-install-recommends \
-      iproute2 nftables e2fsprogs jq ca-certificates \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      iproute2 nftables e2fsprogs jq ca-certificates apparmor \
  && rm -rf /var/lib/apt/lists/*
 
 # The daemon's identity. Fixed ids so a state volume written by one build is
@@ -102,6 +103,7 @@ COPY runtime.lock.json /opt/vmobs/runtime.lock.json
 COPY images/dist/vmlinux /opt/vmobs/images/dist/vmlinux
 COPY images/dist/rootfs.ext4 /opt/vmobs/images/dist/rootfs.ext4
 
+COPY deploy/apparmor/vmobs-jailer /etc/apparmor.d/vmobs-jailer
 COPY deploy/config.yaml /etc/vmobs/config.yaml
 COPY deploy/templates/ /etc/vmobs/templates/
 COPY deploy/entrypoint.sh /usr/local/bin/vmobs-entrypoint

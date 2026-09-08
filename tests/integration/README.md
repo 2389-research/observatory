@@ -22,21 +22,25 @@ profile the appliance runs under — `docs/design/container-boundary.md` §5. A 
 holding privileges no user has would prove nothing about what users can do, so
 `tests/deploy/gate_test.go` fails if the two ever drift apart.
 
-Nothing is installed on the host. The container creates the `vmobs-fixture`
-group, the root helper's sudoers grant and the `/srv/vmobs` tree for itself, and
+Before starting the test container, the gate uses the appliance's Compose loader
+to load the bundled AppArmor profile into the shared host kernel. No host
+packages or configuration files are installed. The container creates the
+`vmobs-fixture` group, the root helper's sudoers grant and the `/srv/vmobs` tree for itself, and
 `docker run --rm` throws all of it away.
 
 ### Host prerequisites
 
 The same ones anybody installing vmobs already has:
 
-- Docker, and a user in the `docker` group
+- Linux with Docker, Compose, AppArmor enabled, and access to Docker
 - `/dev/kvm` and `/dev/net/tun`
-- The AppArmor profile loaded: `sudo sh deploy/install-apparmor.sh`
 
-On a host with no AppArmor at all, `VMOBS_APPARMOR_PROFILE=unconfined` runs the
-suite without it. That is a weaker boundary than the appliance ships, so say so
-in anything you claim from such a run.
+No manual profile step is needed: the gate uses the same Compose loader as the
+appliance and refuses to run if loading fails. It loads only the supported
+default `vmobs-jailer` profile. `VMOBS_APPARMOR_PROFILE=unconfined` skips the
+loader for development runs without AppArmor confinement. That is a weaker
+boundary than the appliance ships, so say so in anything you claim from such a
+run.
 
 ### Running on a remote Linux host
 

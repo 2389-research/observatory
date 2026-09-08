@@ -85,34 +85,17 @@ preflight_host() {
   Check that KVM is enabled in firmware and the kvm module is loaded (lsmod | grep kvm)."
     [ -c /dev/net/tun ] || die "/dev/net/tun is missing — load the tun module (modprobe tun)."
     [ -f "$SECCOMP_PROFILE" ] || die "missing $SECCOMP_PROFILE"
-    # "unconfined" is docker's own reserved value for "no profile", so it names
-    # no file and the file check cannot pass for it. It is how the container comes
-    # up on a host where the profile has not been loaded yet -- loading it is root
-    # work, and root work is a step an operator takes deliberately. It drops the
-    # mount confinement, so cmd_start says so out loud rather than letting a
-    # weaker boundary pass quietly for the shipped one.
+    # Preserve the explicit development override; the default always loads the
+    # bundled policy before starting a confined container.
     case "$APPARMOR_PROFILE" in
         unconfined) ;;
         *) preflight_apparmor ;;
     esac
 }
 
-# preflight_apparmor checks the two things docker's own error cannot separate:
-# a host with no AppArmor at all, and a host whose loaded profile is older than
-# the repo's.
-#
-# What the kernel actually holds is not readable here --
-# /sys/kernel/security/apparmor/profiles is 0444 root-only -- so the comparison
-# is against /etc/apparmor.d/<name>, the copy the host loads at boot. That is
-# the honest check, and it catches the failure that costs the most: docker
-# accepts any loaded profile by name, so a stale one starts cleanly and then
-# denies a mount in the middle of a launch, minutes later and nowhere near the
-# cause.
+# preflight_apparmor distinguishes a missing host facility from an unloaded
+# policy. The Compose loader replaces policy from the selected image at startup.
 preflight_apparmor() {
-    src="$REPO/deploy/apparmor/$APPARMOR_PROFILE"
-    dest="/etc/apparmor.d/$APPARMOR_PROFILE"
-    [ -f "$src" ] || die "missing deploy/apparmor/$APPARMOR_PROFILE"
-
     enabled=""
     [ -r /sys/module/apparmor/parameters/enabled ] && enabled="$(cat /sys/module/apparmor/parameters/enabled)"
     if [ "$enabled" != "Y" ]; then
@@ -121,17 +104,13 @@ preflight_apparmor() {
     VMOBS_APPARMOR_PROFILE=unconfined $PROG start
   (that drops the mount confinement; seccomp and the capabilities still apply.)"
     fi
-
-    if [ ! -f "$dest" ]; then
-        die "$APPARMOR_PROFILE is not installed at $dest, so this host does not load it at boot.
-  Install and load it once, as root:
-    sudo sh deploy/install-apparmor.sh"
-    fi
-    if ! cmp -s "$src" "$dest"; then
-        die "the profile installed at $dest differs from deploy/apparmor/$APPARMOR_PROFILE.
-  docker would accept the installed one by name and the difference would surface
-  later, as a denied mount in the middle of a launch. Reload it, as root:
-    sudo sh deploy/install-apparmor.sh"
-    fi
 }
 
+# load_apparmor uses the exact Compose setup service with the caller's image.
+# A failed loader stops startup; there is no host profile installation to repair.
+load_apparmor() {
+    [ "$APPARMOR_PROFILE" != unconfined ] || return 0
+    note "loading AppArmor policy from $1"
+    VMOBS_IMAGE="$1" docker compose -f "$REPO/compose.yaml" run --rm --no-deps apparmor \
+        || die "AppArmor policy loading failed; the container was not started. See the Compose loader output above."
+}

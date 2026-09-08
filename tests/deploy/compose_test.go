@@ -30,8 +30,7 @@ type composeService struct {
 	Restart     string   `yaml:"restart"`
 }
 
-// loadService returns the one service compose.yaml declares. More than one, and
-// the checks below would be asserting against whichever the map iterated first.
+// loadService returns the appliance service, independently of setup services.
 func loadService(t *testing.T) composeService {
 	t.Helper()
 	raw, err := os.ReadFile(composePath)
@@ -39,18 +38,20 @@ func loadService(t *testing.T) composeService {
 		t.Fatalf("read %s: %v", composePath, err)
 	}
 	var c struct {
-		Services map[string]composeService `yaml:"services"`
+		Services map[string]yaml.Node `yaml:"services"`
 	}
 	if err := yaml.Unmarshal(raw, &c); err != nil {
 		t.Fatalf("parse %s: %v", composePath, err)
 	}
-	if len(c.Services) != 1 {
-		t.Fatalf("compose.yaml declares %d services, want exactly 1", len(c.Services))
+	node, ok := c.Services["vmobs"]
+	if !ok {
+		t.Fatal("compose.yaml has no vmobs service")
 	}
-	for _, svc := range c.Services {
-		return svc
+	var svc composeService
+	if err := node.Decode(&svc); err != nil {
+		t.Fatalf("decode vmobs service: %v", err)
 	}
-	panic("unreachable: the length was just checked")
+	return svc
 }
 
 // dockerRunFlags pulls the values of one repeated flag out of the `docker run`
