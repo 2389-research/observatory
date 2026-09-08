@@ -60,6 +60,10 @@ type RunRequest struct {
 // CreateRun creates a standalone run on a VM that is already observed running.
 // Returns (run, isReplay, error).
 func (m *Manager) CreateRun(ctx context.Context, req RunRequest) (*store.Run, bool, error) {
+	if err := m.beginMutation(); err != nil {
+		return nil, false, err
+	}
+	defer m.wg.Done()
 	vm, err := m.st.GetVM(ctx, req.VMID)
 	if err != nil {
 		return nil, false, err
@@ -102,6 +106,10 @@ func (m *Manager) CreateRun(ctx context.Context, req RunRequest) (*store.Run, bo
 // Returns ErrRunConcluded if already terminal, ErrVerdictCriteriaMismatch if
 // a verdict is supplied for a non-operator_verdict run.
 func (m *Manager) ConcludeRun(ctx context.Context, runID string, verdict *string, abort bool, reason string) (*store.Run, error) {
+	if err := m.beginMutation(); err != nil {
+		return nil, err
+	}
+	defer m.wg.Done()
 	run, err := m.st.GetRun(ctx, runID)
 	if err != nil {
 		return nil, err
@@ -447,6 +455,10 @@ func (m *Manager) stopVMAfterRun(vmID string) {
 // SubmitRunProgress forwards a guest progress payload to the store.
 // Returns the new monotonic sequence number, or an error from the store.
 func (m *Manager) SubmitRunProgress(ctx context.Context, runID string, payload json.RawMessage) (int64, error) {
+	if err := m.beginMutation(); err != nil {
+		return 0, err
+	}
+	defer m.wg.Done()
 	seq, err := m.st.SubmitRunProgress(ctx, store.SubmitProgressInput{
 		RunID:    runID,
 		Payload:  payload,
@@ -460,6 +472,10 @@ func (m *Manager) SubmitRunProgress(ctx context.Context, runID string, payload j
 // SubmitRunResult records a guest final result and then triggers conclusion.
 // Returns the run after conclusion (may be terminal).
 func (m *Manager) SubmitRunResult(ctx context.Context, runID string, result json.RawMessage) (*store.Run, error) {
+	if err := m.beginMutation(); err != nil {
+		return nil, err
+	}
+	defer m.wg.Done()
 	// Store the result first.
 	run, err := m.st.SubmitRunResult(ctx, store.SubmitResultInput{
 		RunID:    runID,

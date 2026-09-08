@@ -117,8 +117,11 @@ vmobsd_pid=$!
 shutdown() {
     trap - TERM INT
     log "stopping"
-    kill -TERM "$vmobsd_pid" "$privd_pid" 2>/dev/null || true
+    # Daemon recovery tails may still need privileged outcome queries/cleanup.
+    # Docker's stop timeout bounds both waits if a child cannot exit.
+    kill -TERM "$vmobsd_pid" 2>/dev/null || true
     wait "$vmobsd_pid" 2>/dev/null || true
+    kill -TERM "$privd_pid" 2>/dev/null || true
     wait "$privd_pid" 2>/dev/null || true
 }
 trap 'shutdown; exit 0' TERM INT

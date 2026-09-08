@@ -41,6 +41,12 @@ type failingPrivd struct {
 	calls  []string
 }
 
+func (f *failingPrivd) NetworkLeases(ctx context.Context) (map[string]string, error) {
+	return f.inner.(interface {
+		NetworkLeases(context.Context) (map[string]string, error)
+	}).NetworkLeases(ctx)
+}
+
 func (f *failingPrivd) AllocateNetwork(ctx context.Context, req privd.AllocateNetworkReq) error {
 	f.calls = append(f.calls, "allocate_network")
 	if f.failOn == "allocate_network" {
@@ -113,6 +119,7 @@ func buildInjectHarness(
 	stateDir := filepath.Join(dir, "state")
 	spoolRoot := filepath.Join(dir, "spool")
 	jailBase := filepath.Join(dir, "jail")
+	backend.jailBase = jailBase
 	for _, d := range []string{stateDir, spoolRoot, jailBase} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			t.Fatalf("mkdir %s: %v", d, err)
@@ -790,11 +797,9 @@ func TestInject(t *testing.T) {
 		_, launchErr := h.adapter.Launch(ctx, defaultSpec(vmID))
 		assertCleanup(t, h, vmID, "staged", launchErr)
 
-		// Exact call sequence: staging fails before any backend verb, and before
-		// stageStaged is recorded — the manifest doRollback reads says [reserved]
-		// only, so it makes no privd call and just removes the stage dir (absent
-		// here: verification fails before doStage creates it) and the state dir.
-		wantCalls4 := []string{}
+		// Rollback verifies both privileged resource halves even when staging
+		// failed before a successful host mutation was recorded.
+		wantCalls4 := []string{"release_vm", "release_network"}
 		assertCallsEqual(t, wantCalls4, h.fp.calls)
 		t.Logf("calls after digest mismatch: %v", h.fp.calls)
 
@@ -848,9 +853,7 @@ func TestInject(t *testing.T) {
 		}
 		t.Logf("got expected error: %v", launchErr)
 
-		if len(h.fp.calls) != 0 {
-			t.Errorf("expected zero backend calls; got: %v", h.fp.calls)
-		}
+		assertCallsEqual(t, []string{"release_vm", "release_network"}, h.fp.calls)
 
 		assertRecoveryLaunch(t, h, vmID)
 	})
@@ -869,11 +872,9 @@ func TestInject(t *testing.T) {
 		_, launchErr := h.adapter.Launch(ctx, defaultSpec(vmID))
 		assertCleanup(t, h, vmID, "network", launchErr)
 
-		// Exact call sequence: allocate_network is attempted (and injected to fail); doRollback
-		// sees stageSet[network]=false (the manifest stage was never written after the failure),
-		// so ReleaseNetwork is skipped. stageSet[vmm_started]=false, stageSet[runner_spawned]=false.
-		// Source: launch.go step 4 — rollback fires before m.Stages appends "network".
-		wantCalls6 := []string{"allocate_network"}
+		// A failed reply cannot prove absence; rollback asks privd to release
+		// both halves before surrendering the manifest and lease.
+		wantCalls6 := []string{"allocate_network", "release_vm", "release_network"}
 		assertCallsEqual(t, wantCalls6, h.fp.calls)
 		t.Logf("calls after allocate_network failure: %v", h.fp.calls)
 
@@ -882,8 +883,8 @@ func TestInject(t *testing.T) {
 
 	// ── Subtest 7: start_vm injected failure ──────────────────────────────────
 	// Stages completed before failure: reserved, staged, network.
-	// Rollback must: remove stage dir, release_network, remove state dir.
-	// Must NOT see release_vm or signal_vm (VMM never started).
+	// Rollback must verify both host resource halves, then remove local state.
+	// There is no recorded process to signal.
 	t.Run("start_vm_failure", func(t *testing.T) {
 		h := buildInjectHarness(t, "start_vm", "10.113.0.0/24", 40, 0)
 		vmID := "vm-inject-4"
@@ -894,11 +895,9 @@ func TestInject(t *testing.T) {
 		_, launchErr := h.adapter.Launch(ctx, defaultSpec(vmID))
 		assertCleanup(t, h, vmID, "vmm_started", launchErr)
 
-		// Exact call sequence: allocate_network succeeds (stageSet[network]=true), then start_vm
-		// is injected to fail. doRollback sees stageSet[vmm_started]=false (manifest never updated),
-		// so SignalVM/ReleaseVM are skipped. stageSet[network]=true → ReleaseNetwork called.
-		// Source: launch.go step 5 — rollback fires before m.Stages appends "vmm_started".
-		wantCalls7 := []string{"allocate_network", "start_vm", "release_network"}
+		// Start failure has no process identity to signal, but release still
+		// verifies absence through the privileged ownership authority.
+		wantCalls7 := []string{"allocate_network", "start_vm", "release_vm", "release_network"}
 		assertCallsEqual(t, wantCalls7, h.fp.calls)
 		t.Logf("calls after start_vm failure: %v", h.fp.calls)
 

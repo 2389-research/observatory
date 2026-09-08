@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+
+	"github.com/2389-research/observatory/internal/auth"
 )
 
 // dispatchAuthCmd handles `vmobs auth <subcmd> ...`.
@@ -85,7 +87,7 @@ func (c *client) authTokenCreate(args []string) int {
 	fs := flag.NewFlagSet("vmobs auth token create", flag.ContinueOnError)
 	fs.SetOutput(c.stderr)
 	name := fs.String("name", "", "token name (required)")
-	ttl := fs.Int("ttl-minutes", 0, "token TTL in minutes (0 = no expiry)")
+	ttl := fs.Int64("ttl-minutes", 0, fmt.Sprintf("token TTL in minutes (0 = no expiry; max %d)", auth.MaxTokenTTLMinutes))
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
@@ -94,6 +96,10 @@ func (c *client) authTokenCreate(args []string) int {
 		return exitUsage
 	}
 
+	if _, err := auth.TokenTTL(*ttl); err != nil {
+		fmt.Fprintf(c.stderr, "vmobs: --ttl-minutes: %v\n", err)
+		return exitUsage
+	}
 	reqBody := map[string]any{"name": *name}
 	if *ttl > 0 {
 		reqBody["ttl_minutes"] = *ttl

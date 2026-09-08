@@ -1,298 +1,157 @@
-<!-- ABOUTME: The contract/gap map between v1's bounded agent control protocol and v2's built API. -->
-<!-- ABOUTME: A review artifact, not a contract: nothing here is binding until it lands in SPEC.md. -->
+<!-- ABOUTME: Maps the pinned v1 agent protocol to v2's executable bounded HTTP slice. -->
+<!-- ABOUTME: Separates implemented discovery/recovery from deferred approval, budgets and checkpoints. -->
 
-# Agent control contract — what v2 has, what it lacks
+# Agent control contract and gap map
 
-Kata `3tn6`. Source: `../observatory/docs/AGENT-PROTOCOL.md`,
-`../observatory/docs/plans/agent-first-system.md` and `../observatory/docs/ACCEPTANCE.md`,
-all pinned at `d432cdc` (2026-09-05 review).
+Kata `3tn6`. Reference: sibling `observatory` commit
+`d432cdced2a346974bf3ca1afa20b56c96c890be`, specifically
+`docs/AGENT-PROTOCOL.md`, `docs/plans/agent-first-system.md` and
+`docs/ACCEPTANCE.md`. The source is a design reference, not implementation evidence.
+`docs/SPEC.md` §14.2 binds the slice described here.
 
-## 0. What this document is
+Doctor Biz delegated the design and completion on 2026-09-08. The earlier
+review-only gate is superseded by that authorization. The choice is additive
+metadata on existing routes, concrete resource links, honest summary omissions
+and conservative error recovery. SQLite remains the single control authority.
+No guest, privileged protocol, authentication boundary or schema migration is
+part of this slice.
 
-A gap map for review. It states, row by row, which parts of v1's agent control
-protocol v2 already implements, which it implements differently, and which it
-does not have — with a pointer to the code behind every "v2 has this" claim.
+## What exists, checked against code
 
-**It is not a contract.** `docs/SPEC.md` is the binding contract, and nothing
-here changes it. The kata that produced this document authorizes backlog and
-design work, not an unreviewed API or security-boundary change. Every proposed
-route below is marked unimplemented and stays unimplemented until Doctor Biz
-reviews this page and a change lands in `SPEC.md` and `ACCEPTANCE.md`.
+| v1 verb/object | v2 implementation and limit |
+|---|---|
+| Describe / manifest (§5.2, §7) | `api.New` generates `meta.routes` and collection `links` from its route table. Each route has method, path template, feature and built state. `describeRoute` adds typed examples/instructions for the first slice. `meta.agent` states workflow, resume and deferred capabilities. This is not OpenAPI or a complete schema catalog. |
+| Snapshot (§5.3) | `api.handleSituation` uses `situation.Engine.Snapshot`. `as_of_cursor`, `since_cursor`, watch scope, host counts, attention and changed VMs are live projections from separate reads, not an atomic historical snapshot. `attention_open` and `omitted` describe section loss. |
+| Query | `api.handleEvents` / `store.Query`: bounded keyset pages with exclusive `after`, inclusive optional `until`, `next_after` and `latest_event_id`. `GET /vms` and `/runs` have separate bounded collection cursors. No generic cross-resource query language. |
+| Apply / safe replay (§5.5) | `api.handleCreateVM`, `runtime.Manager.CreateVM`, `store.CreateVMWithOperation`: authenticated owner, canonical request hash, idempotency key and atomic VM/run/operation/reservation creation. Exact keyed launch replay returns the same VM and operation; changed payload conflicts. Unkeyed launch and lifecycle actions are not replay-transparent. |
+| Revision-bound action | `api.handleVMAction` requires `expected_revision`; the runtime/store apply the transition pin. This is concurrency control, not human approval of an exact plan. Boot identities and reservation accounting remain the existing runtime/store contracts. |
+| Watch (§5.5, §7) | `wireOperation.links.self` is directly pollable; VM links include self/actions/runs. `/events/stream` remains a 501 stub. A pre-mutation snapshot cursor provides a conservative event anchor; no mutation `watch_cursor` is implemented. |
+| Explain / problem (§5.6) | `api.writeError` emits `retry_strategy`. Known stale revisions/cursors require refresh; errors carrying operations require querying them; limit/capacity or other retryable failures require a precondition; other failures default to never. `writeVMErrorForOperation` resolves known VM/operation placeholders. No general state-explanation endpoint. |
+| Evaluate (§5.7) | `handleConcludeRun`, `renderRun`, `handleGetRunReport`, `report.Generate`, wired before reconciliation in `cmd/vmobsd.serve`: operator-verdict runs carry an explicit operator outcome; guest result fields are present only when guest result ingestion actually occurred. Reports carry a digest and reproduce queries. Run self/conclude/report links are executable. |
+| Checkpoint (§5.8) | Client-owned handoff file containing exact request, cursor and returned resource links. Server records survive client reconnection; no checkpoint object, server-side handoff storage, checkpoint provenance or retention-gap detection exists. |
+| Budget (§5.9) | Host admission reservations for memory/vCPU/disk. No per-work budget, usage ledger or budget-exhaustion stop. Runtime timeout budgets are lifecycle deadlines, not an implementation of v1 work budgets. |
 
-**Every "v2 has this" row was read against the code, not against the spec.**
-That is the difference between "`/events/stream` is specified" and what
-`api.New` actually registers, which is a stub answering 501. Citations name a
-file and a symbol rather than a line number: line citations into code rot
-silently, because `check.py` validates the docs package's structure and never
-opens a Go file.
+`vmobs --json meta`, `vmobs --json situation`, `vmobs --json events` and the
+raw `vmobs --json api` command expose these same JSON fields. No parallel
+controller or renamed v1 command family is introduced. VM, operation and run
+resources retain owner scope; situation/events describe shared host observation.
+Neither those views nor a client handoff should be called owner-private storage.
 
-## 1. The nine verbs
+## Cold-agent flow
 
-v1's machine-facing CLI has nine semantic verbs (`AGENT-PROTOCOL.md` §7). v2's
-`cmd/vmobs` has twelve resource-shaped ones (`meta`, `events`, `situation`,
-`attention`, `vm`, `run`, `operation`, `template`, `host`, `doctor`, `auth`,
-`api`). They are not the same list and should not become one by renaming.
+The bootstrap is `GET /api/v1/meta` (not v1's `GET /api/v1`). Only credentials
+and this path are needed; subsequent paths and mutation examples come from
+`routes`, and concrete resource paths from response `links`.
 
-| v1 verb | v2 surface today | Verdict |
+1. Read metadata, capacity and templates. Select a returned template. Read the
+   situation, its watch scope and `omitted` entries. Save `as_of_cursor` before
+   any mutation, together with the exact launch example after replacing its
+   named placeholders. Use a unique nonempty idempotency key.
+2. Submit the discovered launch example with its attached `operator_verdict`
+   run. Poll `operation.links.self`; inspect `vm.links.self` and `vm.links.runs`.
+   If the launch response was lost, repeat the saved keyed body exactly. Do not
+   change the key to recover an uncertain response.
+3. Assess the actual evidence, submit the discovered conclude example, then
+   read `run.links.self` and `run.links.report`. A successful caller verdict
+   asserts the caller's judgment; it does not manufacture a guest result.
+4. Refresh the VM, then submit the discovered stop example with that revision.
+   A stale revision uses `after_refresh`: read and reassess. An error carrying
+   an operation offers its concrete read link. A lost action response requires
+   inspection, not an automatic repeat.
+5. Persist resource links and the event cursor in the caller's own durable
+   handoff. On reconnect read the operation/run/VM links and request bounded
+   events after the saved cursor. Process the entire page, then save only
+   `next_after`. Preserve filters. Never advance to `latest_event_id` without
+   consuming intervening pages. Use `until` to freeze an event interval.
+
+An empty event page preserves `next_after`. Cursor resume assumes the same
+SQLite installation and retained history. Replacing/restoring the database can
+invalidate anchors; v2 does not detect that as a typed retention gap. Situation
+`since` is orientation, not proof that all events through `as_of_cursor` were
+consumed. The snapshot's separate live reads may observe later state.
+
+## Snapshot omission contract
+
+`omitted.attention_head` and `omitted.changed_vms` each contain `count` and
+`expand`. Counts include both the item cap and subsequent byte shedding.
+`at_least:true` marks a lower bound: the changed-VM query reads at most 51 rows,
+returns at most 50, and refuses to invent a total beyond that. Without
+`at_least`, the count describes the rows observed by that read. The attention
+count comes from the engine's open-queue count. Concurrent queue updates may
+change a later expansion.
+
+Attention expands through its bounded queue endpoint. Changed VMs expand to
+`/vms`, a current owner-scoped inventory, not a historical delta or a full
+host-wide reconstruction. Raw host observations remain available through the
+event cursor. With no `since`, `changed_vms` intentionally stays empty; the
+inventory is a separate read. Counts and watch scope survive byte shedding.
+A configured ceiling that cannot fit the irreducible watch/omission envelope
+returns 503 `situation_envelope_exceeds_bound`, with configured/minimum bytes
+and a configuration remediation. The fixed error envelope is exempt from the
+situation-summary ceiling; no successful response silently exceeds it. The
+700-byte shedding and 100-byte refusal fixtures exercise both cases.
+
+## Supplemental acceptance scenarios
+
+These are v2-owned scenario identifiers, separate from the fixed 102-row AT
+evidence registry. The earlier AT-103..106 labels were proposals and never
+allocated. v1 AT-089..095 already mean different things in v2 and are not reused.
+
+| ID | Required observation | Executable evidence |
 |---|---|---|
-| `describe` | `GET /api/v1/meta` — `api.Server.handleMeta` | **Partial.** Features are generated from the route table; `links` is a hand-written map that already trails it. §4.1. |
-| `snapshot` | `GET /api/v1/situation` — `api.Server.handleSituation`, `situation.Engine.Snapshot` | **Partial.** Bounded and cursor-anchored; sheds silently and reports no omission counts. §4.2. |
-| `query` | `GET /api/v1/events` (keyset, `next_after` + `latest_event_id`), `GET /vms`, `GET /runs` | **Partial.** Bounded and cursorable per resource; no typed cross-resource filter surface. |
-| `plan` | — | **Missing.** No preview object, no plan digest, no resource quote. §4.3. |
-| `apply` | `POST /vms`, `POST /vms/{id}/actions`, `POST /vms/{id}/runs`, `POST /vm-batches` | **Different by design.** Direct typed mutation with `expected_revision` and an idempotency key; no plan digest to revalidate. §4.3. |
-| `watch` | `GET /operations/{id}` (poll); `/events/stream` answers 501 | **Partial.** No watch cursor on a mutation response; the stream route is a registered stub. §4.4. |
-| `explain` | Typed `Error` with `cause`, `retryable`, `details`, `remediation` — `api.Error` | **Partial.** Errors teach (P-06); nothing explains a *state*, only a failure. |
-| `evaluate` | `POST /runs/{id}/conclude`, `GET /runs/{id}/report` — `report.Generate` | **Close.** Runs carry goal and criteria and produce a digest-bound report; the evaluator is the guest or the caller, not a declared evaluator identity. |
-| `checkpoint` | — | **Missing.** `POST /annotations` accretes text on durable records but has no anchor, cursor, or next-step contract. §4.5. |
+| V2-AGENT-001 | Discover launch request/path, use a returned template, reach running, poll linked operation, conclude operator run, fetch linked digest report, then perform a revision-bound stop. | `tests/integration/agent_contract_gate_test.go: TestKataAgentContractGate`; API metadata/link seam tests in `internal/api/agent_contract_test.go`. |
+| V2-AGENT-002 | Exceed attention head and byte bounds; report open/omitted counts and expansion. Exceed 50 changed VMs and report a lower-bound omission, never a fabricated exact total. | `TestAgentSnapshotReportsOmissions`, `TestSituationResponseByteBound`, `TestAgentChangedVMOmissionsAreLowerBounded`, `TestAgentSituationRefusesImpossibleByteCeiling`. |
+| V2-AGENT-003 | Exact keyed launch returns the same VM/operation. Persist a processed event-page cursor and resource links in a file, reload them, resume bounded pages with no duplicates or missing events against the frozen interval. | `TestKataAgentContractGate`. This tests client reconnection, not daemon/database restore or server checkpoints. |
+| V2-AGENT-004 | A stale revision offers `after_refresh` and concrete VM read; operation failures offer `query_operation`; malformed cursor and oversized page teach distinct recovery; unavailable stream says `never`. | `TestAgentStaleRevisionRecoveryUsesConcreteRead`, `TestAgentErrorsDeclareSafeRecovery`, `TestNamingTheOperationAddsSafeRecovery`, plus the KVM stale-action path. |
 
-## 2. The objects
+The first real gate exposed missing daemon report wiring: package tests had wired the generator, while `serve` had not. `TestServeGeneratesReportsForDurableTerminalRuns` now proves the real startup constructor recovers a stored terminal run into a generated report.
 
-| v1 object (§5) | v2 record | Verdict |
+Local API seam tests use real HTTP/SQLite and a runtime unit fixture. They are not
+Firecracker evidence. The Linux gate uses the real daemon, runner, Firecracker
+and authenticated HTTP. Final execution status belongs in `docs/VALIDATION.md`
+and the kata completion evidence, not in inferred claims from this source map.
+
+## Exact approval design — unimplemented
+
+Reference `AGENT-PROTOCOL.md` §§5.4–5.5 and §8. A future plan is immutable and
+side-effect free: exact targets/revisions, canonical request digest, material
+capability/policy/precondition bindings, impact class, resource quote with
+measurement quality, expiry and non-guarantees. Planning reserves nothing.
+Apply revalidates the exact digest and all material bindings before effects.
+
+A human approval must bind human identity/authentication context, plan digest,
+allowed targets/actions, maximum resource/security delta, expiry and single-use
+policy. Acceptance atomically consumes it into one operation ID. Exact replay,
+query, reconciliation and owned stop/cleanup remain valid after consumption or
+expiry; another operation gets `approval_consumed`. A material pre-acceptance
+change invalidates the approval. Grants, capability facts and human approval
+are distinct. Neither an idempotency key nor `expected_revision` substitutes
+for this approval. No public plan/apply/approval route is implemented.
+
+## Budget design — unimplemented
+
+Reference `AGENT-PROTOCOL.md` §5.9 and v1 AT-095. Future limits are hierarchical
+(host, principal, work, run, VM, exec/artifact), with limit, reserved, used,
+remaining, projected use, unit, enforcement and measurement quality per dimension.
+Dimensions include wall time, guest CPU, boot/exec counts, RAM reservation, disk,
+egress, event and artifact bytes. Tokens/money require harness measurements;
+unknown spend is unknown, never zero. Estimates include sample count, runtime
+tuple and recency. Admission must reserve against hard limits atomically, then
+settle actual use. Hard exhaustion stops further costly work while preserving
+read-only context, evidence, owned stop and cleanup. No enforcement is claimed
+for these dimensions today.
+
+## Implementation follow-ups
+
+| Item | Source → destination | Completion condition |
 |---|---|---|
-| Work order revision | — | Missing. `runs.goal` + `criteria_type` carry an objective; nothing carries authority scope, non-goals, or a limits envelope. |
-| Run | `runs` table (`store`), `POST /vms/{id}/runs` | Present, narrower: one run per VM at a time (`idx_runs_active`), bound to one VM rather than to a work-order revision. |
-| Capability manifest | `meta.features`, `GET /meta/event-kinds` (`events.Kinds()`) | Present in shape; no parameter/result schema digests, no implementation digest. |
-| Affordance | `Error.Remediation` — typed action + params + rationale | Present on the failure path only. There is no "what is legal now" read. |
-| Situation snapshot | `situation.Snapshot` / `situationResponse` | Present, bounded, `as_of_cursor` / `since_cursor`. Missing: omission counts, expansion selectors, budgets, blockers-as-data. |
-| Control plan | — | Missing. |
-| Operation | `operations` table; `wireOperation` | Present: `operation_id` (decimal string), `kind`, `phase`, `state`, `error.cause`, `attempt`. Missing: watch cursor, request digest on the wire, permanent tombstone. §4.4. |
-| Action journal | Event log (`events` table, registered kinds) | Adjacent. The event log is append-only and cursorable but is not per-action phase state (`intent_recorded` … `quarantined`). |
-| Problem | `api.Error` | Present, one shape everywhere. Missing: `retry_strategy` as a typed token — v2 ships a boolean `retryable`, which v1 explicitly says is not the public recovery contract. §4.6. |
-| Fact envelope | `events.Envelope` with `host_observed` / `guest_reported` / `derived` provenance | **Stronger than v1's row.** Provenance is assigned at trusted ingress and unregistered kinds are refused. |
-| Evidence manifest / outcome | `internal/evidence` (`Manifest`, `Outcome`, `Execution`) | Present but for a different subject: it binds *acceptance rows* to the bytes that ran, not work-order outcomes to facts. Its shape is the right one to copy — `unmeasured`, `cleanup_claimed`, binary digests. |
-| Checkpoint | — | Missing. |
-| Budget | `reservations` table; `manager.Capacity` | Host capacity only. No per-run or per-work-order budget, and no dimension carrying limit, reserved, used, remaining, projected and measurement quality. §4.7. |
-| Claims, recipes, cache | — | Missing, and deliberately deferred. §6. |
-| Multi-agent lease | — | Missing, and deliberately deferred. §6. |
+| Durable server checkpoints | v1 §5.8 → new owner-scoped store object, `internal/api`, `cmd/vmobs` | Bounded append-only agent assertions with anchor/references/next actions; read authorization, exact retry identity, restart test. Add only when server-owned handoff is needed. |
+| Mutation watch cursor | v1 §5.5/§7 → `store` operation event linkage, `renderOperation` | Stable pre-effect cursor survives exact replay and operation lookup; cannot skip early operation events. |
+| Cursor retention/install identity | v1 AT-094 / §5.8 → `store.Query`, events API and client handoff | Detect replaced history and pruned anchors; return typed gap/earliest cursor instead of silent continuity. Required before claiming restore/retention-safe resume. |
+| Full request schemas | v1 §5.2/§7 → route metadata generation and API schema endpoint | Generate every request/result schema and required constraints from executed definitions; current examples cover only the first slice. |
+| Exact approval | v1 §5.4/§8 → design/SPEC review, store transaction, runtime/API | Implement the exact consumption/replay rules above before adding a multi-step or approval-gated intent. |
+| Per-work budgets | v1 §5.9 / AT-095 → admission/store, work/run model, report | Measured dimension ledger and exhaustion tests preserving evidence/cleanup; host reservations alone do not close it. |
 
-## 3. What a cold agent can actually do today
-
-Walked against the route table in `api.New` and the handlers behind it. This is
-the vertical slice that already exists; it is shorter than v1's §10 workflow and
-it hits a wall in three places.
-
-1. `GET /api/v1/meta` — service and API version, which features are built, size
-   limits, active attention trigger classes, auth mode. **Works.** A feature the
-   build does not serve answers 501 `missing_capability` with a remediation
-   pointing back at `/meta`, so probing the spec surface teaches instead of
-   stonewalling. v1's bootstrap is the base path itself; v2 answers `GET
-   /api/v1` with 404 `route_unknown` — and that 404 carries the same `/meta`
-   remediation, so an agent arriving with v1's habit is redirected rather than
-   stopped. Measured against a live test server:
-
-   ```json
-   {"code":"not_found","message":"no route for /api/v1","retryable":false,
-    "cause":"route_unknown","remediation":[{"action":"get",
-    "params":{"path":"/api/v1/meta"},
-    "rationale":"the manifest lists the routes and features this build actually serves"}]}
-   ```
-2. `GET /api/v1/host/status` — capacity and preflight verdict. **Works.**
-3. `GET /api/v1/templates` — what can be launched. **Works.**
-4. `POST /api/v1/vms` with an idempotency key — returns `{vm, operation}`, HTTP
-   201. **Works.** Reusing the key with a different payload is refused with
-   `idempotency_conflict` / `idempotency_key_reused`.
-5. `GET /api/v1/operations/{id}` — poll to a terminal phase. **Works, but the
-   agent had to construct the poll itself:** the create response carries no
-   watch cursor and no link to the operation. *Wall 1.*
-6. `GET /api/v1/situation?since=<cursor>` — bounded delta, `changed_vms`,
-   attention head, watch scope. **Works, but the agent cannot tell a calm host
-   from a truncated response.** *Wall 2.*
-7. `POST /api/v1/vms/{id}/runs` → `GET /runs/{id}` → `GET /runs/{id}/report` —
-   goal-carrying run with a machine-readable, digest-bound report whose counts
-   each carry a `reproduce_query`. **Works, and is the strongest part of the
-   surface.**
-8. `POST /api/v1/vms/{id}/actions` with `expected_revision` — refuses a stale
-   revision rather than racing. **Works.**
-9. Hand off to the next agent session. **Nothing to write to.** *Wall 3.*
-
-## 4. Gaps, ranked
-
-Ranked by what a bounded agent session loses, not by implementation size. Each
-names a source in v1 and a destination in v2.
-
-### 4.1 `/meta`'s link map is hand-maintained
-
-`api.Server.handleMeta` builds `links` as a literal map of ten paths while
-`features` comes from the route table in `api.New`. The map carries a rule in a
-comment — *"Links name only what answers 200 today"* — which is a good rule
-held by hand, so nothing catches a route that arrives without its link.
-
-The drift is visible now. `features` reports `"vm_batches": true`, and no key in
-`links` names a batch path, because batches have no GET collection route: only
-`POST /vm-batches` and `GET /vm-batches/{id}`. An agent reading `/meta` learns
-that batch launch is built and does not learn where to send it. The same holds
-for `POST /attention/{id}/ack` and `POST /vms/{id}/actions` — the feature is
-advertised, the affordance is not. Feature names are not paths, so `features`
-cannot stand in for `links`.
-
-This is against v2's own directive, not just v1's §5.2 ("hand-maintained
-capability lists are forbidden"). `docs/README.md`: *"Documentation the running
-system serves — capability manifest, event-kind registry, operator guide — is
-generated from the same sources the implementation executes. Never maintain a
-second copy by hand."* P-07 says the same thing.
-
-Proposed: derive `links` from the table, keeping its stated rule — a link per
-built route, template form (`/vms/{id}/actions`) for the ones that take an id,
-so the map answers "where" for every feature that answers `true`. A test then
-fails when a built route has no link. Additive to the response; no route
-changes. **Unimplemented.**
-
-### 4.2 `/situation` sheds silently, and drops a count it already computed
-
-`handleSituation` bounds the response by halving `attention_head`, then halving
-`changed_vms`, until it fits `SituationMaxResponseBytes`. The body says nothing
-about what was dropped. An agent that receives three attention items cannot tell
-whether three exist or three hundred.
-
-`situation.Engine.Snapshot` computes `AttentionOpen` from
-`store.CountOpenAttention` on every request — and `situationResponse` has no
-field for it, so the number is computed and discarded. `changed_vms` is capped
-at 50 with no indication that more changed.
-
-Whether this breaks P-01 as written is arguable: the full attention queue *is*
-one link away at `GET /attention`, and the full delta at `GET /vms`. P-03 is not
-arguable. "A quiet summary states what it watched… Quiet-because-blind is
-reported as blindness, never as calm." The shed loop honours that for watch
-scope — its comment says a truncated watch scope would violate P-03, and it
-never sheds one — and then truncates the two lists next to it in silence. A
-short `attention_head` reads as a calm host for the same reason a narrowed watch
-scope would, and the response says as little about one as it says much about the
-other. v1 §5.3 asks for the fix directly: "omission counts, expansion selectors,
-and continuation cursors".
-
-Proposed: `attention_open` (the count already computed) and an `omitted` block
-naming each shed section with its count and the link that expands it.
-**Unimplemented.**
-
-### 4.3 No preview
-
-v2 mutates directly. There is no plan object, no plan digest, no resource quote,
-and no way to ask "what would this do" without doing it. `expected_revision` on
-`POST /vms/{id}/actions` gives concurrency safety, which is the *other* half of
-v1's apply contract; the missing half is the one that lets a human approve an
-exact effect.
-
-This is the largest gap and the one to defer longest. v2's launch path is a
-single typed request against a template with fixed resources, so a plan for it
-would mostly restate the request. The case that needs a preview is the one v2
-does not have yet: a multi-step or destructive intent. **Unimplemented, and not
-recommended before there is an intent that needs it.**
-
-### 4.4 A mutation response has no watch cursor
-
-v1 §7: "Every control-mutation response includes its operation ID, canonical
-semantic mutation kind, watch cursor, and resulting revisions when known."
-
-v2 returns the operation id and kind, and the resulting revision inside the `vm`
-object. It returns no cursor, so an agent that wants to watch has to call
-`/events` to learn where "now" is — a race it can only lose in the direction of
-re-reading events it already saw. `GET /events` already returns
-`latest_event_id`, so the value exists; it is not on the mutation response.
-
-`/events/stream` is a registered stub answering 501, which is honest and also
-means watch is polling today.
-
-Proposed: `watch_cursor` on every mutation response, taken from the same event
-id the operation's first event got. **Unimplemented.**
-
-### 4.5 No checkpoint
-
-Nothing in v2 lets an agent write down what it concluded, against which cursor,
-with what open questions and what it intended to do next. `POST /annotations`
-accretes text on a durable record, which is adjacent but has no anchor, no
-cursor, and no next-step field.
-
-This matters more here than in v1, because v2's own P-04 already claims the
-ground: "The system is the shared memory between bounded agent sessions." Today
-that memory holds goals, verdicts and annotations but not the agent's own state.
-A session that ends mid-investigation leaves nothing the next one can resume
-from except the event log.
-
-Proposed: `POST /checkpoints` and `GET /checkpoints?scope=`, append-only,
-`agent_asserted` provenance, carrying objective, conclusion, anchor cursor,
-decisions, open questions, and next intended actions. Small: one table, two
-routes, no privileged surface. **Unimplemented.** This is the gap I would close
-first.
-
-### 4.6 `retryable` is a boolean
-
-v1 §5.6 names five retry strategies — `never`, `same_request`,
-`query_operation`, `after_refresh`, `after_precondition` — and says a boolean
-"may be derived for compatibility inside one process, but it is not the public
-recovery contract."
-
-v2 ships the boolean. `retryable: false` covers both "this will never work" and
-"re-read the revision and try again", which are different instructions.
-`Remediation` partly covers the difference in prose the agent must interpret.
-
-Proposed: add `retry_strategy` alongside `retryable`, populated at each existing
-`writeError` call site. Additive; the boolean stays until a review says
-otherwise. **Unimplemented.**
-
-### 4.7 Budgets are host capacity only
-
-`reservations` tracks memory, vCPU and disk against host admission.
-`manager.Capacity` reports free memory. There is no per-run budget, nothing
-carrying v1's dimensions — limit, reserved, used, remaining, projected, unit and
-measurement quality — and no wall-time, boot-count or event-byte axis at all.
-
-v1's AT-095 exhausts a hard work-order budget and requires read-only context,
-evidence, owned stop and cleanup to stay usable. v2 cannot express the
-precondition. **Unimplemented, and blocked on §4.3-adjacent design** — a budget
-without a plan has nothing to quote against.
-
-## 5. A trap in the kata's own reference
-
-The kata says to reference `../observatory/docs/ACCEPTANCE.md` AT-089 through
-AT-095. **Those IDs are already taken in v2 by seven different tests.** v1's
-AT-089 is cold-agent discovery; v2's AT-089 is `/situation` correctness under a
-mixed fleet. v1's AT-095 is budget exhaustion; v2's AT-095 is oversized run
-progress submissions.
-
-v2's `docs/validation/check.py` asserts exactly 102 sequential acceptance IDs,
-and `internal/evidence` mirrors that count so a record for an undefined row is
-refused. Any row added for this work is **AT-103 or later**, and copying a v1 ID
-into v2 would either fail the package check or silently rebind an existing row.
-
-Proposed rows, all unimplemented:
-
-- **AT-103** — cold-agent discovery. Given only credentials and `GET /api/v1/meta`,
-  reach a running VM with a concluded run and its report without reading prose.
-  Every route used comes from the manifest.
-- **AT-104** — bounded snapshot honesty. Drive `/situation` past its byte bound
-  with a large attention queue; the response reports every omitted section with
-  its count and an expansion link, and the reported open count matches
-  `GET /attention`.
-- **AT-105** — checkpoint resume. Write a checkpoint, disconnect, resume from it
-  plus the exact delta since its anchor. Expired history reports a gap and the
-  earliest cursor rather than fabricating continuity.
-- **AT-106** — typed recovery. Every distinct `cause` the API emits carries a
-  `retry_strategy`, and following it verbatim either succeeds or returns a
-  different cause. No cause instructs an agent into a loop.
-
-## 6. Deliberately deferred
-
-Not designed here, and no follow-up item filed: evaluated-knowledge caches,
-claims and freshness, recipes with a promotion lifecycle, generalized workflows,
-multi-agent leases and fencing epochs, content-addressed pure-step caching, and
-the `explain` verb as a state explainer. Each needs a concrete demand v2 does
-not have — one host, one operator, no second agent competing for a VM. v1's own
-§11 puts them in later milestones for the same reason.
-
-The one v1 idea worth importing early and cheaply is its brown M&M: *silent
-ambiguity is the failure*. If an agent has to guess whether a fact is current, an
-action is legal, or a retry is safe, the interface has failed. §4.2 and §4.6 are
-both that failure, in small.
-
-## 7. Recommended order
-
-1. §4.1 `/meta` links generated — smallest, and it is a live violation of P-07.
-2. §4.2 situation omission counts — restores a computed number the response drops.
-3. §4.5 checkpoints — the one missing object v2's own P-04 already promises.
-4. §4.4 watch cursor — cheap once §4.2 is being touched.
-5. §4.6 `retry_strategy` — mechanical, one token per `writeError` call site.
-6. §4.3 plan/apply and §4.7 budgets — not until an intent needs a preview.
-
-Items 1, 2, 4 and 5 are additive response fields against existing routes. Item 3
-adds a table and two routes. None touches the privileged boundary, `privd`, or
-the guest protocol.
+Evaluated-knowledge caches, generalized workflows, recipes, multi-agent leases
+and fencing remain deferred until a concrete need. No v1 controller, cell store
+or broad roadmap is transplanted.

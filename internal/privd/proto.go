@@ -69,7 +69,7 @@ func ValidStagedName(name string) bool {
 type Request struct {
 	V       int             `json:"v"`
 	Verb    string          `json:"verb"`
-	OpID    string          `json:"op_id"` // operation id for audit; "" allowed for reconcile-time calls
+	OpID    string          `json:"op_id"` // required durable identity for mutations; omitted for read-only queries
 	Payload json.RawMessage `json:"payload"`
 }
 

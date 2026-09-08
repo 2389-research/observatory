@@ -44,7 +44,7 @@ func TestAStalledDeleteRecordsWhyItStalled(t *testing.T) {
 	if _, err := mgr.Delete(t.Context(), vmID, false, nil); err == nil {
 		t.Fatal("delete succeeded while privd refused the release")
 	}
-	mgr.Close()
+	mgr.WaitForTest()
 
 	// The restart retries and fails the same way.
 	fk.FailNext("Release", vmID, stillAlive)

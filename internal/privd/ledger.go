@@ -18,16 +18,20 @@ import (
 
 // VMEntry holds the per-VM identity and resource record stored in the ledger.
 type VMEntry struct {
-	VMID          string `json:"vm_id"`
-	UID           int    `json:"uid"`
-	GID           int    `json:"gid"`
-	CID           uint32 `json:"cid"`
-	PID           int    `json:"pid"`
-	StartTime     string `json:"start_time"` // decimal string: /proc/<pid>/stat field 22
-	BootID        string `json:"boot_id"`
-	PIDNamespace  string `json:"pid_namespace"`
-	NetCIDR       string `json:"net_cidr"`
-	CreatedAtUnix int64  `json:"created_at_unix"`
+	// StartAttempted distinguishes pre-exec debris from a launch requiring process-exit proof.
+	StartAttempted bool   `json:"-"`
+	NetworkOpID    string `json:"network_op_id,omitempty"`
+	StartOpID      string `json:"start_op_id,omitempty"`
+	VMID           string `json:"vm_id"`
+	UID            int    `json:"uid"`
+	GID            int    `json:"gid"`
+	CID            uint32 `json:"cid"`
+	PID            int    `json:"pid"`
+	StartTime      string `json:"start_time"` // decimal string: /proc/<pid>/stat field 22
+	BootID         string `json:"boot_id"`
+	PIDNamespace   string `json:"pid_namespace"`
+	NetCIDR        string `json:"net_cidr"`
+	CreatedAtUnix  int64  `json:"created_at_unix"`
 }
 
 // ledger manages per-VM JSON files in a directory.
@@ -54,23 +58,7 @@ func (l *ledger) path(vmID string) string {
 
 // get returns the entry for vmID, or an error wrapping fs.ErrNotExist if absent.
 func (l *ledger) get(vmID string) (VMEntry, error) {
-	// Refuse links and non-regular files before reading, then check the opened
-	// inode. Only privd's uid may supply persistent signaling authority.
-	fd, err := unix.Open(l.path(vmID), unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return VMEntry{}, err
-	}
-	f := os.NewFile(uintptr(fd), l.path(vmID))
-	defer func() { _ = f.Close() }()
-	info, err := f.Stat()
-	if err != nil {
-		return VMEntry{}, err
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 || stat.Uid != uint32(os.Geteuid()) {
-		return VMEntry{}, fmt.Errorf("ledger %s: untrusted ownership file", vmID)
-	}
-	data, err := io.ReadAll(f)
+	data, err := readOwnershipFile(l.path(vmID))
 	if err != nil {
 		return VMEntry{}, err
 	}
@@ -160,4 +148,28 @@ func (l *ledger) all() ([]VMEntry, error) {
 		out = append(out, entry)
 	}
 	return out, nil
+}
+
+func readOwnershipFile(name string) ([]byte, error) {
+	// Refuse links and non-regular files before reading, then check the opened
+	// inode. Only privd's uid may supply persistent signaling authority.
+	fd, err := unix.Open(name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	f := os.NewFile(uintptr(fd), name)
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 || stat.Uid != uint32(os.Geteuid()) {
+		return nil, fmt.Errorf("ledger %s: untrusted ownership file", name)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, 2*MaxMsgBytes+1))
+	if len(data) > 2*MaxMsgBytes {
+		return nil, fmt.Errorf("ownership record exceeds size bound")
+	}
+	return data, err
 }

@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -27,6 +28,7 @@ import (
 	"github.com/2389-research/observatory/internal/jailer"
 	"github.com/2389-research/observatory/internal/lock"
 	"github.com/2389-research/observatory/internal/preflight"
+	"github.com/2389-research/observatory/internal/report"
 	"github.com/2389-research/observatory/internal/runtime"
 	"github.com/2389-research/observatory/internal/situation"
 	"github.com/2389-research/observatory/internal/spool"
@@ -269,7 +271,9 @@ func preflightConfig(cfg *config.Config) preflight.Config {
 // serve runs the daemon until ctx is canceled. ready is called once with the
 // bound address. The loopback check runs against the address actually bound,
 // not just the configured string: config validation is not the last line.
-func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready func(addr string)) error {
+func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready func(addr string)) (retErr error) {
+	ctx, cancelWork := context.WithCancel(ctx)
+	defer cancelWork()
 	if err := verifyRuntimeLock(cfg.Runtime.LockFile, logger); err != nil {
 		return err
 	}
@@ -280,7 +284,12 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready f
 	if err != nil {
 		return fmt.Errorf("open store: %w", err)
 	}
-	defer st.Close()
+	closeStore := true
+	defer func() {
+		if closeStore {
+			retErr = errors.Join(retErr, st.Close())
+		}
+	}()
 
 	diag, err := st.Diagnostics(ctx)
 	if err != nil {
@@ -385,26 +394,35 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready f
 		logger.Warn("vm could not be classified across restart", "vm_id", vmID, "detail", detail)
 	}
 
-	mgr, err := runtime.NewManager(st, rt, managerConfig(cfg, tpls, host, adopted, ambiguous))
+	// Install the real generator before reconciliation: durable terminal runs
+	// without reports must recover at startup as well as after new conclusions.
+	mgr, err := runtime.NewManagerWithReportGen(st, rt, managerConfig(cfg, tpls, host, adopted, ambiguous),
+		report.MakeReportGenFn(st, report.Options{TailMaxBytes: cfg.AgentInterface.ReportTailMaxBytes}))
 	if err != nil {
 		return fmt.Errorf("create lifecycle manager: %w", err)
 	}
-	defer mgr.Close()
-
-	// Map adapter findings to manager: vmm_gone and ambiguous outcomes mean the
-	// VMM is gone or unverifiable — notify the manager so it can record the
-	// specific reason (supplementing manager.Reconcile's generic controller_restart reason).
-	for _, f := range adapterFindings {
-		switch f.Outcome {
-		case "vmm_gone", "ambiguous":
-			// Reconcile names no boot: it stats the runner that is live now, so
-			// its finding is about whatever boot the VM is on.
-			if notifyErr := mgr.NotifyVMMExit(ctx, f.VMID, "", "reconcile: "+f.Detail, false); notifyErr != nil {
-				logger.Warn("NotifyVMMExit for adapter finding failed", "vm_id", f.VMID, "outcome", f.Outcome, "err", notifyErr)
-			}
+	var drainCtx context.Context
+	var drainCancel context.CancelFunc
+	beginShutdown := func() {
+		if drainCtx == nil {
+			drainCtx, drainCancel = context.WithTimeout(context.Background(), 85*time.Second)
 		}
-		// "adopted": handled above, before the manager was built.
+		mgr.BeginClose()
+		cancelWork()
 	}
+	defer func() {
+		beginShutdown()
+		defer drainCancel()
+		if err := mgr.Drain(drainCtx); err != nil {
+			// A timed-out handler or worker still owns SQLite. main exits on this
+			// error; keeping the store open until process exit prevents late writes
+			// racing a closed database.
+			closeStore = false
+			retErr = errors.Join(retErr, fmt.Errorf("manager shutdown: %w", err))
+		}
+	}()
+
+	applyAdapterFindings(ctx, mgr, adapterFindings, logger)
 
 	// Start the spool importer goroutine when a spool root is configured.
 	// The onImported callback routes vm.vmm_exited envelopes to NotifyVMMExit.
@@ -447,11 +465,12 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready f
 			}
 		}
 		imp := spool.NewImporter(st, spoolRoot, 5*time.Second, onImported)
-		go func() {
+		eng.SetImporter(imp)
+		mgr.GoTracked(func() {
 			if runErr := imp.Run(ctx); runErr != nil && !errors.Is(runErr, context.Canceled) {
 				logger.Warn("spool importer exited", "err", runErr)
 			}
-		}()
+		})
 		logger.Info("spool importer started", "root", spoolRoot)
 	}
 
@@ -471,11 +490,8 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready f
 		Dial:                     terminal.UnixDialer(cfg.Paths.State),
 	})
 
-	srv := &http.Server{
-		Handler:           api.New(st, eng, mgr, ac, pfFunc, termReg),
-		ReadHeaderTimeout: 5 * time.Second,
-		TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS12},
-	}
+	srv := boundedHTTPServer(trackedHTTPHandler(ctx, mgr, api.New(st, eng, mgr, ac, pfFunc, termReg)))
+	defer srv.Close()
 	serveErr := make(chan error, 1)
 	switch cfg.Server.Mode {
 	case "https":
@@ -513,7 +529,8 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready f
 	// today, but it is a separate knob on a separate clock: raise it and only the
 	// grace above is left, so the budget is sized against the grace. Do not tidy
 	// this back down to match it.
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	beginShutdown()
+	shutdownCtx, cancel := context.WithTimeout(drainCtx, 10*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		return fmt.Errorf("shutdown: %w", err)
@@ -522,4 +539,55 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready f
 		return fmt.Errorf("http server: %w", err)
 	}
 	return nil
+}
+
+// trackedHTTPHandler includes hijacked streams in the manager's storage drain.
+func trackedHTTPHandler(shutdown context.Context, mgr *runtime.Manager, handler http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if mgr.DoTracked(func() {
+			ctx, cancel := context.WithCancel(r.Context())
+			stop := context.AfterFunc(shutdown, cancel)
+			defer stop()
+			defer cancel()
+			handler.ServeHTTP(w, r.WithContext(ctx))
+		}) {
+			return
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(api.Error{
+			Code: "unavailable", Cause: "shutdown", Message: "the controller is shutting down", Retryable: true, RetryStrategy: "after_precondition",
+			Remediation: []api.Remediation{{Action: "get", Params: map[string]any{"path": "/api/v1/meta"}, Rationale: "wait for the restarted controller before retrying this unaccepted request"}},
+		})
+	})
+}
+
+// boundedHTTPServer sets connection budgets without limiting upgraded streams.
+func boundedHTTPServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    32 << 10,
+		// No write timeout: terminal WebSockets have their own heartbeat.
+		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+	}
+}
+
+// applyAdapterFindings carries startup observations into lifecycle bookkeeping.
+func applyAdapterFindings(ctx context.Context, mgr *runtime.Manager, adapterFindings []jailer.Finding, logger *slog.Logger) {
+	// Reconcile already records ambiguity and preserves its reservations.
+	// Only an observed exit may pass through the terminal transition hook.
+	for _, f := range adapterFindings {
+		switch f.Outcome {
+		case "vmm_gone":
+			// Reconcile names no boot: it stats the runner that is live now, so
+			// its finding is about whatever boot the VM is on.
+			if notifyErr := mgr.NotifyVMMExit(ctx, f.VMID, "", "reconcile: "+f.Detail, false); notifyErr != nil {
+				logger.Warn("NotifyVMMExit for adapter finding failed", "vm_id", f.VMID, "outcome", f.Outcome, "err", notifyErr)
+			}
+		}
+		// "adopted": handled above, before the manager was built.
+	}
 }

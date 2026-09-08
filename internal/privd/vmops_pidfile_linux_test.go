@@ -81,7 +81,9 @@ func TestAbortStartDoesNotEchoAPidFileItCannotParse(t *testing.T) {
 		t.Fatalf("write pid file: %v", err)
 	}
 
-	ops.killJailedVMM(vmID)
+	if err := ops.killJailedVMM(vmID); err == nil {
+		t.Fatal("unparseable pidfile must retain uncertainty")
+	}
 	assertBoundedAndSilent(t, "the abort-start log line", logBuf.String())
 }
 

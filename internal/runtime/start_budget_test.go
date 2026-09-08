@@ -170,7 +170,7 @@ func TestStartRecordsLaunchFailureAfterTheLaunchContextDies(t *testing.T) {
 	}()
 
 	waitForFakeCallCount(t, fk, vmID, "Launch", 2) // 1 = the create-path launch
-	mgr.Close()                                    // cancels the manager context, and with it the launch's
+	mgr.BeginClose()                               // cancels the manager context, and with it the launch's
 	close(release)
 
 	if err := <-done; err == nil {
@@ -220,7 +220,7 @@ func TestStartRecordsSuccessAfterTheLaunchContextDies(t *testing.T) {
 	}()
 
 	waitForFakeCallCount(t, fk, vmID, "Launch", 2) // 1 = the create-path launch
-	mgr.Close()                                    // cancels the manager context, and with it the launch's
+	mgr.BeginClose()                               // cancels the manager context, and with it the launch's
 	close(release)
 
 	res := <-done
@@ -270,7 +270,7 @@ func TestStopRecordsOutcomeAfterTheOperationContextDies(t *testing.T) {
 	}()
 
 	waitForFakeCallCount(t, fk, vm.VMID, "Stop", 1)
-	mgr.Close()
+	mgr.BeginClose()
 	close(release)
 
 	res := <-done

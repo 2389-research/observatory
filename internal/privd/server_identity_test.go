@@ -5,6 +5,7 @@ package privd
 import (
 	"encoding/json"
 	"errors"
+	"github.com/google/uuid"
 	"io"
 	"log"
 	"os"
@@ -57,7 +58,7 @@ func allocateCIDR(t *testing.T, s *Server, vmID, cidr string) Response {
 	if err != nil {
 		t.Fatalf("marshal allocate: %v", err)
 	}
-	return s.dispatch(Request{V: ProtoVersion, Verb: "allocate_network", Payload: payload})
+	return s.dispatch(Request{V: ProtoVersion, OpID: uuid.NewString(), Verb: "allocate_network", Payload: payload})
 }
 
 // startWithIdentity runs start_vm for one VM under one uid and CID.
@@ -73,7 +74,7 @@ func startWithIdentity(t *testing.T, s *Server, vmID, stageDir string, uid int, 
 	if err != nil {
 		t.Fatalf("marshal start: %v", err)
 	}
-	return s.dispatch(Request{V: ProtoVersion, Verb: "start_vm", Payload: payload})
+	return s.dispatch(Request{V: ProtoVersion, OpID: uuid.NewString(), Verb: "start_vm", Payload: payload})
 }
 
 // mustOK fails the test unless the verb succeeded.

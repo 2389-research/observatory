@@ -194,7 +194,7 @@ func TestRunLaunchAttachPendingThenRunning(t *testing.T) {
 
 	// Wait for the VM launch to complete — the hook must move the run to running.
 	waitForVMState(t, st, vm.VMID, "running")
-	mgr.Close()
+	mgr.WaitForTest()
 
 	run := waitForRunPhase(t, st, pendingRun.RunID, "running")
 	if run.StartedAt == "" {
@@ -238,7 +238,7 @@ func TestRunLaunchFailConcludesAttachedRunInconclusive(t *testing.T) {
 
 	// Wait for the VM to reach failed — launch hook must conclude the run.
 	waitForVMState(t, st, vm.VMID, "failed")
-	mgr.Close()
+	mgr.WaitForTest()
 
 	run := waitForRunPhase(t, st, pendingRun.RunID, "inconclusive")
 	// R8: evaluated_by is system; reason mentions vm launch failed.
@@ -495,7 +495,7 @@ func TestSubmitRunResultConclusionSurvivesClose(t *testing.T) {
 	}
 	// Close immediately — before the conclusion goroutine is necessarily scheduled.
 	// With correct wg tracking, Close blocks until the goroutine finishes.
-	mgr.Close()
+	mgr.WaitForTest()
 
 	// The run must be in a terminal phase, not stuck in "concluding".
 	final, err := st.GetRun(t.Context(), run.RunID)
@@ -697,7 +697,7 @@ func TestConcludeRunRaceOneTerminalOutcome(t *testing.T) {
 	_ = resultErr
 	_ = stopErr
 
-	mgr.Close()
+	mgr.WaitForTest()
 
 	// Exactly one terminal phase.
 	final, err := st.GetRun(t.Context(), run.RunID)
@@ -883,7 +883,7 @@ func TestReportEnqueueOnAllTerminalPaths(t *testing.T) {
 
 			// Close blocks until all goroutines finish (wg.Wait before cancel).
 			// reportGen is guaranteed to have been called before we reach the check.
-			mgr.Close()
+			mgr.WaitForTest()
 
 			found := false
 			for _, id := range enqueued {
@@ -960,7 +960,7 @@ func TestCreateVMWithRunAttachmentHook(t *testing.T) {
 
 	// Wait for VM to be running.
 	waitForVMState(t, st, vm.VMID, "running")
-	mgr.Close()
+	mgr.WaitForTest()
 
 	// The launch-attached run should now be in running phase.
 	run, err := st.ActiveRunForVM(t.Context(), vm.VMID)
@@ -1015,7 +1015,7 @@ func TestCreateVMWithRunAttachmentLaunchFail(t *testing.T) {
 	fk.FailNext("Launch", vm.VMID, errors.New("disk full"))
 
 	waitForVMState(t, st, vm.VMID, "failed")
-	mgr.Close()
+	mgr.WaitForTest()
 
 	// The attached run must be concluded inconclusive (R8).
 	run, err := st.RunForVM(t.Context(), vm.VMID)

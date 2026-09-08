@@ -10,13 +10,14 @@ import (
 // Error is the body of every non-2xx API response. Codes and causes are stable
 // tokens an agent can branch on; Message is for humans reading the same data.
 type Error struct {
-	Code        string         `json:"code"`
-	Message     string         `json:"message"`
-	Retryable   bool           `json:"retryable"`
-	Cause       string         `json:"cause"`
-	OperationID string         `json:"operation_id,omitempty"`
-	Details     map[string]any `json:"details,omitempty"`
-	Remediation []Remediation  `json:"remediation,omitempty"`
+	Code          string         `json:"code"`
+	Message       string         `json:"message"`
+	RetryStrategy string         `json:"retry_strategy"`
+	Retryable     bool           `json:"retryable"`
+	Cause         string         `json:"cause"`
+	OperationID   string         `json:"operation_id,omitempty"`
+	Details       map[string]any `json:"details,omitempty"`
+	Remediation   []Remediation  `json:"remediation,omitempty"`
 }
 
 // Remediation is a suggested, never auto-executed, typed next step.
@@ -35,6 +36,31 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func writeError(w http.ResponseWriter, status int, e Error) {
+	if e.OperationID != "" {
+		target := basePath + "/operations/" + e.OperationID
+		found := false
+		for _, step := range e.Remediation {
+			if step.Action == "get" && step.Params["path"] == target {
+				found = true
+			}
+		}
+		if !found {
+			e.Remediation = append(e.Remediation, Remediation{Action: "get", Params: map[string]any{"path": target}, Rationale: "inspect the durable operation before attempting another mutation"})
+		}
+	}
+
+	if e.RetryStrategy == "" {
+		e.RetryStrategy = "never"
+		switch {
+		case e.Code == "revision_mismatch" || e.Cause == "cursor_invalid":
+			e.RetryStrategy = "after_refresh"
+		case e.OperationID != "":
+			e.RetryStrategy = "query_operation"
+		case e.Code == "limit_exceeded" || e.Cause == "admission_refused" || e.Retryable:
+			e.RetryStrategy = "after_precondition"
+		}
+	}
+
 	writeJSON(w, status, e)
 }
 

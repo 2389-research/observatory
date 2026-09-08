@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -39,6 +40,8 @@ type Server struct {
 	manager   *runtime.Manager
 	mux       *http.ServeMux
 	features  map[string]bool
+	routes    []routeDescription
+	links     map[string]string
 	auth      authState
 	preflight PreflightFunc // nil = no preflight block in /host/status
 
@@ -101,6 +104,8 @@ func New(
 	table := []route{
 		{"GET", "/meta", "meta", s.handleMeta},
 		{"GET", "/meta/event-kinds", "meta", s.handleEventKinds},
+		{"GET", "/telemetry/import", "telemetry_import", s.handleImportHealth},
+		{"GET", "/vms/{id}/telemetry/import", "telemetry_import", s.handleImportHealth},
 		{"GET", "/events", "events", s.handleEvents},
 		{"GET", "/situation", "situation", s.handleSituation},
 		{"GET", "/attention", "attention", s.handleAttention},
@@ -144,8 +149,13 @@ func New(
 	table = append(table, s.terminalRoutes()...)
 
 	s.features = map[string]bool{}
+	s.links = map[string]string{}
 	allowed := map[string][]string{}
 	for _, r := range table {
+		s.routes = append(s.routes, describeRoute(r))
+		if r.handler != nil && r.method == "GET" && !strings.Contains(r.pattern, "{") && (r.feature != "auth" || r.pattern == "/auth/session") {
+			s.links[collectionLinkName(r)] = basePath + r.pattern
+		}
 		s.features[r.feature] = s.features[r.feature] || r.handler != nil
 		if r.handler != nil {
 			s.mux.Handle(r.method+" "+basePath+r.pattern, r.handler)
@@ -237,14 +247,16 @@ type metaAuth struct {
 }
 
 type meta struct {
-	Service                 string            `json:"service"`
-	Version                 string            `json:"version"`
-	APIVersion              string            `json:"api_version"`
-	Features                map[string]bool   `json:"features"`
-	Limits                  limits            `json:"limits"`
-	AttentionTriggerClasses []string          `json:"attention_trigger_classes"`
-	Links                   map[string]string `json:"links"`
-	Auth                    metaAuth          `json:"auth"`
+	Routes                  []routeDescription `json:"routes"`
+	Agent                   map[string]any     `json:"agent"`
+	Service                 string             `json:"service"`
+	Version                 string             `json:"version"`
+	APIVersion              string             `json:"api_version"`
+	Features                map[string]bool    `json:"features"`
+	Limits                  limits             `json:"limits"`
+	AttentionTriggerClasses []string           `json:"attention_trigger_classes"`
+	Links                   map[string]string  `json:"links"`
+	Auth                    metaAuth           `json:"auth"`
 }
 
 func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
@@ -264,20 +276,9 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 		// The active set is enabled-intersect-implemented, straight from the
 		// engine: config alone must not claim a watch no code performs (P-03).
 		AttentionTriggerClasses: s.engine.ActiveClasses(),
-		// Links name only what answers 200 today. The guide and OpenAPI join
-		// this map when they exist, not before.
-		Links: map[string]string{
-			"event_kinds":  basePath + "/meta/event-kinds",
-			"events":       basePath + "/events",
-			"situation":    basePath + "/situation",
-			"attention":    basePath + "/attention",
-			"annotations":  basePath + "/annotations",
-			"host_status":  basePath + "/host/status",
-			"templates":    basePath + "/templates",
-			"vms":          basePath + "/vms",
-			"runs":         basePath + "/runs",
-			"auth_session": basePath + "/auth/session",
-		},
+		Links:                   s.links,
+		Routes:                  s.routes,
+		Agent:                   agentContract(),
 		Auth: metaAuth{
 			Required: s.auth.ac.Enabled,
 			Mode:     "local_operator",

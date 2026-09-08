@@ -351,6 +351,36 @@ func TestStreamAnnouncesTheAttachmentFirst(t *testing.T) {
 	}
 }
 
+// This uses the real HTTP relay and its production heartbeat budget. The runner
+// fixture owns only the guest-side socket; EOF proves the attachment was released.
+func TestStreamHeartbeatReleasesUnresponsiveAttachment(t *testing.T) {
+	srv, _, fr, reg := newStreamServer(t, 1<<20)
+	_, sessionID := openSession(t, srv.URL)
+	c, _ := openStream(t, srv.URL, sessionID)
+	guest := fr.nextAttach(t)
+	attached := readControl(t, c)
+	if attached.Type != "attached" || !attached.Writer {
+		t.Fatalf("first attachment = %+v", attached)
+	}
+	// Stop browser reads: coder/websocket answers ping only while reading.
+	if err := guest.SetReadDeadline(time.Now().Add(45 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var b [1]byte
+	if _, err := guest.Read(b[:]); err != io.EOF {
+		t.Fatalf("heartbeat did not close guest attachment: %v", err)
+	}
+	session, ok := reg.Get(sessionID)
+	if !ok || session.State != terminal.StateOpen || session.WriterHolder != attached.ConnID {
+		t.Fatalf("attachment timeout must preserve the session and writer grace window: %+v", session)
+	}
+	next, _ := openStream(t, srv.URL, sessionID)
+	fr.nextAttach(t)
+	if resumed := readControl(t, next); resumed.Type != "attached" || resumed.Writer || resumed.Holder != attached.ConnID {
+		t.Fatalf("reconnect did not preserve writer grace: %+v", resumed)
+	}
+}
+
 // A second viewer watches. Its keystrokes are refused out loud: input that
 // vanishes silently is indistinguishable from a hung shell (§8.2).
 func TestStreamSecondViewerIsReadOnlyAndToldSo(t *testing.T) {

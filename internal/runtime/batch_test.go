@@ -119,7 +119,7 @@ func TestBatchStopSuccessfulStopsSiblingsAndQueued(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateBatch: %v", err)
 	}
-	mgr.Close() // wait for all member goroutines and the wave
+	mgr.WaitForTest() // wait for all member goroutines and the wave
 
 	if got := launchCalls(fk); got != 1 {
 		t.Errorf("Launch calls = %d, want 1 (queued siblings must not launch after the wave)", got)
@@ -164,7 +164,7 @@ func TestBatchStopSuccessfulPreservesSucceededOp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateBatch: %v", err)
 	}
-	mgr.Close()
+	mgr.WaitForTest()
 
 	ops := memberOpStates(t, st, result)
 	if ops["succeeded"] != 1 {
@@ -202,7 +202,7 @@ func TestBatchKeepSuccessfulLeavesSurvivors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateBatch: %v", err)
 	}
-	mgr.Close()
+	mgr.WaitForTest()
 
 	vms := memberVMStates(t, st, result)
 	if vms["running"] != 1 || vms["failed"] != 1 {
@@ -258,7 +258,7 @@ func TestBatchManagerReplayNoRelaunch(t *testing.T) {
 		}
 	}
 
-	mgr.Close() // drain every launch goroutine before counting
+	mgr.WaitForTest() // drain every launch goroutine before counting
 	if got := launchCalls(fk); got != 2 {
 		t.Errorf("Launch calls = %d, want 2 (one per member, none from the replay)", got)
 	}

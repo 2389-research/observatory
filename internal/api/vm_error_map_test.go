@@ -210,9 +210,9 @@ func TestWriteVMErrorOmitsAnOperationItDoesNotHave(t *testing.T) {
 	}
 }
 
-// The operation rides along without disturbing the mapping: same status, same
-// cause, same remediation as the plain writer produces for the same error.
-func TestNamingTheOperationChangesNothingElse(t *testing.T) {
+// An operation keeps the same failure classification while adding a concrete
+// read before retry: an effect may already have occurred.
+func TestNamingTheOperationAddsSafeRecovery(t *testing.T) {
 	boom := &runtime.ErrRuntimeOpFailed{VMID: "vm-1", Op: "stop", Err: errors.New("kvm said no")}
 
 	wantStatus, want := mapVMError(t, boom)
@@ -232,8 +232,17 @@ func TestNamingTheOperationChangesNothingElse(t *testing.T) {
 	if got.Cause != want.Cause || got.Message != want.Message || got.Retryable != want.Retryable {
 		t.Errorf("mapping drifted: got %+v, want %+v", got, want)
 	}
-	if len(got.Remediation) != len(want.Remediation) {
-		t.Errorf("remediation count = %d, want %d", len(got.Remediation), len(want.Remediation))
+	if got.RetryStrategy != "query_operation" {
+		t.Errorf("strategy=%s", got.RetryStrategy)
+	}
+	found := false
+	for _, step := range got.Remediation {
+		if step.Action == "get" && step.Params["path"] == "/api/v1/operations/op-000042" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("missing concrete operation read: %+v", got.Remediation)
 	}
 }
 

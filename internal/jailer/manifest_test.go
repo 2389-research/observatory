@@ -5,6 +5,7 @@ package jailer
 import (
 	"bytes"
 	"encoding/json"
+	"github.com/2389-research/observatory/internal/durable"
 	"os"
 	"path/filepath"
 	"sort"
@@ -328,5 +329,76 @@ func TestSlotAllocationRefusesToReidentifyAVMWhoseManifestIsUnreadable(t *testin
 	got, err := allocateSlot(dir, "vm-corrupt", 4)
 	if err == nil {
 		t.Fatalf("allocateSlot gave vm-corrupt the fresh slot %d; want a refusal", got)
+	}
+}
+
+func TestNetworkLeasesRestoreValidatedManifests(t *testing.T) {
+	state := t.TempDir()
+	if err := writeManifest(state, Manifest{VMID: "survivor", CIDR: "10.0.0.0/30"}); err != nil {
+		t.Fatal(err)
+	}
+	leases, err := NetworkLeases(state)
+	if err != nil || leases["survivor"].String() != "10.0.0.0/30" {
+		t.Fatalf("leases %v: %v", leases, err)
+	}
+	// Directory identity must agree before its route can be treated as ours.
+	if err := os.Rename(filepath.Join(state, "vms", "survivor"), filepath.Join(state, "vms", "other")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NetworkLeases(state); err == nil {
+		t.Fatal("mismatched owner accepted")
+	}
+}
+
+func TestNetworkLeasesRefuseUnknownOrDuplicatePrefixes(t *testing.T) {
+	for _, cidr := range []string{"garbage", "10.0.0.1/30", "10.0.0.0/24", "10.0.0.0/30"} {
+		t.Run(cidr, func(t *testing.T) {
+			state := t.TempDir()
+			if err := writeManifest(state, Manifest{VMID: "first", CIDR: "10.0.0.0/30"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeManifest(state, Manifest{VMID: "second", CIDR: cidr}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := NetworkLeases(state); err == nil {
+				t.Fatal("ambiguous lease accepted")
+			}
+		})
+	}
+}
+
+func TestNetworkLeasesRejectUnreadableManifest(t *testing.T) {
+	state := t.TempDir()
+	dir := filepath.Join(state, "vms", "broken")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NetworkLeases(state); err == nil {
+		t.Fatal("unreadable lease accepted")
+	}
+}
+
+func TestNetworkLeasesRefuseUnsettledDirectoryBarrier(t *testing.T) {
+	// Device filesystems expose readable directories but do not provide the
+	// directory durability that authorizes reusing absent manifest identities.
+	barrierPath := ""
+	for _, candidate := range []string{"/proc", "/sys", "/dev"} {
+		if _, err := os.ReadDir(candidate); err == nil && durable.SyncDir(candidate) != nil {
+			barrierPath = candidate
+			break
+		}
+	}
+	if barrierPath == "" {
+		t.Skip("no readable filesystem with unsupported directory fsync")
+	}
+	state := t.TempDir()
+	if err := os.Symlink(barrierPath, filepath.Join(state, "vms")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NetworkLeases(state); err == nil {
+		t.Fatal("absent manifests authorized reuse without a successful directory barrier")
 	}
 }

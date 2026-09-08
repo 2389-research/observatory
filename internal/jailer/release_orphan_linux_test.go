@@ -7,6 +7,8 @@ package jailer
 
 import (
 	"context"
+	"github.com/2389-research/observatory/internal/network"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,8 +25,13 @@ func releaseAdapter(t *testing.T, pc PrivdClient) (*Adapter, string) {
 	if err := os.MkdirAll(jailBase, 0o755); err != nil {
 		t.Fatalf("mkdir jail base: %v", err)
 	}
+	pool, err := network.NewAllocator(nil, []netip.Prefix{netip.MustParsePrefix("10.92.0.0/24")})
+	if err != nil {
+		t.Fatal(err)
+	}
 	return &Adapter{
 		cfg: Config{
+			Allocator: pool,
 			StateDir:  filepath.Join(dir, "state"),
 			StageRoot: filepath.Join(dir, "stage"),
 			JailBase:  jailBase,

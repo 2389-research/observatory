@@ -10,8 +10,8 @@ import (
 	"github.com/2389-research/observatory/internal/store"
 )
 
-// HostResources are the raw measured totals of this host, probed once at
-// startup and re-used throughout the session. They are never invented.
+// HostResources are measured at startup. Memory and CPU are session totals;
+// served runtimes refresh disk availability at each admission.
 type HostResources struct {
 	TotalMemoryMiB   int64
 	CPUCores         int
@@ -43,8 +43,35 @@ func ProbeHost(statePath string) (HostResources, error) {
 // receive a ReservationTotals snapshot taken inside the tx for consistency
 // (AT-012: concurrent creates must not oversubscribe the same capacity).
 type Policy struct {
-	Admission config.Admission
-	Host      HostResources
+	Admission   config.Admission
+	Host        HostResources
+	ObserveDisk func([]store.DiskReservation) (DiskObservation, error)
+}
+
+// DiskObservation credits only allocated guest image blocks belonging to live
+// reservations. FreeMiB is sampled after those blocks under the lifecycle lock;
+// a busy lifecycle may return free space alone, retaining all reservation debt.
+type DiskObservation struct {
+	FreeMiB         int64
+	MaterializedMiB int64
+}
+
+// DiskCapacity refreshes filesystem availability while preserving the existing
+// usable-minus-reserved contract. Materialized bytes are already absent from free.
+func (p Policy) DiskCapacity(totals store.ReservationTotals) (int64, error) {
+	if p.ObserveDisk == nil {
+		return p.UsableDiskMiB(), nil
+	}
+	observation, err := p.ObserveDisk(totals.Disks)
+	if err != nil {
+		return 0, fmt.Errorf("observe disk capacity: %w", err)
+	}
+	if observation.FreeMiB < 0 || observation.MaterializedMiB < 0 || observation.MaterializedMiB > totals.DiskMiB {
+		return 0, fmt.Errorf("invalid disk capacity observation")
+	}
+	// Do not clamp free-minus-scratch before adding credit: doing so can
+	// conceal a depleted scratch reserve when existing disks are materialized.
+	return observation.FreeMiB - p.Admission.ReserveInspectorScratchMiB + observation.MaterializedMiB, nil
 }
 
 // UsableMemoryMiB is the RAM available for VM guests and their per-VM overhead,
@@ -111,20 +138,23 @@ func (p Policy) Admit(totals store.ReservationTotals, memTotalMiB int64, vcpu in
 		}
 	}
 
-	usableDisk := p.UsableDiskMiB()
+	usableDisk, err := p.DiskCapacity(totals)
+	if err != nil {
+		return &store.AdmissionRefusal{Cause: "insufficient_capacity", Message: err.Error()}
+	}
 	if totals.DiskMiB+diskMiB > usableDisk {
 		free := usableDisk - totals.DiskMiB
-		// The two numbers behind "usable" are named because neither is visible
-		// from outside: the reserve is a flat figure that can swallow most of a
-		// nearly-full disk, and free space is probed once, so clearing disk now
-		// does not move this number until the daemon restarts. Without them a
-		// refusal on a visibly empty disk reads as a defect in the daemon.
+		measured := "live filesystem observation with allocated reservation credit"
+		if p.ObserveDisk == nil {
+			measured = fmt.Sprintf("host had %d MiB free at startup", p.Host.StateDiskFreeMiB)
+		}
+
 		return &store.AdmissionRefusal{
 			Cause: "insufficient_capacity",
 			Message: fmt.Sprintf(
-				"disk: need %d MiB, only %d MiB free (usable %d; host had %d MiB free at startup, %d MiB held for inspection scratch; %d MiB reserved by VMs)",
-				diskMiB, free, usableDisk,
-				p.Host.StateDiskFreeMiB, p.Admission.ReserveInspectorScratchMiB, totals.DiskMiB),
+				"disk: need %d MiB, only %d MiB free (usable %d; %s; %d MiB held for inspection scratch; %d MiB reserved by VMs)",
+				diskMiB, free, usableDisk, measured,
+				p.Admission.ReserveInspectorScratchMiB, totals.DiskMiB),
 		}
 	}
 

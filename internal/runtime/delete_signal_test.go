@@ -61,7 +61,7 @@ func failedVMAfterLaunch(t *testing.T, st *store.Store, fk *runtimetest.Fake, na
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
-	mgr.Close() // drains the launch worker
+	mgr.WaitForTest() // drains the launch worker
 
 	after, err := st.GetVM(t.Context(), vm.VMID)
 	if err != nil {
@@ -222,7 +222,7 @@ func TestStrandedDeleteRecoversOnRestart(t *testing.T) {
 	if parked.ObservedState != "deleting" {
 		t.Fatalf("state after a refused release = %q, want deleting", parked.ObservedState)
 	}
-	mgr.Close()
+	mgr.WaitForTest()
 	n := len(fk.CallsFor(vmID))
 
 	// Restart: Reconcile owns the retry.

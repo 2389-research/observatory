@@ -564,29 +564,29 @@ func TestAbortStartVMSparesAForeignPID(t *testing.T) {
 		t.Fatalf("write pid file: %v", err)
 	}
 
-	if err := ops.AbortStartVM(privd.VMEntry{VMID: "vm-foreign"}); err != nil {
-		t.Fatalf("AbortStartVM: %v", err)
+	if err := ops.AbortStartVM(privd.VMEntry{VMID: "vm-foreign"}); err == nil {
+		t.Fatal("uncertain ownership reported released")
 	}
 	// Reaching this line at all is the assertion: a SIGKILL to our own pid ends
-	// the process. The tree still has to be gone.
-	if _, err := os.Stat(jailDir); !os.IsNotExist(err) {
-		t.Errorf("jail tree survived the abort (stat err: %v)", err)
+	// the process. Unproven ownership must retain the tree.
+	if _, err := os.Stat(jailDir); err != nil {
+		t.Errorf("uncertain jail tree was removed (stat err: %v)", err)
 	}
 }
 
-// TestAbortStartVMToleratesAGarbagePIDFile: a truncated or half-written pid file
-// must not stop the tree removal, which is the part that always applies.
-func TestAbortStartVMToleratesAGarbagePIDFile(t *testing.T) {
+// TestAbortStartVMRetainsAGarbagePIDFile: a truncated or half-written pid file
+// cannot prove the VMM gone, so its ownership tree must remain.
+func TestAbortStartVMRetainsAGarbagePIDFile(t *testing.T) {
 	ops, jailBase := abortOps(t)
 	jailDir := writeJailTree(t, jailBase, "vm-garbage")
 	if err := os.WriteFile(filepath.Join(jailDir, "root", "firecracker.pid"), []byte("not-a-pid"), 0o600); err != nil {
 		t.Fatalf("write pid file: %v", err)
 	}
 
-	if err := ops.AbortStartVM(privd.VMEntry{VMID: "vm-garbage"}); err != nil {
-		t.Fatalf("AbortStartVM: %v", err)
+	if err := ops.AbortStartVM(privd.VMEntry{VMID: "vm-garbage"}); err == nil {
+		t.Fatal("uncertain ownership reported released")
 	}
-	if _, err := os.Stat(jailDir); !os.IsNotExist(err) {
-		t.Errorf("jail tree survived the abort (stat err: %v)", err)
+	if _, err := os.Stat(jailDir); err != nil {
+		t.Errorf("uncertain jail tree was removed (stat err: %v)", err)
 	}
 }

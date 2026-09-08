@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/2389-research/observatory/internal/events"
+	"github.com/2389-research/observatory/internal/spool"
 	"github.com/2389-research/observatory/internal/store"
 )
 
@@ -66,7 +67,12 @@ type TelemetryHealth struct {
 // for a running VM: every other lifecycle state answers the question by itself,
 // because a guest that is not executing cannot report and a guest that has not
 // finished booting has not been asked yet.
-func (e *Engine) VMTelemetryHealth(ctx context.Context, vm *store.VM) (TelemetryHealth, error) {
+func (e *Engine) VMTelemetryHealth(ctx context.Context, vm *store.VM) (health TelemetryHealth, err error) {
+	defer func() {
+		if err == nil && (e.ImporterStatus(vm.VMID).State == "degraded" || e.ImporterStatus("").State == "degraded") {
+			health.State = TelemetryDegraded
+		}
+	}()
 	switch vm.ObservedState {
 	case "provisioning", "starting":
 		return TelemetryHealth{State: TelemetryStarting}, nil
@@ -179,4 +185,22 @@ func (e *Engine) sensorsDegraded(ctx context.Context) (int, error) {
 			after = vm.RowID
 		}
 	}
+}
+
+// SetImporter connects live importer diagnostics to service health. The pointer is
+// atomic because daemon startup may wire it after creating the HTTP handler.
+func (e *Engine) SetImporter(imp *spool.Importer) {
+	if imp != nil {
+		imp.SetFailureReporter(e.reportImportFailure)
+	}
+	e.importer.Store(imp)
+}
+
+// ImporterStatus returns one bounded process-local observation, never an invented
+// healthy result when the importer is absent or has not yet polled.
+func (e *Engine) ImporterStatus(vmID string) spool.ImportStatus {
+	if imp := e.importer.Load(); imp != nil {
+		return imp.Status(vmID)
+	}
+	return spool.ImportStatus{State: "unknown", ConsecutiveFailures: "0"}
 }

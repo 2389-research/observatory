@@ -7,11 +7,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 
 	"github.com/2389-research/observatory/internal/config"
 	"github.com/2389-research/observatory/internal/jailer"
@@ -77,13 +79,27 @@ func buildFirecrackerRuntime(
 		netip.MustParsePrefix("10.190.0.0/16"),
 		netip.MustParsePrefix("10.191.0.0/16"),
 	}
+	pc := &privd.Client{SocketPath: cfg.Paths.PrivilegedSocket}
+	// Exempt only exact routes whose manifest and privileged ownership agree.
+	// A corrupt inventory grants no exemptions; the adapter retains its cleanup
+	// and reconciliation paths, while refusing launch until ownership is known.
+	if leases, leaseErr := jailer.NetworkLeases(cfg.Paths.State); leaseErr == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		claims, claimErr := pc.NetworkLeases(ctx)
+		cancel()
+		if claimErr == nil {
+			for owner, prefix := range leases {
+				if claims[owner] != prefix.String() {
+					delete(leases, owner)
+				}
+			}
+			routes = network.ExcludeOwnedRoutes(routes, leases)
+		}
+	}
 	alloc, err := network.NewAllocator(routes, pools)
-	if err != nil {
+	if err != nil && !errors.Is(err, network.ErrAllPoolsOverlap) {
 		return nil, fmt.Errorf("runtime_mode firecracker: build network allocator: %w", err)
 	}
-
-	// Build privd client.
-	pc := &privd.Client{SocketPath: cfg.Paths.PrivilegedSocket}
 
 	// Assemble jailer Config. Paths without a dedicated config field are derived
 	// from existing configured roots (see doc comment above).

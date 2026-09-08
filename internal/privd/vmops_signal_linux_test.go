@@ -162,7 +162,9 @@ func TestSignalPathsGiveBackTheirDescriptors(t *testing.T) {
 		if err := ops.SignalVM(stale, "term"); err == nil {
 			t.Fatalf("SignalVM with a stale entry returned nil on iteration %d", i)
 		}
-		ops.killJailedVMM("vm-signal-neighbour")
+		if err := ops.killJailedVMM("vm-signal-neighbour"); err == nil {
+			t.Fatalf("foreign process ownership accepted on iteration %d", i)
+		}
 	}
 	if !f.alive(t) {
 		t.Fatal("the stand-in died during the leak loop; both routes were supposed to refuse")

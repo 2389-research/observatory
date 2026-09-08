@@ -55,6 +55,16 @@ all eight issues back and verified their bodies, priorities and open status.
 
 None right now.
 
+## Active kata completion — 2026-09-08
+
+Execution state is in `docs/superpowers/plans/2026-09-08-kata-completion.md`.
+Ten open kata are being completed on `kata-hardening`. Batch 1/2 changes have
+passed an initial canonical gate and real Docker/KVM import/terminal and
+restart/reclaim/successor scenarios; review found further durability and lease
+gaps now being fixed. These are uncommitted candidate results, not released
+acceptance. Mutation recovery and bounded lifecycle workers are active;
+automatic cleanup retry and the agent contract follow. No kata is closed yet.
+
 ## Linux track host (answered 2026-08-31)
 
 `aibox03` — a private host named by `$VMOBS_LINUX_HOST`. Verified by probe: bare metal (`systemd-detect-virt: none`), x86_64 Intel VT-x (`kvm_intel` loaded), Ubuntu 24.04.4 LTS, kernel 6.8.0-134 (fanotify + eBPF capable), 32 CPUs, 62 GiB RAM, 60 GiB free on `/`. SSH works as `harper` (key auth). Setup needed at L0 start: add `harper` to the `kvm` group (has sudo), install firecracker. Kernel/image pipeline targets x86_64.

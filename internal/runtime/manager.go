@@ -203,6 +203,7 @@ type Manager struct {
 	// This prevents the wg.Add/wg.Wait race described in gotchas.md.
 	closeMu sync.RWMutex
 	closed  bool
+	drained chan struct{}
 
 	// ctx is the manager's root context; cancelled by Close to interrupt launches.
 	ctx    context.Context
@@ -219,6 +220,7 @@ type Manager struct {
 	// stalled one has resources still on the host and must be resumed.
 	deletingMu sync.Mutex
 	deleting   map[string]bool
+	cleanup    cleanupController
 }
 
 // NewManager creates a Manager and immediately runs Reconcile to clean up any
@@ -246,11 +248,18 @@ func NewManagerWithReportGen(st *store.Store, rt Runtime, cfg ManagerConfig, rep
 		cancel:    cancel,
 		reportGen: reportGen,
 		deleting:  map[string]bool{},
+		cleanup:   cleanupController{claims: map[string]*lifecycleClaim{}},
+	}
+	if observer, ok := rt.(interface {
+		ObserveDisk([]store.DiskReservation) (DiskObservation, error)
+	}); ok {
+		m.policy.ObserveDisk = observer.ObserveDisk
 	}
 	if err := m.Reconcile(ctx); err != nil {
 		cancel()
 		return nil, fmt.Errorf("reconcile on startup: %w", err)
 	}
+	m.scheduleCleanup()
 	return m, nil
 }
 
@@ -262,6 +271,28 @@ func (m *Manager) Templates() map[string]Template { return maps.Clone(m.cfg.Temp
 // Availability delegates to the underlying Runtime. Callers check the returned
 // error for *UnavailableError to surface honest host-status information.
 func (m *Manager) Availability(ctx context.Context) error { return m.rt.Availability(ctx) }
+
+// beginMutation enrolls synchronous storage users in the same close gate as workers.
+func (m *Manager) beginMutation() error {
+	m.closeMu.RLock()
+	defer m.closeMu.RUnlock()
+	if m.closed {
+		return &UnavailableError{Reason: "manager is closing"}
+	}
+	m.wg.Add(1)
+	return nil
+}
+
+// DoTracked runs a synchronous storage user under the shutdown admission gate.
+// It includes HTTP handlers that keep running after upgrading their connection.
+func (m *Manager) DoTracked(fn func()) bool {
+	if err := m.beginMutation(); err != nil {
+		return false
+	}
+	defer m.wg.Done()
+	fn()
+	return true
+}
 
 // GoTracked runs fn on a goroutine tracked by the close gate. It returns
 // false (and does not run fn) once Close has begun: work enqueued during
@@ -280,15 +311,37 @@ func (m *Manager) GoTracked(fn func()) bool {
 	return true
 }
 
-// Close waits for all in-flight tracked goroutines, then releases the
-// manager's context. The gate flips first so no new goroutine can slip in
-// between wg.Wait and cancel.
-func (m *Manager) Close() {
+// BeginClose stops admission and interrupts queued and active work before draining.
+func (m *Manager) BeginClose() {
 	m.closeMu.Lock()
+	defer m.closeMu.Unlock()
+	if m.closed {
+		return
+	}
 	m.closed = true
-	m.closeMu.Unlock()
-	m.wg.Wait()
+	if m.cleanup.timer != nil {
+		m.cleanup.timer.Stop()
+	}
+	m.drained = make(chan struct{})
 	m.cancel()
+	go func() { m.wg.Wait(); close(m.drained) }()
+}
+
+// Close cancels work and waits for all storage users. Daemons use Drain for a bounded wait.
+func (m *Manager) Close() {
+	m.BeginClose()
+	<-m.drained
+}
+
+// Drain bounds shutdown waiting. On error the store must remain open until process exit.
+func (m *Manager) Drain(ctx context.Context) error {
+	m.BeginClose()
+	select {
+	case <-m.drained:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // operationSlack is the non-grace part of a stop-shaped mutation's budget: the
@@ -363,7 +416,12 @@ func (m *Manager) OperationContext(parent context.Context) (context.Context, con
 // manager closes. It is the shape every lifecycle mutation runs on; the budget
 // is what tells the shapes apart.
 func (m *Manager) detachedContext(parent context.Context, budget time.Duration) (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), budget)
+	return m.mutationContext(context.WithoutCancel(parent), budget)
+}
+
+// mutationContext retains caller cancellation and also bounds direct manager calls.
+func (m *Manager) mutationContext(parent context.Context, budget time.Duration) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(parent, budget)
 	stop := context.AfterFunc(m.ctx, cancel)
 	return ctx, func() {
 		stop()
@@ -430,16 +488,9 @@ const recoveryBudget = 75 * time.Second
 // bookkeeping off exactly during shutdown, when mutations are most likely to be
 // interrupted mid-flight.
 //
-// That caller can outlive the manager, and an operator should know what it
-// costs. HTTP handlers are not tracked by m.wg and srv.Shutdown stops waiting
-// after 10s (cmd/vmobsd/main.go), after which Manager.Close and then st.Close
-// run on the way out — so bookkeeping started just before shutdown can still be
-// writing up to recoveryBudget later, against a store that is closing under it.
-// sql.DB.Close serialises with statements already in flight, so the cost is a
-// lost write, not a corrupt one: a mutation interrupted by shutdown may leave no
-// terminal record at all. Reconcile settles those on the next start — in-flight
-// operations become failed and transitional VMs are resolved — which is why
-// losing the write is survivable and switching the bookkeeping off is not.
+// Public mutations and HTTP handlers enroll in the close gate. Drain waits
+// for these writes alongside workers; if its deadline expires, the daemon
+// leaves the store open until process exit rather than closing beneath them.
 //
 // One budget per mutation tail, not one per derivation. Two of the four call
 // sites hand their recovery context on to failAction, which asks for one of its
@@ -487,13 +538,19 @@ func (m *Manager) SetReportGen(fn func(runID string)) {
 
 // Capacity returns the current usable/reserved/free view of host resources.
 func (m *Manager) Capacity(ctx context.Context) (CapacitySnapshot, error) {
-	totals, err := m.st.ReservationTotals(ctx)
+	var totals store.ReservationTotals
+	var usableDisk int64
+	err := m.st.WithReservationTotals(ctx, func(snapshot store.ReservationTotals) error {
+		totals = snapshot
+		var err error
+		usableDisk, err = m.policy.DiskCapacity(totals)
+		return err
+	})
 	if err != nil {
-		return CapacitySnapshot{}, fmt.Errorf("read reservations: %w", err)
+		return CapacitySnapshot{}, fmt.Errorf("observe capacity: %w", err)
 	}
 	usableMem := m.policy.UsableMemoryMiB()
 	usableVCPU := m.policy.UsableVCPU()
-	usableDisk := m.policy.UsableDiskMiB()
 	return CapacitySnapshot{
 		UsableMemoryMiB:   usableMem,
 		UsableVCPU:        usableVCPU,
@@ -529,6 +586,12 @@ type CreateRequest struct {
 // On idempotent replay the bool is true and the stored result is returned
 // without re-provisioning.
 func (m *Manager) CreateVM(ctx context.Context, owner string, req CreateRequest) (*store.VM, *store.Operation, bool, error) {
+	if err := m.beginMutation(); err != nil {
+		return nil, nil, false, err
+	}
+	defer m.wg.Done()
+	ctx, mutationCancel := m.mutationContext(ctx, launchBudget)
+	defer mutationCancel()
 	// AT-001: check runtime availability first; nothing persisted on failure.
 	if err := m.rt.Availability(ctx); err != nil {
 		return nil, nil, false, fmt.Errorf("runtime not available: %w", err)
@@ -653,24 +716,34 @@ func (m *Manager) CreateVM(ctx context.Context, owner string, req CreateRequest)
 // If GoTracked returns false the manager is closing; the VM stays in provisioning
 // until the next Reconcile repairs it — that is exactly what reconcile is for.
 func (m *Manager) enqueueLaunch(vm *store.VM, opID int64, tpl Template, vcpu int, memMiB, rootDisk, wsDisk int64) {
-	m.GoTracked(func() {
+	releaseClaim, err := m.claimLifecycle(m.ctx, vm.VMID)
+	if err != nil {
+		m.failLaunch(m.ctx, vm.VMID, opID, "enqueue", err.Error())
+		return
+	}
+	if !m.GoTracked(func() {
+		defer releaseClaim()
+		ctx, cancel := m.detachedContext(m.ctx, launchBudget)
+		defer cancel()
 		// Acquire a provisioning slot.
 		select {
 		case m.sem <- struct{}{}:
-		case <-m.ctx.Done():
+		case <-ctx.Done():
 			// Manager is closing before the slot was acquired; abandon.
-			m.failLaunch(m.ctx, vm.VMID, opID, "enqueue", "manager closed before slot acquired")
+			m.failLaunch(ctx, vm.VMID, opID, "enqueue", "manager closed before slot acquired")
 			return
 		}
 		defer func() { <-m.sem }()
-		m.runLaunch(vm, opID, tpl, vcpu, memMiB, rootDisk, wsDisk)
-	})
+		m.runLaunch(ctx, vm, opID, tpl, vcpu, memMiB, rootDisk, wsDisk)
+	}) {
+		releaseClaim()
+		m.failLaunch(m.ctx, vm.VMID, opID, "enqueue", "manager closed before launch was scheduled")
+	}
 }
 
 // runLaunch executes the provisioning sequence: provisioning→starting→running
-// (§5.3). On any failure, transitions to failed and releases compute.
-func (m *Manager) runLaunch(vm *store.VM, opID int64, tpl Template, vcpu int, memMiB, rootDisk, wsDisk int64) {
-	ctx := m.ctx
+// (§5.3). Failure retains compute until host cleanup proves the VMM absent.
+func (m *Manager) runLaunch(ctx context.Context, vm *store.VM, opID int64, tpl Template, vcpu int, memMiB, rootDisk, wsDisk int64) {
 	vmID := vm.VMID
 	bootID := uuid.NewString()
 
@@ -712,11 +785,12 @@ func (m *Manager) runLaunch(vm *store.VM, opID int64, tpl Template, vcpu int, me
 	// write that can say what this boot actually runs.
 	staged, err := m.rt.Launch(ctx, spec)
 	if err != nil {
-		m.failLaunch(ctx, vmID, opID, "launch", err.Error())
-		_ = m.rt.ForceStop(ctx, vmID) // best-effort cleanup
+		m.failLaunch(ctx, vmID, opID, launchFailureStage(err), err.Error())
 		return
 	}
 
+	ctx, recoverCancel := m.recoveryContext(ctx)
+	defer recoverCancel()
 	// starting → running
 	from = "starting"
 	if _, err := m.st.TransitionVM(ctx, store.TransitionInput{
@@ -731,7 +805,6 @@ func (m *Manager) runLaunch(vm *store.VM, opID int64, tpl Template, vcpu int, me
 			return // stop raced us after launch; leave cleanup to the stop path
 		}
 		m.failLaunch(ctx, vmID, opID, "running", err.Error())
-		_ = m.rt.ForceStop(ctx, vmID)
 		return
 	}
 
@@ -754,16 +827,44 @@ func (m *Manager) runLaunch(vm *store.VM, opID int64, tpl Template, vcpu int, me
 	}
 }
 
+// launchFailureStage distinguishes a live host worker from a finished failure.
+func launchFailureStage(err error) string {
+	var pending *ErrLaunchPending
+	if errors.As(err, &pending) {
+		return "launch_pending"
+	}
+	return "launch"
+}
+
 // failLaunch transitions a VM to failed state and marks its operation failed.
 func (m *Manager) failLaunch(ctx context.Context, vmID string, opID int64, stage, reason string) {
+	ctx, cancel := m.recoveryContext(ctx)
+	defer cancel()
+	releaseCompute := stage != "launch_pending"
+	if stage == "launch" || stage == "running" {
+		// Cleanup cannot spend the writes' share of the recovery tail.
+		cleanupCtx, cleanupCancel := context.WithTimeout(ctx, recoveryBudget-15*time.Second)
+		err := m.rt.ForceStop(cleanupCtx, vmID)
+		cleanupCancel()
+		var pending *ErrCleanupPending
+		releaseCompute = err == nil || errors.As(err, &pending)
+		if err != nil {
+			reason += "; cleanup: " + err.Error()
+		}
+	}
+	from := "starting"
+	if stage == "enqueue" || stage == "starting" {
+		from = "provisioning"
+	}
 	_, _ = m.st.TransitionVM(ctx, store.TransitionInput{
 		VMID:           vmID,
+		From:           &from,
 		To:             "failed",
 		Reason:         reason,
 		OperationID:    opID,
 		FailureStage:   &stage,
 		FailureReason:  &reason,
-		ReleaseCompute: true,
+		ReleaseCompute: releaseCompute,
 	})
 	// Hook: conclude any active run on the VM with the launch-fail trigger (R8).
 	m.onVMLaunchFailed(ctx, vmID)
@@ -784,12 +885,23 @@ func (m *Manager) failLaunch(ctx context.Context, vmID string, opID int64, stage
 // Action performs a typed lifecycle action on a VM synchronously.
 // Each invocation creates its own operation row (kind="vm.action").
 func (m *Manager) Action(ctx context.Context, vmID, action string, expectedRevision *int64) (*store.VM, *store.Operation, error) {
+	if err := m.beginMutation(); err != nil {
+		return nil, nil, err
+	}
+	defer m.wg.Done()
+	ctx, mutationCancel := m.mutationContext(ctx, time.Duration(m.cfg.VMDefaults.StopGraceSeconds)*time.Second+operationSlack)
+	defer mutationCancel()
 	switch action {
 	case "start", "pause", "resume", "stop", "force_stop":
 	default:
 		return nil, nil, &ErrUnknownAction{Known: validActions}
 	}
 
+	releaseClaim, err := m.claimLifecycle(ctx, vmID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer releaseClaim()
 	vm, err := m.st.GetVM(ctx, vmID)
 	if err != nil {
 		return nil, nil, err
@@ -901,8 +1013,7 @@ func (m *Manager) doAction(ctx context.Context, vm *store.VM, action string, opI
 			// and cleaning up on that context would do neither.
 			recCtx, recCancel := m.recoveryContext(startCtx)
 			defer recCancel()
-			m.failLaunch(recCtx, vmID, opID, "launch", err.Error())
-			_ = m.rt.ForceStop(recCtx, vmID)
+			m.failLaunch(recCtx, vmID, opID, launchFailureStage(err), err.Error())
 			op, _ := m.st.GetOperation(recCtx, opID)
 			return updVM, op, &ErrRuntimeOpFailed{VMID: vmID, Op: "launch", Err: err}
 		}
@@ -1142,6 +1253,17 @@ func (m *Manager) endDelete(vmID string) {
 }
 
 func (m *Manager) Delete(ctx context.Context, vmID string, force bool, expectedRevision *int64) (*store.VM, error) {
+	if err := m.beginMutation(); err != nil {
+		return nil, err
+	}
+	defer m.wg.Done()
+	ctx, mutationCancel := m.mutationContext(ctx, time.Duration(m.cfg.VMDefaults.StopGraceSeconds)*time.Second+operationSlack)
+	defer mutationCancel()
+	releaseClaim, err := m.claimLifecycle(ctx, vmID)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseClaim()
 	vm, err := m.st.GetVM(ctx, vmID)
 	if err != nil {
 		return nil, err
@@ -1216,10 +1338,8 @@ func (m *Manager) Delete(ctx context.Context, vmID string, force bool, expectedR
 			}
 		}
 		if err := m.rt.ForceStop(ctx, vmID); err != nil {
-			var ue *UnavailableError
-			if !errors.As(err, &ue) { // unavailable runtime is fine — VM not running
-				return vm, &ErrRuntimeOpFailed{VMID: vmID, Op: "force_stop", Err: err}
-			}
+			_ = m.st.RecordCleanupFailure(ctx, vmID, vm.ObservedState, err.Error())
+			return vm, &ErrRuntimeOpFailed{VMID: vmID, Op: "force_stop", Err: err}
 		}
 		signalled = true
 		_, stopErr := m.st.TransitionVM(ctx, store.TransitionInput{
@@ -1277,10 +1397,8 @@ func (m *Manager) Delete(ctx context.Context, vmID string, force bool, expectedR
 	// What it removes is the case where nobody asked at all.
 	if !signalled {
 		if err := m.rt.ForceStop(ctx, vmID); err != nil {
-			var ue *UnavailableError
-			if !errors.As(err, &ue) {
-				return vm, &ErrRuntimeOpFailed{VMID: vmID, Op: "force_stop", Err: err}
-			}
+			_ = m.st.RecordCleanupFailure(ctx, vmID, vm.ObservedState, err.Error())
+			return vm, &ErrRuntimeOpFailed{VMID: vmID, Op: "force_stop", Err: err}
 		}
 	}
 
@@ -1288,9 +1406,8 @@ func (m *Manager) Delete(ctx context.Context, vmID string, force bool, expectedR
 	// is scoped to what Release owns -- the network allocation, the stage dir,
 	// <StateDir>/vms/<id>/, the jail chroot and privd's ledger entry
 	// (internal/jailer/stop.go): no VM row reads "deleted" while any of those
-	// survive, because a real error here fails the delete and leaves the row in
-	// "deleting". UnavailableError is the one tolerated failure -- a runtime
-	// absent on startup reconcile is normal and must not wedge deletes.
+	// survive, because any error here retains the row in "deleting".
+	// An unavailable runtime cannot observe release and is not proof of absence.
 	//
 	// Release owns that list whether or not the VM still has a manifest. It used
 	// to own the last two only when the manifest was already gone, which left
@@ -1312,18 +1429,8 @@ func (m *Manager) Delete(ctx context.Context, vmID string, force bool, expectedR
 	// Release never signals a runner at all. That one needs the M1b cleanup
 	// backlog, not this call.
 	if err := m.rt.Release(ctx, vmID); err != nil {
-		var ue *UnavailableError
-		if !errors.As(err, &ue) {
-			// The typed error below tells this caller everything, and tells
-			// nobody else anything: it is a response body, and the row parked at
-			// "deleting" outlives the request that produced it. Record the
-			// reason beside the row so the next operator to look -- days later,
-			// after a restart, from the event stream -- finds the same answer
-			// this caller got (SPEC 5.3: record cleanup failures and retry them).
-			_ = m.st.RecordCleanupFailure(ctx, vmID, "deleting", err.Error())
-			return nil, &ErrReleaseFailed{VMID: vmID, Reason: err.Error()}
-		}
-		// UnavailableError is tolerated: an absent runtime must not wedge deletes.
+		_ = m.st.RecordCleanupFailure(ctx, vmID, "deleting", err.Error())
+		return nil, &ErrReleaseFailed{VMID: vmID, Reason: err.Error()}
 	}
 
 	vm, err = m.st.TransitionVM(ctx, store.TransitionInput{
@@ -1373,9 +1480,21 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 	for _, vm := range allVMs {
 		switch vm.ObservedState {
 		case "provisioning", "starting":
-			// VMM never started or never reached running; mark failed.
+			// A starting row can hide a late successful host effect. Only an
+			// observed stop allows its compute to return to admission.
 			stage := vm.ObservedState
 			reason := "controller_restart"
+			releaseCompute := vm.ObservedState == "provisioning"
+			if !releaseCompute {
+				tail, cancel := m.recoveryContext(ctx)
+				stopErr := m.rt.ForceStop(tail, vm.VMID)
+				cancel()
+				var pending *ErrCleanupPending
+				releaseCompute = stopErr == nil || errors.As(stopErr, &pending)
+				if stopErr != nil {
+					reason += "; cleanup: " + stopErr.Error()
+				}
+			}
 			_, _ = m.st.TransitionVM(ctx, store.TransitionInput{
 				VMID:           vm.VMID,
 				To:             "failed",
@@ -1383,7 +1502,7 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 				OperationID:    0,
 				FailureStage:   &stage,
 				FailureReason:  &reason,
-				ReleaseCompute: true,
+				ReleaseCompute: releaseCompute,
 			})
 		case "running", "paused":
 			// Adopted: the runtime's startup scan found this VM's VMM alive with a
@@ -1579,6 +1698,17 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 // replays are normal and must not cause errors. VMs in "stopping" are a no-op
 // as well — that stop belongs to whoever started it. Unknown VMs return nil.
 func (m *Manager) NotifyVMMExit(ctx context.Context, vmID, bootID, reason string, graceful bool) error {
+	if err := m.beginMutation(); err != nil {
+		return err
+	}
+	defer m.wg.Done()
+	ctx, mutationCancel := m.mutationContext(ctx, launchBudget)
+	defer mutationCancel()
+	releaseClaim, err := m.claimLifecycle(ctx, vmID)
+	if err != nil {
+		return err
+	}
+	defer releaseClaim()
 	vm, err := m.st.GetVM(ctx, vmID)
 	if err != nil {
 		// Unknown VM — no-op.

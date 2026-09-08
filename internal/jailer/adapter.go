@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -45,7 +46,7 @@ type Config struct {
 	MaxSlots    int    // maximum concurrent VMs
 	CIDBase     uint32 // vsock CID = CIDBase + Slot
 
-	Allocator *network.Allocator // CIDR allocator; caller must not use concurrently
+	Allocator *network.Allocator // atomic CIDR lease cache reconstructed from manifests
 	Preflight func(ctx context.Context, refresh bool) preflight.Report
 
 	// AttachTimeout overrides the default 60s attach-wait deadline. Zero means 60s.
@@ -80,13 +81,20 @@ func New(cfg Config, pc privdClient) (*Adapter, error) {
 	if pc == nil {
 		return nil, errors.New("jailer: privd client is required")
 	}
-	return &Adapter{cfg: cfg, pc: pc}, nil
+	a := &Adapter{cfg: cfg, pc: pc}
+	// An unreadable inventory must not prevent reconciliation or deletion.
+	// Launch and Availability report it and refuse new allocation until repaired.
+	_ = a.restoreNetworkLeases()
+	return a, nil
 }
 
 // Availability checks whether the host can launch a VM right now.
 // AT-001: the first check with Status=="fail" becomes the UnavailableError reason,
 // formatted as "<check.ID>: <check.Summary>" so the operator knows exactly what failed.
 func (a *Adapter) Availability(ctx context.Context) error {
+	if _, err := NetworkLeases(a.cfg.StateDir); err != nil {
+		return &runtime.UnavailableError{Reason: err.Error()}
+	}
 	if a.cfg.Preflight == nil {
 		return nil
 	}
@@ -117,3 +125,40 @@ func (a *Adapter) Resume(_ context.Context, _ string) error {
 // Note: Stop, ForceStop, Release, and Reconcile are implemented in stop.go (//go:build linux).
 // Launch is in launch.go (//go:build linux). The runtime.Runtime compile-time check lives there.
 // Non-linux stubs for Stop/ForceStop/Release live in stop_other.go.
+
+// restoreNetworkLeases rebuilds occupancy from manifests and privileged claims.
+// Launch holds launchMu, so a release cannot remove a manifest during the scan.
+func (a *Adapter) restoreNetworkLeases() error {
+	leases, err := NetworkLeases(a.cfg.StateDir)
+	if err != nil {
+		return err
+	}
+	inventory, ok := a.pc.(interface {
+		NetworkLeases(context.Context) (map[string]string, error)
+	})
+	if !ok {
+		return errors.New("jailer: privileged network lease inventory unavailable")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	claims, err := inventory.NetworkLeases(ctx)
+	if err != nil {
+		return fmt.Errorf("jailer: privileged network lease inventory: %w", err)
+	}
+	for owner, cidr := range claims {
+		prefix, err := netip.ParsePrefix(cidr)
+		if !privd.ValidVMID(owner) || err != nil || !prefix.Addr().Is4() || prefix.Bits() != 30 || prefix != prefix.Masked() {
+			return fmt.Errorf("jailer: invalid privileged network lease %q %q", owner, cidr)
+		}
+		if manifest, exists := leases[owner]; exists && manifest != prefix {
+			return fmt.Errorf("jailer: network lease disagreement for %s: manifest %s, privd %s", owner, manifest, prefix)
+		}
+		leases[owner] = prefix
+	}
+	for owner, p := range leases {
+		if err := a.cfg.Allocator.Restore(owner, p); err != nil {
+			return err
+		}
+	}
+	return nil
+}

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/2389-research/observatory/internal/api"
 	"github.com/2389-research/observatory/internal/events"
@@ -26,6 +28,9 @@ const (
 	exitTransport = 2 // no structured answer: connection, timeout, or garbage
 	exitUsage     = 3 // the invocation itself was wrong
 )
+
+const defaultRequestTimeout = 30 * time.Second
+const maxResponseBytes = 16 << 20
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -84,6 +89,7 @@ commands:
 
 flags:
   --api URL    daemon base URL (default $VMOBS_API or http://127.0.0.1:8787)
+  --timeout D  positive request budget, including response body (default 30s)
   --json       print the API's JSON verbatim instead of human rendering
   --token STR  bearer token secret ($VMOBS_TOKEN; flag wins over env)
   --ca PATH    PEM CA bundle for TLS verification ($VMOBS_CA; flag wins over env)
@@ -99,8 +105,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 	apiBase := fs.String("api", defaultBase(), "daemon base URL")
 	jsonOut := fs.Bool("json", false, "print API JSON verbatim")
 	tokenFlag := fs.String("token", "", "bearer token secret (overrides VMOBS_TOKEN)")
+	timeout := fs.Duration("timeout", defaultRequestTimeout, "positive request budget including body")
 	caFlag := fs.String("ca", "", "PEM CA bundle path (overrides VMOBS_CA)")
 	if err := fs.Parse(args); err != nil {
+		return exitUsage
+	}
+	if *timeout <= 0 {
+		fmt.Fprintln(stderr, "vmobs: --timeout must be positive")
 		return exitUsage
 	}
 	parsed, err := url.Parse(*apiBase)
@@ -121,8 +132,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 		caPath = os.Getenv("VMOBS_CA")
 	}
 
-	// Build the HTTP client. Only create a custom one when a CA bundle is given.
-	httpClient := http.DefaultClient
+	// Clone the defaults so custom trust roots retain dial, TLS and pool bounds.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = *timeout
+	defer transport.CloseIdleConnections()
+	httpClient := &http.Client{Transport: transport, Timeout: *timeout}
 	if caPath != "" {
 		pemData, err := os.ReadFile(caPath)
 		if err != nil {
@@ -134,11 +148,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "vmobs: no valid PEM certificates found in %q\n", caPath)
 			return exitUsage
 		}
-		httpClient = &http.Client{
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{RootCAs: pool},
-			},
-		}
+		transport.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 	}
 
 	rest := fs.Args()
@@ -154,6 +164,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		stderr:     stderr,
 		token:      token,
 		httpClient: httpClient,
+		timeout:    *timeout,
 	}
 	switch rest[0] {
 	case "meta":
@@ -197,10 +208,17 @@ type client struct {
 	stderr     io.Writer
 	token      string
 	httpClient *http.Client
+	timeout    time.Duration
 }
 
 func (c *client) do(method, path string, body io.Reader) (int, []byte, error) {
-	req, err := http.NewRequest(method, c.base+path, body)
+	budget := c.timeout
+	if budget <= 0 {
+		budget = defaultRequestTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, method, c.base+path, body)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -219,9 +237,12 @@ func (c *client) do(method, path string, body io.Reader) (int, []byte, error) {
 		return 0, nil, err
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, fmt.Errorf("read response (possibly truncated): %w", err)
+	}
+	if len(data) > maxResponseBytes {
+		return 0, nil, fmt.Errorf("response exceeds %d-byte limit; narrow the query or page results", maxResponseBytes)
 	}
 	return resp.StatusCode, data, nil
 }
