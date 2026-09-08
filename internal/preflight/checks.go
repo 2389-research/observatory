@@ -422,9 +422,10 @@ func (r *Runner) checkDirPermissions() Check {
 func (r *Runner) checkAPIBinding() Check {
 	id := "api_binding"
 
-	// The safe configurations, mirroring config.Validate:
+	// The supported configurations, mirroring config.Validate:
 	//   loopback_only + require_auth=false  → pass (host-ACL trust, dev)
 	//   loopback_only + require_auth=true   → pass (unreachable off-host AND credentialed)
+	//   http with either auth setting       → pass (explicit plain HTTP deployment)
 	//   https + require_auth=true           → pass
 	// Anything else — an https binding that asks for no credential, or a mode
 	// this daemon does not serve — is what the doctor reports.
@@ -452,6 +453,16 @@ func (r *Runner) checkAPIBinding() Check {
 				"require_authentication: true",
 			},
 		}
+	case apiMode == "http":
+		return Check{
+			ID:      id,
+			Status:  StatusPass,
+			Summary: fmt.Sprintf("plain HTTP mode with authentication enabled: %v", requireAuth),
+			Evidence: []string{
+				"mode: http",
+				fmt.Sprintf("require_authentication: %v", requireAuth),
+			},
+		}
 	case apiMode == "https" && requireAuth:
 		return Check{
 			ID:      id,
@@ -473,7 +484,7 @@ func (r *Runner) checkAPIBinding() Check {
 			},
 			Remediation: &Remediation{
 				Cause:  "insecure_binding",
-				Action: "use loopback_only (dev) or https+authentication (production)",
+				Action: "use loopback_only, http, or https+authentication",
 			},
 		}
 	}

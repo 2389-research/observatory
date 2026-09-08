@@ -49,9 +49,8 @@ cmd_start() {
     fi
     # --pid host: persisted ownership keeps stable PIDs across container starts.
     #   Host PID 1 reaps the VMMs daemonized by the jailer.
-    # --network host: the API binds loopback (server.mode: loopback_only), so the
-    #   container's loopback has to be the host's for anyone to reach it. See the
-    #   note at the top of deploy/config.yaml.
+    # --network host: the runtime creates host-side VM interfaces and reads
+    #   host routes from this namespace. See deploy/README.md.
     # The two profiles and the two capabilities are docs/design/container-boundary.md
     #   §5 exactly: SYS_ADMIN for setns and the jailer's mounts, NET_ADMIN plus
     #   /dev/net/tun for tap and veth, the AppArmor profile for mount, the seccomp

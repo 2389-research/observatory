@@ -951,7 +951,14 @@ supplemental V2-AGENT scenarios live in `design/agent-control-contract.md`.
 
 ### 15.1 Deployment mode
 
-Default API binding is loopback only. For remote use, require HTTPS/WSS and a configured authentication boundary. Support a single local operator account or a trusted reverse-proxy identity integration with explicit trusted proxy addresses and stripped/validated identity headers. Do not trust arbitrary inbound `X-User` headers.
+The appliance defaults to HTTP on `0.0.0.0:8787` with authentication disabled,
+as requested for remote deployment. Every client that can reach that listener
+can use the API. `server.mode: http` permits this bind; `loopback_only` restricts
+the listener to loopback, and `https` requires TLS and authentication. Browser
+WebSockets still require an exact match against `server.public_origin`.
+Support a single local operator account or a trusted reverse-proxy identity
+integration with explicit trusted proxy addresses and stripped/validated
+identity headers. Do not trust arbitrary inbound `X-User` headers.
 
 Use secure, HttpOnly, SameSite cookies for browser sessions, CSRF protection on mutations, exact-origin checks for WebSockets, session expiration and per-resource authorization. CLI uses scoped tokens. Bind terminal tickets, if used, to owner/VM/session and a short lifetime; do not put persistent tokens into query strings or access logs.
 

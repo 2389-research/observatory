@@ -6,22 +6,22 @@ server:
   listen: "127.0.0.1:8787"
   public_origin: "http://127.0.0.1:8787"
   mode: loopback_only
-  # Non-loopback use must require HTTPS/WSS and exact-origin enforcement.
+  # This example stays local; the appliance uses mode: http on 0.0.0.0:8787.
   trust_forwarded_identity: false
-  # Required in mode: https; must be empty (or absent) in loopback_only.
+  # Required in mode: https; must be empty (or absent) in either HTTP mode.
   tls_cert_file: ""
   tls_key_file: ""
 
 auth:
   mode: local_operator
-  # Dev default: false is valid only on loopback. Production and the smoke test
-  # run with true; the credential store must exist (run vmobsd init-auth first).
+  # Optional in HTTP modes; required in HTTPS mode. When true, the credential
+  # store must exist (run vmobsd init-auth first).
   require_authentication: false
   credential_store: "/var/lib/vmobs/auth"
   csrf_protection: true
   session_cookie_http_only: true
   session_cookie_same_site: strict
-  # Secure cookies are mandatory in HTTPS mode; HTTP is loopback-only.
+  # Secure cookies are mandatory in HTTPS mode.
   session_cookie_secure: false
   # Absolute browser-session lifetime in minutes; restart also ends sessions.
   session_ttl_minutes: 720

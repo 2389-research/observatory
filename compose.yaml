@@ -49,8 +49,8 @@ services:
     # process identities meaningful across starts; host PID 1 reaps jailed VMMs.
     pid: host
 
-    # The API binds loopback (server.mode: loopback_only), so the container's
-    # loopback has to be the host's for anyone to reach it.
+    # The runtime creates host-side VM interfaces and reads host routes from
+    # this namespace. The API listens on all host IPv4 interfaces.
     network_mode: host
 
     # docs/design/container-boundary.md §5 exactly: SYS_ADMIN for setns and the

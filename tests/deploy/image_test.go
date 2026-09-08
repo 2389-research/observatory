@@ -28,14 +28,14 @@ func TestShippedConfigLoads(t *testing.T) {
 		t.Fatalf("config.Load(%s): %v", configPath, err)
 	}
 
-	// loopback_only is what makes require_authentication: false legal, and what
-	// makes --network host the right run mode. Either half changing alone turns
-	// the shipped appliance into an unauthenticated API on a routable address.
-	if cfg.Server.Mode != "loopback_only" {
-		t.Errorf("server.mode = %q; deploy/README.md documents --network host on the strength of loopback_only", cfg.Server.Mode)
+	if cfg.Server.Mode != "http" {
+		t.Errorf("server.mode = %q, want http", cfg.Server.Mode)
 	}
-	if !strings.HasPrefix(cfg.Server.Listen, "127.0.0.1:") {
-		t.Errorf("server.listen = %q, want a 127.0.0.1 address", cfg.Server.Listen)
+	if cfg.Server.Listen != "0.0.0.0:8787" {
+		t.Errorf("server.listen = %q, want 0.0.0.0:8787", cfg.Server.Listen)
+	}
+	if cfg.Auth.RequireAuthentication {
+		t.Error("shipped appliance unexpectedly requires authentication")
 	}
 	if cfg.Runtime.Mode != "firecracker" {
 		t.Errorf("runtime.mode = %q, want firecracker; the appliance never serves the fake runtime", cfg.Runtime.Mode)

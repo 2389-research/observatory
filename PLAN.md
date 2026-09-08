@@ -24,7 +24,11 @@ Two tracks:
 | L1b (M1) | Phase A: launch form, batch launch, multi-select actions, recent operations (§13.1, §13.7). Phase B: guest PTY broker, vsock 10002 relay, bounded session rules, authenticated WebSocket, xterm client (§8) | §18 M1 | done — Tasks 1-14 built on `m1-fleet-page`; `TestM1bGate` 12/12 twice on aibox03, AT-019..AT-030 recorded, §18's storage-and-stop clause closed by a real browser run; merged to main at `f7ddf3d`. Plan: docs/superpowers/plans/2026-09-04-l1b-web-and-terminal.md |
 | L2a (M2a) | Guest telemetry transport: vsock 10001, guest bounded ring, runner-assigned stream identity with guest-owned seq, `guest.sensor_health`, `telemetry_health` + a real `SensorsDegraded`, Reconcile adopts a healthy runner | §18 M2, §110, §138–§139, §320, §507, §952 | done — `TestM2aGate` 6/6 on aibox03, AT-074 and AT-075 recorded TESTED_PASS (partial), merged to main at `0517f19`. Plan: docs/superpowers/plans/2026-09-05-m2a-guest-telemetry-transport.md |
 
-Auth note: P5 landed. Loopback dev mode (`require_authentication: false`, `mode: loopback_only`) remains valid for local iteration. Any non-loopback bind now requires `mode: https` with TLS files and `require_authentication: true`; config validation and the bind-time loopback guard both enforce this.
+Auth note: P5 landed. `loopback_only` remains available for local iteration.
+The appliance now defaults to `mode: http`, `listen: 0.0.0.0:8787`, and
+`require_authentication: false`, as requested for remote deployment on September
+8. HTTPS mode still requires TLS files and authentication. Terminal origin
+checks remain exact and use the configured browser origin.
 
 ## Verified systems review (2026-09-06)
 
