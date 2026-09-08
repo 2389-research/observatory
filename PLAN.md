@@ -55,15 +55,14 @@ all eight issues back and verified their bodies, priorities and open status.
 
 None right now.
 
-## Active kata completion — 2026-09-08
+## Completed kata batch — 2026-09-08
 
 Execution state is in `docs/superpowers/plans/2026-09-08-kata-completion.md`.
-Ten open kata are being completed on `kata-hardening`. Batch 1/2 changes have
-passed an initial canonical gate and real Docker/KVM import/terminal and
-restart/reclaim/successor scenarios; review found further durability and lease
-gaps now being fixed. These are uncommitted candidate results, not released
-acceptance. Mutation recovery and bounded lifecycle workers are active;
-automatic cleanup retry and the agent contract follow. No kata is closed yet.
+Completed through PR #6 (`7ac71d8`), published and deployed on aibox03. Canonical,
+full Linux and all six real KVM scenarios passed. The published appliance also
+launched/deleted a VM and stopped/restarted cleanly. All ten kata are closed;
+fresh live inventory reports zero open. The detailed plan records evidence,
+backup location and known limits.
 
 ## Linux track host (answered 2026-08-31)
 

@@ -779,3 +779,11 @@ queryable privileged mutations, bounded shutdown, and separate-filesystem disk
 accounting. `uv run docs/validation/check.py` passed **47/47** (exit 0). Runtime
 acceptance and unresolved reviews remain recorded in the kata completion plan;
 this is documentation-package validation only.
+
+## Revision — 2026-09-08, kata completion evidence
+
+Updated the completion plan and root status with merged/published/deployed
+revision, actual appliance verification, backup and rollback facts, and zero
+remaining open kata. `uv run docs/validation/check.py` passed **47/47** (exit 0).
+The runtime results come from the separately recorded tests and deployment;
+this package check validates the documentation only.
