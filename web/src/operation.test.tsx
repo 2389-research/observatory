@@ -83,6 +83,18 @@ describe('useOperation', () => {
 describe('idempotencyKeyFor', () => {
   const request = { name: 'alpha', template_id: 'dev-small' }
 
+  it('mints UUIDv4 keys when randomUUID is unavailable on an HTTP origin', () => {
+    const getRandomValues = crypto.getRandomValues.bind(crypto)
+    vi.stubGlobal('crypto', { getRandomValues })
+
+    const first = idempotencyKeyFor('launch-vm', request)
+    const second = idempotencyKeyFor('launch-batch', request)
+
+    expect(first).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+    expect(second).not.toBe(first)
+    expect(idempotencyKeyFor('launch-vm', { ...request })).toBe(first)
+  })
+
   it('returns the same key for an unchanged request across reloads', () => {
     const first = idempotencyKeyFor('launch-vm', request)
     expect(idempotencyKeyFor('launch-vm', { ...request })).toBe(first)

@@ -825,6 +825,14 @@ can mask this bug, so test an import cycle before launching any guest and avoid
 pre-creating the spool root in the daemon fixture. Attention history persists
 after recovery; check live importer health before acknowledging an old incident.
 
+## Browser actions over remote HTTP
+
+Remote HTTP pages do not expose `crypto.randomUUID`; loopback browser tests can
+hide this because browsers treat loopback as a secure context. Request keys use
+`crypto.getRandomValues` so launch, batch, and lifecycle actions work on the
+appliance's HTTP origin. Verify an actual browser click on a non-loopback origin
+against the real API; a successful API curl does not exercise the UI submit path.
+
 ## Disk capacity after restart (n0vw)
 
 The restart regression exposed a separate admission limit: startup samples free
