@@ -519,7 +519,7 @@ func (s *Server) handleTokenCreate(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 4096)
 	var body struct {
 		Name       string `json:"name"`
-		TTLMinutes *int   `json:"ttl_minutes"`
+		TTLMinutes *int64 `json:"ttl_minutes"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, Error{
@@ -565,10 +565,24 @@ func (s *Server) handleTokenCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ttl_minutes ≤ 0 or absent → no expiry.
-	var ttl time.Duration
-	if body.TTLMinutes != nil && *body.TTLMinutes > 0 {
-		ttl = time.Duration(*body.TTLMinutes) * time.Minute
+	// Omitted or zero means permanent. Validate before converting to duration.
+	var minutes int64
+	if body.TTLMinutes != nil {
+		minutes = *body.TTLMinutes
+	}
+	ttl, err := auth.TokenTTL(minutes)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, Error{
+			Code:    "validation_failed",
+			Message: err.Error(),
+			Cause:   "ttl_invalid",
+			Remediation: []Remediation{{
+				Action:    "set_token_ttl",
+				Params:    map[string]any{"min_minutes": int64(0), "max_minutes": auth.MaxTokenTTLMinutes},
+				Rationale: "choose whole minutes within these bounds; zero or omission creates a permanent token",
+			}},
+		})
+		return
 	}
 
 	secret, rec, err := s.auth.ac.Creds.CreateToken(body.Name, id.Owner, ttl)

@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/2389-research/observatory/internal/privd"
+	"net/netip"
 	"os"
 	"path/filepath"
 
@@ -41,6 +43,7 @@ func WriteManifestExported(stateDir string, m Manifest) error {
 // Each stage is appended AFTER the corresponding operation completes
 // (§5.3: persist before the side effect, record after it completes).
 type Manifest struct {
+	StartOpID string `json:"start_op_id,omitempty"`
 	VMID      string `json:"vm_id"`
 	BootID    string `json:"boot_id"`
 	Slot      int    `json:"slot"`
@@ -174,4 +177,53 @@ func allocateSlot(stateDir, vmID string, maxSlots int) (int, error) {
 		}
 	}
 	return 0, ErrSlotsExhausted
+}
+
+// NetworkLeases reads the daemon's provisioning manifest claims. Unknown or
+// conflicting ownership refuses allocation and route exemptions. Callers merge
+// privileged facts before allocation; absent manifests do not clear those claims.
+func NetworkLeases(stateDir string) (map[string]netip.Prefix, error) {
+	vmsDir := filepath.Join(stateDir, "vms")
+	// A previous controller may have unlinked a manifest and then failed its
+	// directory barrier. Settle visible absence before it can authorize reuse.
+	for dir := vmsDir; ; dir = filepath.Dir(dir) {
+		err := durable.SyncDir(dir)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) || filepath.Dir(dir) == dir {
+			return nil, fmt.Errorf("jailer: settle network lease inventory: %w", err)
+		}
+	}
+	entries, err := os.ReadDir(vmsDir)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("jailer: read network leases: %w", err)
+	}
+	leases := make(map[string]netip.Prefix)
+	occupied := make(map[netip.Prefix]string)
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		m, err := readManifest(stateDir, entry.Name())
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("jailer: read network lease %s: %w", entry.Name(), err)
+		}
+		if m.VMID != entry.Name() || !privd.ValidVMID(m.VMID) {
+			return nil, fmt.Errorf("jailer: manifest owner %q disagrees with directory %q or is invalid", m.VMID, entry.Name())
+		}
+		p, err := netip.ParsePrefix(m.CIDR)
+		if err != nil || !p.Addr().Is4() || p.Bits() != 30 || p != p.Masked() {
+			return nil, fmt.Errorf("jailer: invalid network lease for %s: %q", m.VMID, m.CIDR)
+		}
+		if owner, ok := occupied[p]; ok {
+			return nil, fmt.Errorf("jailer: network lease %s claimed by both %s and %s", p, owner, m.VMID)
+		}
+		leases[m.VMID] = p
+		occupied[p] = m.VMID
+	}
+	return leases, nil
 }

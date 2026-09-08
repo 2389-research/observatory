@@ -45,23 +45,26 @@ type OpsBackend interface {
 
 // ServerCfg holds the static configuration for a Server.
 type ServerCfg struct {
-	AllowedUID int    // only this UID's connections are served
-	LedgerDir  string // directory for per-VM JSON ledger files
-	StageRoot  string // approved root for VM stage directories
-	JailBase   string // root for jailer workdirs (not validated here; passed to Ops)
-	UIDMin     int    // start_vm: UID must be in [UIDMin, UIDMax)
-	UIDMax     int    // start_vm: UID must be in [UIDMin, UIDMax)
-	Ops        OpsBackend
+	AllowedUID       int           // only this UID's connections are served
+	LedgerDir        string        // directory for per-VM JSON ledger files
+	StageRoot        string        // approved root for VM stage directories
+	JailBase         string        // root for jailer workdirs (not validated here; passed to Ops)
+	UIDMin           int           // start_vm: UID must be in [UIDMin, UIDMax)
+	UIDMax           int           // start_vm: UID must be in [UIDMin, UIDMax)
+	ExecutionTimeout time.Duration // independent backend budget; default five minutes
+	FramingTimeout   time.Duration // per read/write budget; default thirty seconds
+	Ops              OpsBackend
 	// Log overrides the default logger (os.Stderr). Useful in tests to redirect to t.Logf.
 	Log *log.Logger
 }
 
 // Server is the privd root daemon server. Create with NewServer; run with Serve.
 type Server struct {
-	cfg    ServerCfg
-	mu     sync.Mutex
-	ledger *ledger
-	log    *log.Logger
+	operations operationStore
+	cfg        ServerCfg
+	mu         sync.Mutex
+	ledger     *ledger
+	log        *log.Logger
 }
 
 // NewServer creates a new Server. It loads any pre-existing ledger entries from LedgerDir.
@@ -75,6 +78,7 @@ func NewServer(cfg ServerCfg) *Server {
 		ledger: newLedger(cfg.LedgerDir),
 		log:    logger,
 	}
+	s.loadOperations()
 	return s
 }
 
@@ -117,7 +121,11 @@ func (s *Server) handleConn(conn net.Conn) {
 		return
 	}
 
-	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+	framing := s.cfg.FramingTimeout
+	if framing <= 0 {
+		framing = 30 * time.Second
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(framing))
 
 	var req Request
 	if err := ReadMsg(conn, &req); err != nil {
@@ -130,7 +138,9 @@ func (s *Server) handleConn(conn net.Conn) {
 		return
 	}
 
+	_ = conn.SetReadDeadline(time.Time{})
 	resp := s.dispatch(req)
+	_ = conn.SetWriteDeadline(time.Now().Add(framing))
 	if err := WriteMsg(conn, resp); err != nil {
 		s.log.Printf("write response: %v", err)
 	}
@@ -141,13 +151,33 @@ func (s *Server) dispatch(req Request) Response {
 	if req.V != ProtoVersion {
 		return errResp("bad_request", fmt.Sprintf("unsupported protocol version %d", req.V))
 	}
+	if req.Verb == "network_leases" {
+		return s.networkLeases()
+	}
+	if req.Verb == "query_operation" {
+		var q struct {
+			OpID string `json:"op_id"`
+		}
+		if json.Unmarshal(req.Payload, &q) != nil || !ValidVMID(q.OpID) {
+			return errResp("bad_request", "valid op_id required")
+		}
+		raw, _ := json.Marshal(s.queryOperation(q.OpID))
+		return okResp(raw)
+	}
+	return s.dispatchMutation(req)
+}
+
+func (s *Server) execute(ctx context.Context, req Request) Response {
+	if err := ctx.Err(); err != nil {
+		return backendErrResp(err)
+	}
 	switch req.Verb {
 	case "allocate_network":
-		return s.handleAllocateNetwork(req.Payload)
+		return s.handleAllocateNetwork(ctx, req.Payload)
 	case "release_network":
-		return s.handleReleaseNetwork(req.Payload)
+		return s.handleReleaseNetwork(ctx, req.Payload)
 	case "start_vm":
-		return s.handleStartVM(req.Payload)
+		return s.handleStartVM(ctx, req.Payload)
 	case "signal_vm":
 		return s.handleSignalVM(req.Payload)
 	case "release_vm":
@@ -157,7 +187,7 @@ func (s *Server) dispatch(req Request) Response {
 	}
 }
 
-func (s *Server) handleAllocateNetwork(raw json.RawMessage) Response {
+func (s *Server) handleAllocateNetwork(ctx context.Context, raw json.RawMessage) Response {
 	var r AllocateNetworkReq
 	if err := json.Unmarshal(raw, &r); err != nil {
 		return errResp("bad_request", "invalid payload")
@@ -168,9 +198,6 @@ func (s *Server) handleAllocateNetwork(raw json.RawMessage) Response {
 	if r.CIDR == "" {
 		return errResp("bad_request", "cidr required")
 	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	existing, err := s.ledger.get(r.VMID)
 	if err == nil {
@@ -191,18 +218,30 @@ func (s *Server) handleAllocateNetwork(raw json.RawMessage) Response {
 		return errResp("invalid_state", fmt.Sprintf("subnet %s is already allocated to vm %s", r.CIDR, holder))
 	}
 
+	opID, _ := ctx.Value(operationIDKey{}).(string)
 	entry := VMEntry{
+		NetworkOpID:   opID,
 		VMID:          r.VMID,
 		NetCIDR:       r.CIDR,
 		CreatedAtUnix: time.Now().Unix(),
 	}
-	if err := s.cfg.Ops.AllocateNetwork(entry, r); err != nil {
+	var allocationErr error
+	if contextual, ok := s.cfg.Ops.(interface {
+		AllocateNetworkContext(context.Context, VMEntry, AllocateNetworkReq) error
+	}); ok {
+		allocationErr = contextual.AllocateNetworkContext(ctx, entry, r)
+	} else {
+		allocationErr = s.cfg.Ops.AllocateNetwork(entry, r)
+	}
+	if err := allocationErr; err != nil {
 		// Setup can fail partway through (e.g. the veth step), leaving a netns
 		// or tap on the host with no ledger entry to track it — an orphan that
 		// release_network could never find. Roll back best-effort (mirrors the
 		// jailer's launch-rollback discipline) and surface the original cause
 		// unchanged; the ledger write below never runs, so no entry is recorded.
-		_ = s.cfg.Ops.ReleaseNetwork(entry)
+		if rollbackErr := s.cfg.Ops.ReleaseNetwork(entry); rollbackErr != nil {
+			return errResp("outcome_unknown", err.Error()+"; network rollback incomplete: "+rollbackErr.Error())
+		}
 		return errResp("exec_failed", err.Error())
 	}
 	if err := s.ledger.put(entry); err != nil {
@@ -211,7 +250,7 @@ func (s *Server) handleAllocateNetwork(raw json.RawMessage) Response {
 	return okResp(nil)
 }
 
-func (s *Server) handleReleaseNetwork(raw json.RawMessage) Response {
+func (s *Server) handleReleaseNetwork(ctx context.Context, raw json.RawMessage) Response {
 	var r ReleaseNetworkReq
 	if err := json.Unmarshal(raw, &r); err != nil {
 		return errResp("bad_request", "invalid payload")
@@ -220,9 +259,6 @@ func (s *Server) handleReleaseNetwork(raw json.RawMessage) Response {
 		return errResp("bad_request", "invalid vm_id")
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	entry, err := s.ledger.get(r.VMID)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -230,7 +266,15 @@ func (s *Server) handleReleaseNetwork(raw json.RawMessage) Response {
 		}
 		return errResp("internal", "ledger read failed")
 	}
-	if err := s.cfg.Ops.ReleaseNetwork(entry); err != nil {
+	var releaseErr error
+	if contextual, ok := s.cfg.Ops.(interface {
+		ReleaseNetworkContext(context.Context, VMEntry) error
+	}); ok {
+		releaseErr = contextual.ReleaseNetworkContext(ctx, entry)
+	} else {
+		releaseErr = s.cfg.Ops.ReleaseNetwork(entry)
+	}
+	if err := releaseErr; err != nil {
 		return errResp("exec_failed", err.Error())
 	}
 	// Clear the network half. Whichever release empties the last half deletes the file.
@@ -253,7 +297,7 @@ func (s *Server) handleReleaseNetwork(raw json.RawMessage) Response {
 // (hypervisor), 1 (local) and 2 (host).
 const minGuestCID = 3
 
-func (s *Server) handleStartVM(raw json.RawMessage) Response {
+func (s *Server) handleStartVM(ctx context.Context, raw json.RawMessage) Response {
 	var r StartVMReq
 	if err := json.Unmarshal(raw, &r); err != nil {
 		return errResp("bad_request", "invalid payload")
@@ -307,9 +351,6 @@ func (s *Server) handleStartVM(raw json.RawMessage) Response {
 		return errResp("bad_request", "stage_dir does not name this vm's stage directory")
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	entry, err := s.ledger.get(r.VMID)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -334,7 +375,15 @@ func (s *Server) handleStartVM(raw json.RawMessage) Response {
 	entry.GID = r.GID
 	entry.CID = r.CID
 
-	startResp, err := s.cfg.Ops.StartVM(&entry, r)
+	entry.StartOpID, _ = ctx.Value(operationIDKey{}).(string)
+	var startResp StartVMResp
+	if contextual, ok := s.cfg.Ops.(interface {
+		StartVMContext(context.Context, *VMEntry, StartVMReq) (StartVMResp, error)
+	}); ok {
+		startResp, err = contextual.StartVMContext(ctx, &entry, r)
+	} else {
+		startResp, err = s.cfg.Ops.StartVM(&entry, r)
+	}
 	if err != nil {
 		// StartVM fails after it has already built <JailBase>/firecracker/<id>
 		// and copied the boot artifacts into it, and it can fail with
@@ -360,6 +409,7 @@ func (s *Server) handleStartVM(raw json.RawMessage) Response {
 		if abortErr := s.cfg.Ops.AbortStartVM(entry); abortErr != nil {
 			s.log.Printf("start_vm %s failed and the rollback did not finish: %v; "+
 				"jail tree and any live vmm may survive under jail base", r.VMID, abortErr)
+			return errResp("outcome_unknown", err.Error()+"; start rollback incomplete; ownership retained")
 		}
 		return backendErrResp(err)
 	}
@@ -388,9 +438,6 @@ func (s *Server) handleSignalVM(raw json.RawMessage) Response {
 		return errResp("bad_request", "invalid vm_id")
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	entry, err := s.ledger.get(r.VMID)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -413,9 +460,6 @@ func (s *Server) handleReleaseVM(raw json.RawMessage) Response {
 	if !ValidVMID(r.VMID) {
 		return errResp("bad_request", "invalid vm_id")
 	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	entry, err := s.ledger.get(r.VMID)
 	if err != nil {

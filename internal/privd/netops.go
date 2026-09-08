@@ -8,8 +8,10 @@ package privd
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -66,9 +68,16 @@ func NewRealOpsWithHooks(cfg RealOpsCfg, hooks RealOpsTestHooks) *RealOps {
 //   - netns present + all interfaces healthy: return success, skip setup.
 //   - netns present + interfaces missing (half-built remnant): teardown then full setup.
 func (r *RealOps) AllocateNetwork(entry VMEntry, req AllocateNetworkReq) error {
-	ctx := context.Background()
+	return r.AllocateNetworkContext(context.Background(), entry, req)
+}
 
-	if r.netnsExists(ctx, entry.VMID) {
+// AllocateNetworkContext carries the privileged execution budget to host commands.
+func (r *RealOps) AllocateNetworkContext(ctx context.Context, entry VMEntry, req AllocateNetworkReq) error {
+	exists, err := r.netnsExists(ctx, entry.VMID)
+	if err != nil {
+		return err
+	}
+	if exists {
 		if r.probeHealthy(ctx, entry.VMID) {
 			// Already fully configured — nothing to do.
 			return nil
@@ -112,38 +121,59 @@ func (r *RealOps) AllocateNetwork(entry VMEntry, req AllocateNetworkReq) error {
 }
 
 // ReleaseNetwork tears down the veth pair and network namespace — porting net-teardown.
-// Idempotent: teardown of an absent netns returns success (both commands are best-effort).
+// Idempotent: absent namespace and host veth prove teardown, including on retry.
 func (r *RealOps) ReleaseNetwork(entry VMEntry) error {
-	ctx := context.Background()
+	return r.ReleaseNetworkContext(context.Background(), entry)
+}
+
+// ReleaseNetworkContext retains ownership until host observations prove absence.
+// Command errors alone cannot distinguish already-gone resources from failed cleanup.
+func (r *RealOps) ReleaseNetworkContext(ctx context.Context, entry VMEntry) error {
 	cmds := NetTeardownCommands(entry.VMID)
-	// Best-effort: errors suppressed, matching the helper's "2>/dev/null || true" pattern.
+	var teardownErr error
 	for _, argv := range cmds {
-		_ = r.runCmd(ctx, argv)
+		teardownErr = errors.Join(teardownErr, r.runCmd(ctx, argv))
+	}
+	exists, err := r.netnsExists(ctx, entry.VMID)
+	if err != nil {
+		return errors.Join(teardownErr, err)
+	}
+	if exists {
+		return errors.Join(teardownErr, fmt.Errorf("privd: network namespace %s survives teardown", network.NamespaceName(entry.VMID)))
+	}
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return errors.Join(teardownErr, fmt.Errorf("privd: probe host interfaces after teardown: %w", err))
+	}
+	for _, iface := range interfaces {
+		if iface.Name == network.VethName(entry.VMID) {
+			return errors.Join(teardownErr, fmt.Errorf("privd: host interface %s survives teardown", iface.Name))
+		}
 	}
 	return nil
 }
 
 // netnsExists reports whether the network namespace for vmID is present.
 // Uses hooks.NetnsExists when injected (non-root tests); otherwise parses `ip netns list`.
-func (r *RealOps) netnsExists(ctx context.Context, vmID string) bool {
+func (r *RealOps) netnsExists(ctx context.Context, vmID string) (bool, error) {
 	if r.hooks.NetnsExists != nil {
-		return r.hooks.NetnsExists(vmID)
+		return r.hooks.NetnsExists(vmID), nil
 	}
 	nsName := network.NamespaceName(vmID)
 	/* #nosec G204 — literal "ip" command, not user input. */
 	cmd := exec.CommandContext(ctx, "ip", "netns", "list") //nolint:gosec
 	out, err := cmd.Output()
 	if err != nil {
-		return false
+		return false, fmt.Errorf("privd: probe network namespaces: %w", err)
 	}
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		// Each line: "nsname (id: N)" — the name is the first whitespace-delimited token.
 		fields := strings.Fields(line)
 		if len(fields) > 0 && fields[0] == nsName {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 // probeHealthy reports whether all expected interfaces exist inside an existing netns.
@@ -221,12 +251,12 @@ func NetSetupCommands(id, _ string) [][]string {
 }
 
 // NetTeardownCommands returns the argv slices for net-teardown, in order.
-// Both are best-effort: the caller must ignore errors (matching "|| true" in the helper).
+// Both are attempted before the caller verifies namespace and host-veth absence.
 func NetTeardownCommands(id string) [][]string {
 	return [][]string{
-		// ip link del veth-<id>  (best-effort; error ignored)
+		// ip link del veth-<id>
 		{"ip", "link", "del", network.VethName(id)},
-		// ip netns del vmobs-<id>  (best-effort; error ignored)
+		// ip netns del vmobs-<id>
 		{"ip", "netns", "del", network.NamespaceName(id)},
 	}
 }

@@ -152,7 +152,7 @@ func TestAllocatorNext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
-	p1, err := a.Next()
+	p1, err := a.Acquire("first")
 	if err != nil {
 		t.Fatalf("Next (1): %v", err)
 	}
@@ -164,7 +164,7 @@ func TestAllocatorNext(t *testing.T) {
 	if p1 != want1 {
 		t.Errorf("Next (1) = %s, want %s", p1, want1)
 	}
-	p2, err := a.Next()
+	p2, err := a.Acquire("second")
 	if err != nil {
 		t.Fatalf("Next (2): %v", err)
 	}
@@ -184,12 +184,12 @@ func TestAllocatorExhaustion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
-	_, err = a.Next()
+	_, err = a.Acquire("first")
 	if err != nil {
 		t.Fatalf("first Next from /30 pool: %v", err)
 	}
 	// Second call must fail: pool exhausted.
-	_, err = a.Next()
+	_, err = a.Acquire("second")
 	if err == nil {
 		t.Fatal("expected error on exhausted pool, got nil")
 	}

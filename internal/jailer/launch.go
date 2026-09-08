@@ -11,7 +11,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/google/uuid"
 	"io"
 	"os"
 	"os/exec"
@@ -54,14 +56,15 @@ const (
 // is read fresh at stage time and can differ from the one the daemon loaded.
 // Exactly one Launch call executes at a time; concurrent calls queue on launchMu.
 func (a *Adapter) Launch(ctx context.Context, spec runtime.VMSpec) (*lock.Images, error) {
-	a.launchMu.Lock()
-	defer a.launchMu.Unlock()
-	return a.launch(ctx, spec)
+	return a.launchBounded(ctx, spec, a.launch)
 }
 
 // launch is the real implementation, called with launchMu held.
 func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (*lock.Images, error) {
 	vmID := spec.VMID
+	if err := a.restoreNetworkLeases(); err != nil {
+		return nil, fmt.Errorf("launch %s failed at stage reserved: %w", vmID, err)
+	}
 
 	// ── Step 1: Slot ──────────────────────────────────────────────────────────
 	slot, err := allocateSlot(a.cfg.StateDir, vmID, a.cfg.MaxSlots)
@@ -73,20 +76,9 @@ func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (*lock.Images
 	gid := a.cfg.JailGID
 	cid := a.cfg.CIDBase + uint32(slot)
 
-	// Determine CIDR: reuse from existing manifest (restart), or allocate fresh.
-	// existingErr also decides, below, whether a failed manifest write may remove
-	// the state dir: only when no manifest lived there before this launch.
-	var cidr string
-	existing, existingErr := readManifest(a.cfg.StateDir, vmID)
-	if existingErr == nil && existing.CIDR != "" {
-		cidr = existing.CIDR
-	} else {
-		prefix, err := a.cfg.Allocator.Next()
-		if err != nil {
-			return nil, fmt.Errorf("launch %s failed at stage reserved: allocate CIDR: %w", vmID, err)
-		}
-		cidr = prefix.String()
-	}
+	// Whether a failed publication may remove the state directory depends on
+	// whether an earlier manifest lived there before this launch.
+	_, existingErr := readManifest(a.cfg.StateDir, vmID)
 
 	// ── Step 2: Manifest (reserved) ───────────────────────────────────────────
 	bootID := spec.BootID
@@ -97,20 +89,20 @@ func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (*lock.Images
 		}
 	}
 
-	m := Manifest{
-		VMID:   vmID,
-		BootID: bootID,
-		Slot:   slot,
-		UID:    uid,
-		GID:    gid,
-		CID:    cid,
-		CIDR:   cidr,
-		Stages: []string{},
-	}
 	vmStateDir := filepath.Join(a.cfg.StateDir, "vms", vmID)
 	if err := durable.MkdirAll(vmStateDir, 0o700); err != nil {
 		return nil, fmt.Errorf("launch %s failed at stage reserved: mkdir state dir: %w", vmID, err)
 	}
+	prefix, err := a.cfg.Allocator.Acquire(vmID)
+	if err != nil {
+		return nil, fmt.Errorf("launch %s failed at stage reserved: allocate CIDR: %w", vmID, err)
+	}
+	cidr := prefix.String()
+	m := Manifest{
+		VMID: vmID, BootID: bootID, Slot: slot, UID: uid, GID: gid, CID: cid, CIDR: cidr,
+		Stages: []string{},
+	}
+
 	m.Stages = append(m.Stages, stageReserved)
 	if err := writeManifest(a.cfg.StateDir, m); err != nil {
 		// No manifest, so doRollback would find nothing to read: reclaim the
@@ -118,7 +110,9 @@ func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (*lock.Images
 		// the dir holds the previous launch's manifest, which writeManifest left
 		// intact and which Release still needs to find the network it must free.
 		if os.IsNotExist(existingErr) {
-			_ = durable.RemoveAll(vmStateDir)
+			if err := durable.RemoveAll(vmStateDir); err == nil {
+				a.cfg.Allocator.Release(vmID)
+			}
 		}
 		return nil, fmt.Errorf("launch %s failed at stage reserved: write manifest: %w", vmID, err)
 	}
@@ -174,7 +168,11 @@ func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (*lock.Images
 		return nil, rollback(fmt.Errorf("compute staged file hashes: %w", err))
 	}
 
-	startResp, err := a.pc.StartVM(ctx, privd.StartVMReq{
+	m.StartOpID = uuid.NewString()
+	if err := writeManifest(a.cfg.StateDir, m); err != nil {
+		return nil, rollback(err)
+	}
+	startResp, err := a.pc.StartVM(privd.WithOperationID(ctx, m.StartOpID), privd.StartVMReq{
 		VMID:     vmID,
 		UID:      uid,
 		GID:      gid,
@@ -183,6 +181,14 @@ func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (*lock.Images
 		Files:    stagedFiles,
 	})
 	if err != nil {
+		var unknown *privd.UnknownOutcomeError
+		if errors.As(err, &unknown) {
+			return nil, fmt.Errorf("start_vm: %w", err)
+		}
+		m.StartOpID = ""
+		if writeErr := writeManifest(a.cfg.StateDir, m); writeErr != nil {
+			return nil, fmt.Errorf("start_vm: %w; retain manifest: %v", err, writeErr)
+		}
 		return nil, rollback(fmt.Errorf("start_vm: %w", err))
 	}
 	m.VMMPID = startResp.PID
@@ -519,7 +525,7 @@ func (a *Adapter) waitAttached(ctx context.Context, stateFile string, cmd *exec.
 // "gone" are different answers and only one of them is safe to assume.
 //
 // Returns the archive its rescue wrote, or "" when there was nothing to rescue.
-// The last thing this function does is delete the VM's state directory, which is
+// A successful release deletes the VM's state directory, which is
 // where the runner's log lives, so the rescue has to happen here and the caller
 // has to be told where it went.
 //
@@ -536,14 +542,17 @@ func (a *Adapter) doRollback(vmID string) string {
 		return ""
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := a.resolveStartOutcome(ctx, &m); err != nil {
+		fmt.Fprintf(os.Stderr, "jailer rollback %s: %v; ownership retained\n", vmID, err)
+		return ""
+	}
 	// Determine which stages completed.
 	stageSet := make(map[string]bool)
 	for _, s := range m.Stages {
 		stageSet[s] = true
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
 
 	// Kill runner by recorded pid.
 	if stageSet[stageRunnerSpawned] && m.RunnerPID > 0 {
@@ -556,47 +565,7 @@ func (a *Adapter) doRollback(vmID string) string {
 		time.Sleep(2 * time.Second)
 		_ = a.pc.SignalVM(ctx, privd.SignalVMReq{VMID: vmID, Kind: "kill"})
 
-		// SIGKILL is asynchronous, so privd can answer the release that follows it
-		// with invalid_state "vm process is still alive; signal first" for a VM that
-		// is a millisecond from dead (gotchas #51). Reading that refusal as "already
-		// gone" leaves the chroot on disk and the ledger entry pinned, and the pinned
-		// entry then makes the release_network below write the entry back instead of
-		// deleting it — the leak this rollback exists to prevent, from the one call
-		// site that used to skip the retry. releaseVMWhenDead asks again while the
-		// cause is invalid_state and returns every other cause on the first attempt.
-		//
-		// Its own budget, not the rollback's remaining 30s: a VM wedged in
-		// uninterruptible sleep would otherwise spin here until the shared deadline
-		// expired and take the network release down with it. doStop bounds the same
-		// call the same way (stop.go).
-		releaseCtx, releaseCancel := context.WithTimeout(ctx, 10*time.Second)
-		releaseErr := a.releaseVMWhenDead(releaseCtx, vmID)
-		releaseCancel()
-		if releaseErr != nil {
-			// Swallowed, then reported. The only thing doRollback returns is the
-			// rescue path — Launch's caller gets the error that started the rollback,
-			// which is the more useful one — and returning early here would skip the
-			// network release as well. But a failure at this point is not an
-			// already-gone resource: it means the chroot is still on disk, the ledger
-			// entry is still pinned, and the VM may still be running behind a launch
-			// that reported failure. That has to reach the daemon log; settling it
-			// needs a cleanup backlog (M1b).
-			fmt.Fprintf(os.Stderr,
-				"jailer: rollback: warn: release jail chroot for %s: %v; chroot and privd ledger entry retained, and the VM may still be running\n",
-				vmID, releaseErr)
-		}
 	}
-
-	// Release network.
-	if stageSet[stageNetwork] {
-		_ = a.pc.ReleaseNetwork(ctx, privd.ReleaseNetworkReq{VMID: vmID})
-	}
-
-	// Remove stage dir. doStage can fail after creating it and before
-	// stageStaged is recorded, so no stage guard: removing a missing path is a
-	// no-op (same as doRelease).
-	stageDir := filepath.Join(a.cfg.StageRoot, vmID)
-	_ = durable.RemoveAll(stageDir)
 
 	// Rescue the runner's log and phase file before the removal below takes them.
 	// The runner was killed at the top of this function, so the log is complete;
@@ -606,11 +575,12 @@ func (a *Adapter) doRollback(vmID string) string {
 		fmt.Fprintf(os.Stderr, "jailer: rollback: warn: rescue runner artifacts for %s: %v\n", vmID, rescueErr)
 	}
 
-	// Remove VM state dir. Rollback is best-effort by contract — the caller
-	// reports the stage failure that brought it here, not this one — so the
-	// barrier is taken and its answer discarded like the removal's own.
-	vmStateDir := filepath.Join(a.cfg.StateDir, "vms", vmID)
-	_ = durable.RemoveAll(vmStateDir)
+	// Use the same host proofs and durable barriers as Delete. Even a stage
+	// write or an RPC reply can fail after its side effect; release both halves
+	// unconditionally, retaining the manifest and lease if anything is unsettled.
+	if err := a.doRelease(ctx, vmID); err != nil {
+		fmt.Fprintf(os.Stderr, "jailer: rollback: cleanup for %s: %v; manifest and network lease retained\n", vmID, err)
+	}
 
 	return rescued
 }

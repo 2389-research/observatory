@@ -307,14 +307,18 @@ func readRunnerStart(pid int) string {
 //  6. KEEP slot + network + manifest (stopped VM can restart; Launch reuses them).
 func (a *Adapter) Stop(ctx context.Context, vmID string, grace time.Duration) (bool, error) {
 	// Serialise with Launch on the same vmID (see concurrency discipline above).
-	a.launchMu.Lock()
+	if err := a.acquireLifecycle(ctx); err != nil {
+		return false, &runtime.ErrStopNotProven{VMID: vmID, Reason: err.Error()}
+	}
 	defer a.launchMu.Unlock()
 	return a.doStop(ctx, vmID, grace, false)
 }
 
 // ForceStop skips the graceful path and immediately kills the VMM.
 func (a *Adapter) ForceStop(ctx context.Context, vmID string) error {
-	a.launchMu.Lock()
+	if err := a.acquireLifecycle(ctx); err != nil {
+		return &runtime.ErrStopNotProven{VMID: vmID, Reason: err.Error()}
+	}
 	defer a.launchMu.Unlock()
 	_, err := a.doStop(ctx, vmID, 0, true)
 	return err
@@ -334,6 +338,10 @@ func (a *Adapter) doStop(ctx context.Context, vmID string, grace time.Duration, 
 			return a.stopWithoutManifest(ctx, vmID)
 		}
 		return false, fmt.Errorf("read manifest: %w", err)
+	}
+
+	if err := a.resolveStartOutcome(ctx, &m); err != nil {
+		return false, err
 	}
 
 	stateFile := filepath.Join(a.cfg.StateDir, "vms", vmID, "runner-state.json")
@@ -613,7 +621,9 @@ func (a *Adapter) releaseVMWhenDead(ctx context.Context, vmID string) error {
 //
 // Concurrency: holds launchMu to prevent interleaving with an in-progress Launch.
 func (a *Adapter) Release(ctx context.Context, vmID string) error {
-	a.launchMu.Lock()
+	if err := a.acquireLifecycle(ctx); err != nil {
+		return err
+	}
 	defer a.launchMu.Unlock()
 	return a.doRelease(ctx, vmID)
 }
@@ -694,6 +704,13 @@ func (a *Adapter) chrootDebt(vmID string, vmErr error) error {
 }
 
 func (a *Adapter) doRelease(ctx context.Context, vmID string) error {
+	if m, err := readManifest(a.cfg.StateDir, vmID); err == nil {
+		if err := a.resolveStartOutcome(ctx, &m); err != nil {
+			return err
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
 	releaseCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
@@ -736,6 +753,10 @@ func (a *Adapter) doRelease(ctx context.Context, vmID string) error {
 	if err := durable.RemoveAll(vmStateDir); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("jailer release %s: remove state dir: %w", vmID, err)
 	}
+
+	// The manifest deletion and its directory barrier are the durable release
+	// point. Only now may another VM acquire this prefix.
+	a.cfg.Allocator.Release(vmID)
 
 	// Spool dir is intentionally not removed: the importer reads segments independently.
 	// (Brief note: Task 7's importer prunes segments only, not VM dirs — verified.)
@@ -802,6 +823,9 @@ func (a *Adapter) reconcileOne(ctx context.Context, vmID string) Finding {
 		}
 	}
 
+	if err := a.resolveStartOutcome(ctx, &m); err != nil {
+		return Finding{VMID: vmID, Outcome: "ambiguous", Detail: err.Error()}
+	}
 	// VMM identity check.
 	vmmAlive := m.VMMPID > 0 && m.VMMStart != "" && privd.PIDAlive(m.VMMPID, m.VMMStart)
 

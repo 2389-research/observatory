@@ -210,8 +210,8 @@ func TestAbortStartVMSparesAnotherVMsFirecracker(t *testing.T) {
 	fc := spawnFakeFirecracker(t, "--id", "vm-neighbour")
 	writeJailedPID(t, jailBase, "vm-recycled", fc.pid)
 
-	if err := ops.AbortStartVM(VMEntry{VMID: "vm-recycled"}); err != nil {
-		t.Fatalf("AbortStartVM: %v", err)
+	if err := ops.AbortStartVM(VMEntry{VMID: "vm-recycled"}); err == nil {
+		t.Fatal("uncertain process ownership reported released")
 	}
 	if !fc.alive(t) {
 		t.Fatalf("the rollback SIGKILLed pid %d, a live firecracker serving vm-neighbour; "+

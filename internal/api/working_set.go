@@ -116,13 +116,21 @@ type situationHost struct {
 	Watch           situationWatch `json:"watch"`
 }
 
+type situationOmission struct {
+	Count   int64  `json:"count"`
+	AtLeast bool   `json:"at_least,omitempty"`
+	Expand  string `json:"expand"`
+}
+
 type situationResponse struct {
-	AsOfCursor    string          `json:"as_of_cursor"`
-	SinceCursor   string          `json:"since_cursor,omitempty"`
-	Quiet         bool            `json:"quiet"`
-	Host          situationHost   `json:"host"`
-	ChangedVMs    []wireChangedVM `json:"changed_vms"`
-	AttentionHead []wireAttention `json:"attention_head"`
+	AttentionOpen int64                        `json:"attention_open"`
+	Omitted       map[string]situationOmission `json:"omitted"`
+	AsOfCursor    string                       `json:"as_of_cursor"`
+	SinceCursor   string                       `json:"since_cursor,omitempty"`
+	Quiet         bool                         `json:"quiet"`
+	Host          situationHost                `json:"host"`
+	ChangedVMs    []wireChangedVM              `json:"changed_vms"`
+	AttentionHead []wireAttention              `json:"attention_head"`
 }
 
 func (s *Server) handleSituation(w http.ResponseWriter, r *http.Request) {
@@ -166,15 +174,22 @@ func (s *Server) handleSituation(w http.ResponseWriter, r *http.Request) {
 	// to GET /vms. The delta is bounded to 50 entries; byte-bound sheds first
 	// attention_head, then changed_vms if the response is still too large.
 	changedVMs := []wireChangedVM{}
+	changedCount := 0
+	changedMore := false
 	if since != "" {
 		sinceID, _ := strconv.ParseInt(since, 10, 64) // already validated by engine.Snapshot
 		const changedVMsLimit = 50
-		changed, err := s.store.ChangedVMs(ctx, sinceID, changedVMsLimit)
+		changed, err := s.store.ChangedVMs(ctx, sinceID, changedVMsLimit+1)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, Error{
 				Code: "internal", Message: "changed_vms query failed", Retryable: true, Cause: "storage_failure",
 			})
 			return
+		}
+		changedCount = len(changed)
+		if len(changed) > changedVMsLimit {
+			changedMore = true
+			changed = changed[:changedVMsLimit]
 		}
 		var openByVM map[string]int64
 		if len(changed) > 0 {
@@ -206,9 +221,11 @@ func (s *Server) handleSituation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := situationResponse{
-		AsOfCursor:  snap.AsOfCursor,
-		SinceCursor: snap.SinceCursor,
-		Quiet:       snap.Quiet,
+		AttentionOpen: snap.AttentionOpen,
+		Omitted:       map[string]situationOmission{},
+		AsOfCursor:    snap.AsOfCursor,
+		SinceCursor:   snap.SinceCursor,
+		Quiet:         snap.Quiet,
 		Host: situationHost{
 			VMsRunning:      vmRunning,
 			VMsTotal:        vmTotal,
@@ -227,6 +244,8 @@ func (s *Server) handleSituation(w http.ResponseWriter, r *http.Request) {
 	// Never shed the watch scope — a truncated watch scope would violate P-03.
 	maxBytes := s.engine.Config().SituationMaxResponseBytes
 	for {
+		resp.Omitted["attention_head"] = situationOmission{Count: max(0, snap.AttentionOpen-int64(len(resp.AttentionHead))), Expand: basePath + "/attention"}
+		resp.Omitted["changed_vms"] = situationOmission{Count: int64(changedCount - len(resp.ChangedVMs)), AtLeast: changedMore, Expand: basePath + "/vms"}
 		raw, err := json.Marshal(resp)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, Error{
@@ -246,10 +265,15 @@ func (s *Server) handleSituation(w http.ResponseWriter, r *http.Request) {
 		} else if len(resp.ChangedVMs) > 0 {
 			resp.ChangedVMs = resp.ChangedVMs[:len(resp.ChangedVMs)/2]
 		} else {
-			// Nothing left to shed; emit as-is (watch scope always included).
-			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write(raw)
+			// A successful summary must honor the configured ceiling. Errors
+			// have their own fixed envelope: never drop watch/omission evidence
+			// to make an impossible configuration look like a quiet host.
+			writeError(w, http.StatusServiceUnavailable, Error{
+				Code: "limit_exceeded", Cause: "situation_envelope_exceeds_bound",
+				Message:   "the situation byte ceiling cannot fit its required watch and omission envelope",
+				Retryable: false, Details: map[string]any{"configured_bytes": maxBytes, "minimum_bytes": len(raw)},
+				Remediation: []Remediation{{Action: "configure", Params: map[string]any{"field": "agent_interface.situation_max_response_bytes", "minimum": len(raw)}, Rationale: "increase the host configuration ceiling before reading this summary"}},
+			})
 			return
 		}
 	}

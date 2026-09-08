@@ -284,3 +284,42 @@ func TestCLITokenEnvVar(t *testing.T) {
 		t.Fatalf("no env var: exit %d, want %d\nstderr: %s", code, exitAPIError, stderr)
 	}
 }
+
+func TestCLITokenTTLBoundaries(t *testing.T) {
+	srv, creds := newAuthServer(t)
+	bootstrap, _, err := creds.CreateToken("bootstrap", "local_operator", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		value string
+		valid bool
+	}{
+		{"", true}, {"0", true}, {"-1", false}, {"1", true},
+		{"153722867", true}, {"153722868", false},
+		{"9223372036854775807", false}, {"9223372036854775808", false},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			before, _ := creds.ListTokens()
+			args := []string{"--api", srv.URL, "--token", bootstrap, "--json", "auth", "token", "create", "--name", "bounds"}
+			if tc.value != "" {
+				args = append(args, "--ttl-minutes", tc.value)
+			}
+			code, out, stderr := runCLI(t, args...)
+			after, _ := creds.ListTokens()
+			if !tc.valid {
+				if code != exitUsage || len(after) != len(before) || out != "" {
+					t.Fatalf("invalid TTL: code=%d token delta=%d stderr=%s", code, len(after)-len(before), stderr)
+				}
+				return
+			}
+			if code != exitOK || len(after) != len(before)+1 {
+				t.Fatalf("valid TTL: code=%d stderr=%s", code, stderr)
+			}
+			rec := after[len(after)-1]
+			if (rec.ExpiresAt == "") != (tc.value == "" || tc.value == "0") {
+				t.Fatalf("wrong expiry: %+v", rec)
+			}
+		})
+	}
+}

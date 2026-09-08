@@ -763,3 +763,19 @@ Updated the deployment boundary and recovery design for persistent privileged
 ownership and host PID identity. Recorded the real Compose restart/delete/reuse
 result and its limits, including the separate `n0vw` disk-capacity issue.
 `uv run docs/validation/check.py` passed **47/47** (exit 0).
+
+## Revision — 2026-09-08, kata implementation progress
+
+Added credential lifetime/durability, HTTP budgets, importer health, network
+lease and live disk-capacity design notes, plus the active kata execution plan.
+`uv run docs/validation/check.py` passed **47/47** (exit 0). The plan records
+dirty-candidate Docker/KVM results and remaining review work; this package check
+does not close any kata or establish final release acceptance.
+
+## Revision — 2026-09-08, agent and recovery contracts
+
+Documented the executable agent slice and deferred controls, stopped cleanup debt,
+queryable privileged mutations, bounded shutdown, and separate-filesystem disk
+accounting. `uv run docs/validation/check.py` passed **47/47** (exit 0). Runtime
+acceptance and unresolved reviews remain recorded in the kata completion plan;
+this is documentation-package validation only.

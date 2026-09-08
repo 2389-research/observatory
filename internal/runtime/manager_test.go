@@ -117,7 +117,7 @@ func TestManagerCreateAndLaunchHappyPath(t *testing.T) {
 	}
 
 	// Wait for the async launch job to finish.
-	mgr.Close()
+	mgr.WaitForTest()
 
 	vm2, err := st.GetVM(t.Context(), vm.VMID)
 	if err != nil {
@@ -192,7 +192,7 @@ func TestManagerLaunchFailure(t *testing.T) {
 	}
 	fk2.FailNext("Launch", vm.VMID, fmt.Errorf("hypervisor error"))
 
-	mgr2.Close()
+	mgr2.WaitForTest()
 	_ = op
 	_ = mgr // original unused; suppress linter
 
@@ -456,7 +456,7 @@ func TestManagerActionPauseKeepsReservation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
-	mgr.Close() // wait for launch
+	mgr.WaitForTest() // wait for launch
 	vmID := vm.VMID
 
 	// Pause the VM.
@@ -559,7 +559,7 @@ func TestManagerStopRecordsGracefulVsForced(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
-	mgr.Close()
+	mgr.WaitForTest()
 
 	stopped, _, err := mgr.Action(t.Context(), vm.VMID, "stop", nil)
 	if err != nil {
@@ -589,7 +589,7 @@ func TestManagerStopRecordsGracefulVsForced(t *testing.T) {
 	defer mgr2.Close()
 
 	vm2, _, _, _ := mgr2.CreateVM(t.Context(), "local_operator", createReq("stop-forced"))
-	mgr2.Close()
+	mgr2.WaitForTest()
 	fk2.FailNext("Stop", vm2.VMID, &runtimetest.ForcedStop{})
 	_, _, err = mgr2.Action(t.Context(), vm2.VMID, "stop", nil)
 	if err != nil {
@@ -633,7 +633,7 @@ func TestManagerStopSpendsRevisionPinOnce(t *testing.T) {
 			if err != nil {
 				t.Fatalf("CreateVM: %v", err)
 			}
-			mgr.Close() // drain the launch goroutine so the VM is settled in running
+			mgr.WaitForTest() // drain the launch goroutine so the VM is settled in running
 
 			// The caller reads the current revision, then pins it — exactly what
 			// GET /vms/{id} followed by POST /vms/{id}/actions does.
@@ -698,7 +698,7 @@ func TestManagerStopStalePinIsRefusedBeforeTheRuntimeIsTouched(t *testing.T) {
 			if err != nil {
 				t.Fatalf("CreateVM: %v", err)
 			}
-			mgr.Close() // drain the launch goroutine so the VM is settled in running
+			mgr.WaitForTest() // drain the launch goroutine so the VM is settled in running
 
 			current, err := st.GetVM(t.Context(), vm.VMID)
 			if err != nil {
@@ -748,7 +748,7 @@ func TestManagerActionWrongStateIsInvalidTransition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
-	mgr.Close() // drain the launch goroutine so the VM is settled in running
+	mgr.WaitForTest() // drain the launch goroutine so the VM is settled in running
 
 	_, _, err = mgr.Action(t.Context(), vm.VMID, "start", nil)
 	if err == nil {
@@ -890,7 +890,7 @@ func TestManagerForceStopFromPaused(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
-	mgr.Close()
+	mgr.WaitForTest()
 
 	if _, _, err := mgr.Action(t.Context(), vm.VMID, "pause", nil); err != nil {
 		t.Fatalf("pause: %v", err)
@@ -914,7 +914,7 @@ func TestManagerRevisionMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
-	mgr.Close()
+	mgr.WaitForTest()
 
 	stale := int64(1) // revision is higher after launch
 	_, _, err = mgr.Action(t.Context(), vm.VMID, "pause", &stale)
@@ -971,7 +971,7 @@ func TestManagerStopDuringLaunchCleansUp(t *testing.T) {
 		// Both outcomes are valid as long as we end in stopped or running (not stuck).
 		t.Logf("stop action returned (may be racing): %v", err)
 	}
-	mgr.Close()
+	mgr.WaitForTest()
 
 	vm2, err := st.GetVM(t.Context(), vmID)
 	if err != nil {
@@ -994,7 +994,7 @@ func TestManagerDeleteIdempotency(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
-	mgr.Close()
+	mgr.WaitForTest()
 
 	// Stop first, then delete twice.
 	if _, _, err := mgr.Action(t.Context(), vm.VMID, "stop", nil); err != nil {
@@ -1041,7 +1041,7 @@ func TestManagerDeleteLiveVMRequiresForce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
-	mgr.Close()
+	mgr.WaitForTest()
 
 	// Delete running VM without force → ErrVMLive.
 	_, err = mgr.Delete(t.Context(), vm.VMID, false, nil)
@@ -1073,7 +1073,7 @@ func TestManagerForceDeleteSpendsRevisionPinOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
-	mgr.Close() // drain the launch goroutine so the revision below is settled
+	mgr.WaitForTest() // drain the launch goroutine so the revision below is settled
 
 	current, err := st.GetVM(t.Context(), vm.VMID)
 	if err != nil {
@@ -1104,7 +1104,7 @@ func TestManagerForceDeleteStalePinRefused(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
-	mgr.Close()
+	mgr.WaitForTest()
 
 	current, err := st.GetVM(t.Context(), vm.VMID)
 	if err != nil {
@@ -1153,7 +1153,7 @@ func TestManagerForceDeleteRuntimeFailureLeavesStopping(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
-	mgr.Close()
+	mgr.WaitForTest()
 
 	fk.FailNext("ForceStop", vm.VMID, errors.New("kvm said no"))
 
@@ -1555,7 +1555,7 @@ func TestManagerCreateVMReplayNoRelaunch(t *testing.T) {
 		t.Errorf("replay VMID %s != original %s", vm2.VMID, vm1.VMID)
 	}
 
-	mgr.Close() // drain launch goroutines before counting
+	mgr.WaitForTest() // drain launch goroutines before counting
 	launches := 0
 	for _, m := range fk.MethodCalls() {
 		if m == "Launch" {
@@ -1578,7 +1578,7 @@ func TestManagerDeleteCallsRelease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
-	mgr.Close()
+	mgr.WaitForTest()
 
 	// Stop then delete — Release must be called.
 	if _, _, err := mgr.Action(t.Context(), vm.VMID, "stop", nil); err != nil {
@@ -1611,7 +1611,7 @@ func TestManagerDeleteForceCallsRelease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
-	mgr.Close()
+	mgr.WaitForTest()
 
 	if _, err := mgr.Delete(t.Context(), vm.VMID, true, nil); err != nil {
 		t.Fatalf("force delete: %v", err)
@@ -1629,9 +1629,9 @@ func TestManagerDeleteForceCallsRelease(t *testing.T) {
 	}
 }
 
-// TestManagerDeleteToleratesUnavailableRelease: if Release returns *UnavailableError,
-// delete must still succeed (tolerate unavailable runtime per R1 ruling).
-func TestManagerDeleteToleratesUnavailableRelease(t *testing.T) {
+// TestManagerDeleteRetainsUnavailableRelease: an unavailable adapter cannot
+// prove that disks and host leases have been released.
+func TestManagerDeleteRetainsUnavailableRelease(t *testing.T) {
 	st := openStoreForManager(t)
 	fk := runtimetest.NewFake()
 	mgr := newManager(t, st, fk)
@@ -1640,7 +1640,7 @@ func TestManagerDeleteToleratesUnavailableRelease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
-	mgr.Close()
+	mgr.WaitForTest()
 
 	if _, _, err := mgr.Action(t.Context(), vm.VMID, "stop", nil); err != nil {
 		t.Fatalf("stop: %v", err)
@@ -1649,12 +1649,16 @@ func TestManagerDeleteToleratesUnavailableRelease(t *testing.T) {
 	// Inject *UnavailableError for Release.
 	fk.FailNext("Release", vm.VMID, &runtime.UnavailableError{Reason: "test: runtime unavailable"})
 
-	del, err := mgr.Delete(t.Context(), vm.VMID, false, nil)
-	if err != nil {
-		t.Errorf("Delete should tolerate UnavailableError from Release, got: %v", err)
+	if _, err := mgr.Delete(t.Context(), vm.VMID, false, nil); err == nil {
+		t.Fatal("Delete claimed release without host evidence")
 	}
-	if del != nil && del.ObservedState != "deleted" {
-		t.Errorf("state = %q, want deleted", del.ObservedState)
+	del, err := st.GetVM(t.Context(), vm.VMID)
+	if err != nil || del.ObservedState != "deleting" {
+		t.Fatalf("retained VM = %+v, %v", del, err)
+	}
+	reservation, err := st.GetReservation(t.Context(), vm.VMID)
+	if err != nil || reservation.Released {
+		t.Fatalf("reservation = %+v, %v", reservation, err)
 	}
 }
 
@@ -1669,7 +1673,7 @@ func TestManagerDeleteFailsOnReleaseError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
-	mgr.Close()
+	mgr.WaitForTest()
 
 	if _, _, err := mgr.Action(t.Context(), vm.VMID, "stop", nil); err != nil {
 		t.Fatalf("stop: %v", err)
@@ -1711,7 +1715,7 @@ func TestNotifyVMMExitRunningToFailed(t *testing.T) {
 		t.Fatalf("CreateVM: %v", err)
 	}
 	// Drain the launch goroutine.
-	mgr.Close()
+	mgr.WaitForTest()
 
 	vm2, _ := st.GetVM(t.Context(), vm.VMID)
 	if vm2.ObservedState != "running" {
@@ -1765,7 +1769,7 @@ func TestNotifyVMMExitRunningToStopped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
-	mgr.Close()
+	mgr.WaitForTest()
 
 	vm2, _ := st.GetVM(t.Context(), vm.VMID)
 	if vm2.ObservedState != "running" {
@@ -1807,7 +1811,7 @@ func TestNotifyVMMExitPausedToStopped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
-	mgr.Close() // wait for launch
+	mgr.WaitForTest() // wait for launch
 
 	paused, _, err := mgr.Action(t.Context(), vm.VMID, "pause", nil)
 	if err != nil {
@@ -1850,7 +1854,7 @@ func TestNotifyVMMExitPausedToFailed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
-	mgr.Close() // wait for launch
+	mgr.WaitForTest() // wait for launch
 
 	paused, _, err := mgr.Action(t.Context(), vm.VMID, "pause", nil)
 	if err != nil {
@@ -1901,7 +1905,7 @@ func TestNotifyVMMExitSecondCallNoOp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
-	mgr.Close()
+	mgr.WaitForTest()
 
 	// First call: non-graceful exit → failed.
 	if err := mgr.NotifyVMMExit(t.Context(), vm.VMID, "", "first exit", false); err != nil {
@@ -1973,7 +1977,7 @@ func TestNotifyVMMExitEarlyLifecycleGracefulGoesToFailed(t *testing.T) {
 
 	// Unblock and drain so the test doesn't leak the goroutine.
 	close(unblock)
-	mgr.Close()
+	mgr.WaitForTest()
 }
 
 // TestNotifyVMMExitIgnoresPreviousBoot reproduces what the M1 gate hit: a VM
@@ -2062,7 +2066,7 @@ func TestNotifyVMMExitWithoutBootIDStillActs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
-	mgr.Close()
+	mgr.WaitForTest()
 
 	if err := mgr.NotifyVMMExit(t.Context(), vm.VMID, "", "reconcile: vmm pid 1234 gone", false); err != nil {
 		t.Fatalf("NotifyVMMExit: %v", err)

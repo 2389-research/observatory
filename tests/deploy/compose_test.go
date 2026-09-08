@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -29,6 +30,17 @@ type composeService struct {
 	Tmpfs       []string `yaml:"tmpfs"`
 	Volumes     []string `yaml:"volumes"`
 	Restart     string   `yaml:"restart"`
+	StopGrace   string   `yaml:"stop_grace_period"`
+}
+
+func TestContainerStopAllowsLifecycleDrain(t *testing.T) {
+	grace, err := time.ParseDuration(loadService(t).StopGrace)
+	if err != nil || grace < 90*time.Second || grace > 2*time.Minute {
+		t.Fatalf("container stop must allow the 85s daemon drain with bounded margin: %q", loadService(t).StopGrace)
+	}
+	if got := dockerRunFlags(t, containerPath, "--stop-timeout"); !slices.Equal(got, []string{"90"}) {
+		t.Fatalf("script stop timeout = %v, want 90 seconds", got)
+	}
 }
 
 // loadService returns the appliance service, independently of setup services.

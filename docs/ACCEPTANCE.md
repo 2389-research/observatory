@@ -826,3 +826,15 @@ Every requirement R-01 through R-17 is represented above. The builder must add t
 Acceptance evidence accretes under stable IDs in `tests/acceptance-evidence/AT-xxx/` as machine-readable records plus referenced logs and artifacts. Successive builder sessions append runs; they never overwrite recorded history.
 
 V1 mandatory gate: all 102 rows are implemented and run in their relevant environment, with every failure or blockage explicitly reported. Any scoped exception requires a documented product limitation and must not contradict the core requirements. Memory snapshot/restore is not part of these 102 V1 rows.
+
+
+## Bounded agent supplemental scenarios
+
+`design/agent-control-contract.md` defines V2-AGENT-001 through V2-AGENT-004:
+cold discovery, omission honesty, exact launch retry/client cursor resume and
+typed recovery. These are separate scenario identifiers, not additional rows
+in the 102-row AT evidence registry. `TestKataAgentContractGate` supplies the
+real Docker/KVM workflow; focused API tests cover bounded summaries and error
+mapping. Neither suite claims server checkpoints, retention-gap detection,
+exact human plan approval or per-work budget enforcement. Execution evidence
+is recorded in `VALIDATION.md` and the kata completion record.

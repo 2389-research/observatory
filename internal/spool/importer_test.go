@@ -757,15 +757,8 @@ func TestCorruptSegmentWithEndMarkerNotPruned(t *testing.T) {
 	}
 }
 
-// TestImportOnceSwallowsPerVMErrors — ImportOnce returns nil when one VM dir
-// is broken and another is healthy. Healthy records must land in the store;
-// stats must reflect only the healthy dir.
-//
-// We make one dir unreadable by planting a cursor.json that is itself a
-// directory (not a file): loadCursor handles the read error gracefully, but
-// any subsequent segment open fails because the dir itself is chmod 000.
-// Using a 000-mode dir is portable and deterministic across Linux/macOS.
-func TestImportOnceSwallowsPerVMErrors(t *testing.T) {
+// TestImportOnceReportsPerVMErrors preserves healthy progress while reporting a broken VM.
+func TestImportOnceReportsPerVMErrors(t *testing.T) {
 	st := openTestStore(t)
 	root := t.TempDir()
 
@@ -778,27 +771,22 @@ func TestImportOnceSwallowsPerVMErrors(t *testing.T) {
 	}
 	writeSegment(t, root, healthyVMID, envs, true /* closed */)
 
-	// Broken VM: a directory that is chmod 000 so Recover / ReadDir fail.
+	// A malformed segment header fails even when the suite runs as root.
 	brokenVMID := "bbbbcccc-dddd-eeee-ffff-000011112222"
 	brokenDir := filepath.Join(root, brokenVMID)
-	if err := os.MkdirAll(brokenDir, 0o700); err != nil {
-		t.Fatalf("mkdir broken dir: %v", err)
+	if err := os.MkdirAll(brokenDir, 0700); err != nil {
+		t.Fatal(err)
 	}
-	// Plant a segment file first so there's something to fail on, then lock the dir.
-	// Actually, chmod 000 on the dir itself makes ReadDir inside Recover fail,
-	// which causes importVM to return an error — exactly the swallow path.
-	if err := os.Chmod(brokenDir, 0o000); err != nil {
-		t.Fatalf("chmod broken dir: %v", err)
+	if err := os.WriteFile(filepath.Join(brokenDir, "seg-0000000000000000.vmsp"), []byte("broken"), 0600); err != nil {
+		t.Fatal(err)
 	}
-	// Restore permissions at test end so t.TempDir cleanup works.
-	t.Cleanup(func() { _ = os.Chmod(brokenDir, 0o700) })
 
 	imp := spool.NewImporter(st, root, time.Second, nil)
 	stats, err := imp.ImportOnce(context.Background())
 
-	// Must return nil — per-VM errors are swallowed.
-	if err != nil {
-		t.Fatalf("ImportOnce: want nil error, got: %v", err)
+	// The failed VM is reported without discarding healthy progress.
+	if err == nil {
+		t.Fatal("ImportOnce hid broken VM")
 	}
 
 	// Healthy records must have landed.

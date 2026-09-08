@@ -99,7 +99,7 @@ func PrepareVM(t *testing.T, repoRoot, id string, n int, alloc *network.Allocato
 	}
 	cid := uint32(3 + n)
 
-	subnet, err := alloc.Next()
+	subnet, err := alloc.Acquire(id)
 	if err != nil {
 		t.Fatalf("PrepareVM %s: allocate subnet: %v", id, err)
 	}

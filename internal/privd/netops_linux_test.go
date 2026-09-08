@@ -6,6 +6,7 @@
 package privd_test
 
 import (
+	"context"
 	"os"
 	"strings"
 	"testing"
@@ -39,6 +40,11 @@ func TestRealOpsNetworkLifecycle(t *testing.T) {
 		VMID: entry.VMID,
 		CIDR: entry.NetCIDR,
 	}
+	t.Cleanup(func() {
+		if err := ops.ReleaseNetwork(entry); err != nil {
+			t.Errorf("cleanup real network: %v", err)
+		}
+	})
 
 	// AllocateNetwork must succeed.
 	if err := ops.AllocateNetwork(entry, req); err != nil {
@@ -48,6 +54,22 @@ func TestRealOpsNetworkLifecycle(t *testing.T) {
 	// Idempotent: second call with same id must succeed (detects existing netns).
 	if err := ops.AllocateNetwork(entry, req); err != nil {
 		t.Errorf("AllocateNetwork idempotent: %v", err)
+	}
+
+	// A canceled real command must retain ownership of the surviving namespace.
+	contextOps, ok := any(ops).(interface {
+		ReleaseNetworkContext(context.Context, privd.VMEntry) error
+	})
+	if !ok {
+		t.Fatal("network teardown cannot receive its execution budget")
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := contextOps.ReleaseNetworkContext(canceled, entry); err == nil {
+		t.Fatal("canceled teardown released a live network claim")
+	}
+	if err := ops.AllocateNetwork(entry, req); err != nil {
+		t.Fatalf("canceled release damaged surviving network: %v", err)
 	}
 
 	// ReleaseNetwork must succeed.
@@ -329,5 +351,15 @@ func assertArgv(t *testing.T, got []string, want ...string) {
 		if got[i] != want[i] {
 			t.Errorf("argv[%d] = %q, want %q\n  got:  %v\n  want: %v", i, got[i], want[i], got, want)
 		}
+	}
+}
+
+// A failed real executable lookup is unknown host state, even when every
+// teardown command also failed. No fake network backend supplies this answer.
+func TestReleaseNetworkRefusesUnavailableHostProbe(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	ops := privd.NewRealOps(privd.RealOpsCfg{})
+	if err := ops.ReleaseNetwork(privd.VMEntry{VMID: "probe-unavailable"}); err == nil {
+		t.Fatal("network release succeeded without executable teardown or host probe")
 	}
 }

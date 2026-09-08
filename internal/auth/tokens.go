@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"time"
@@ -20,6 +21,21 @@ import (
 var ErrTokenNotFound = errors.New("token not found")
 
 const tokensFile = "tokens.json"
+
+// MaxTokenTTLMinutes is the largest whole-minute TTL representable by time.Duration.
+// Zero means permanent; all interfaces share this arithmetic bound.
+const MaxTokenTTLMinutes int64 = math.MaxInt64 / int64(time.Minute)
+
+// ErrInvalidTokenTTL means a requested token lifetime is outside the supported range.
+var ErrInvalidTokenTTL = errors.New("token TTL outside supported range")
+
+// TokenTTL converts whole minutes only after validating the arithmetic bound.
+func TokenTTL(minutes int64) (time.Duration, error) {
+	if minutes < 0 || minutes > MaxTokenTTLMinutes {
+		return 0, fmt.Errorf("%w: minutes must be between 0 and %d (0 = no expiry)", ErrInvalidTokenTTL, MaxTokenTTLMinutes)
+	}
+	return time.Duration(minutes) * time.Minute, nil
+}
 
 // TokenRecord is the exported view of a token: all fields except the hash.
 // CreatedAt, ExpiresAt, and RevokedAt are RFC3339 UTC strings; sub-second
@@ -97,6 +113,9 @@ func (s *Store) saveTokens(ts tokenStore) error {
 // the new TokenRecord. The secret is "vmobs_" + base64.RawURLEncoding(32
 // random bytes); only its SHA-256 is persisted.
 func (s *Store) CreateToken(name, owner string, ttl time.Duration) (secret string, rec TokenRecord, err error) {
+	if ttl < 0 || ttl > time.Duration(MaxTokenTTLMinutes)*time.Minute {
+		return "", TokenRecord{}, ErrInvalidTokenTTL
+	}
 	// Generate token secret: 32 random bytes, base64url-encoded with prefix.
 	rawSecret := make([]byte, 32)
 	if _, err := rand.Read(rawSecret); err != nil {
@@ -227,11 +246,10 @@ func (s *Store) RevokeToken(id string) error {
 		// Found — set RevokedAt if not already set (idempotent).
 		if ts.Tokens[i].RevokedAt == "" {
 			ts.Tokens[i].RevokedAt = nowUTC()
-			if err := s.saveTokens(ts); err != nil {
-				return err
-			}
 		}
-		return nil
+		// Republish even on a retry: a prior post-rename barrier failure can
+		// leave RevokedAt visible without establishing its durability.
+		return s.saveTokens(ts)
 	}
 
 	return ErrTokenNotFound

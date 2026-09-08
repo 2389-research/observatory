@@ -210,6 +210,14 @@ var migrations = []string{
 	// because idx_events_kind cannot narrow to a VM and idx_events_vm cannot
 	// narrow to a boot or a kind.
 	`CREATE INDEX idx_events_vm_boot_kind ON events (vm_id, boot_id, kind, event_id);`,
+	// v10: stopped jail cleanup debt survives controller restarts. Old failures
+	// have no settlement witness; seed conservatively and obtain fresh host proof.
+	`CREATE TABLE cleanup_debt (vm_id TEXT PRIMARY KEY REFERENCES vms(vm_id));
+ INSERT INTO cleanup_debt(vm_id)
+ SELECT DISTINCT vms.vm_id FROM events JOIN vms
+ ON vms.vm_id = json_extract(events.payload, '$.data.vm_id')
+ WHERE events.kind = 'vm.cleanup_failed' AND vms.observed_state = 'stopped'
+ AND json_extract(events.payload, '$.data.state') = 'stopped';`,
 }
 
 // Store owns one SQLite database. All writes go through the writer pool, which

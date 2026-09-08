@@ -337,6 +337,12 @@ func (p *refusingReleasePrivd) ReleaseVM(ctx context.Context, req privd.ReleaseV
 	return p.PrivdClient.ReleaseVM(ctx, req)
 }
 
+func (p *refusingReleasePrivd) NetworkLeases(ctx context.Context) (map[string]string, error) {
+	return p.PrivdClient.(interface {
+		NetworkLeases(context.Context) (map[string]string, error)
+	}).NetworkLeases(ctx)
+}
+
 // aliveRefusal is privd's verbatim answer when the ledger still shows the VM process
 // alive (internal/privd/server.go:357-360). SIGKILL is asynchronous, so a release
 // issued the instant after the signal legitimately gets this.

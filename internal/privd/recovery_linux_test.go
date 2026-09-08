@@ -7,6 +7,7 @@ package privd
 
 import (
 	"encoding/json"
+	"github.com/google/uuid"
 	"os"
 	"path/filepath"
 	"strings"
@@ -157,7 +158,7 @@ func TestStartVMAllowsIdentitiesAReleasedVMGaveUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal release: %v", err)
 	}
-	mustOK(t, "release first", s.dispatch(Request{V: ProtoVersion, Verb: "release_vm", Payload: payload}))
+	mustOK(t, "release first", s.dispatch(Request{V: ProtoVersion, OpID: uuid.NewString(), Verb: "release_vm", Payload: payload}))
 
 	mustOK(t, "allocate second", allocateCIDR(t, s, "vm-second", "10.201.0.4/30"))
 	mustOK(t, "start second", startWithIdentity(t, s, "vm-second", stageFor("vm-second"), 30001, 10))

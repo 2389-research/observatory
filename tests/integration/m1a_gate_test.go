@@ -207,6 +207,11 @@ type daemonOptions struct {
 	password string
 	// stateDir, when set, is Paths.State instead of a fresh temp dir.
 	stateDir string
+	// scratchMiB reserves actual free space for a low-headroom admission gate.
+	scratchMiB int64
+	// privdSocket allows a real transport fault proxy in acceptance tests.
+	privdSocket        string
+	parallelProvisions int
 }
 
 // daemonOption tunes daemonOptions.
@@ -272,6 +277,12 @@ func startDaemon(t *testing.T, repoRoot, daemonBin, runnerBin, label string, opt
 	var o daemonOptions
 	for _, opt := range opts {
 		opt(&o)
+	}
+	if o.privdSocket == "" {
+		o.privdSocket = m1aPrivdSock
+	}
+	if o.parallelProvisions == 0 {
+		o.parallelProvisions = 4
 	}
 
 	// Paths.Runtime is the fixed production layout, not a per-test subdir: it must
@@ -396,8 +407,8 @@ admission:
   reserve_inspection_slots: 0
   reserve_inspector_memory_mib: 0
   reserve_inspector_cpu_cores: 0
-  reserve_inspector_scratch_mib: 0
-  max_parallel_provisions: 4
+  reserve_inspector_scratch_mib: %d
+  max_parallel_provisions: %d
   max_batch_size: 8
   default_batch_reservation: atomic_reservation
   default_batch_on_failure: keep_successful
@@ -482,8 +493,10 @@ performance_targets:
 		runtimeDir,
 		filepath.Join(stateDir, "templates"),
 		lockPath,
-		m1aPrivdSock,
+		o.privdSocket,
 		lockPath,
+		o.scratchMiB,
+		o.parallelProvisions,
 		gateRootDiskMiB,
 		gateWorkspaceDiskMiB,
 		dbPath,

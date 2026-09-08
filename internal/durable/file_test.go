@@ -251,7 +251,7 @@ func TestMkdirAllCreatesTheWholeTree(t *testing.T) {
 	if perm := info.Mode().Perm(); perm != 0o700 {
 		t.Errorf("mode = %v; want 0700", perm)
 	}
-	// Idempotent: a second call has nothing to create and no barrier to take.
+	// Idempotent: a second call repeats barriers without changing the tree.
 	if err := durable.MkdirAll(leaf, 0o700); err != nil {
 		t.Fatalf("second MkdirAll: %v", err)
 	}
@@ -273,6 +273,9 @@ func TestMkdirAllReportsAFailedDirectorySync(t *testing.T) {
 	if !errors.Is(err, fs.ErrPermission) {
 		t.Errorf("err = %v; want the directory-sync permission failure", err)
 	}
+	if err := durable.MkdirAll(filepath.Join(parent, "vm-1"), 0o700); !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("visible directory retry lost its failed barrier: %v", err)
+	}
 }
 
 func siblingNames(t *testing.T, dir string) []string {
@@ -286,4 +289,38 @@ func siblingNames(t *testing.T, dir string) []string {
 		names = append(names, e.Name())
 	}
 	return names
+}
+
+func TestRemoveAllRetryRepeatsDirectoryBarrier(t *testing.T) {
+	skipIfRoot(t)
+	parent := t.TempDir()
+	path := filepath.Join(parent, "vm")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	denyDirectoryRead(t, parent)
+	if err := durable.RemoveAll(path); !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("first removal must fail barrier: %v", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("tree not removed: %v", err)
+	}
+	if err := durable.RemoveAll(path); !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("retry skipped unsettled barrier: %v", err)
+	}
+	if err := os.Chmod(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := durable.RemoveAll(path); err != nil {
+		t.Fatalf("recovered barrier: %v", err)
+	}
+}
+
+func TestRemoveAllAbsentAncestorsStillSyncsSurvivor(t *testing.T) {
+	skipIfRoot(t)
+	parent := t.TempDir()
+	denyDirectoryRead(t, parent)
+	if err := durable.RemoveAll(filepath.Join(parent, "gone", "vm")); !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("absent parents skipped barrier: %v", err)
+	}
 }

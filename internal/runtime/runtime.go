@@ -73,6 +73,19 @@ func (e *UnavailableError) Error() string {
 	return fmt.Sprintf("runtime unavailable: %s", e.Reason)
 }
 
+// ErrLaunchPending means the caller stopped waiting while a host launch still
+// owns its lifecycle lock. Reservations remain held until cleanup proves absence.
+type ErrLaunchPending struct {
+	VMID   string
+	BootID string
+	Err    error
+}
+
+func (e *ErrLaunchPending) Error() string {
+	return fmt.Sprintf("launch outcome pending for %s boot %s: %v", e.VMID, e.BootID, e.Err)
+}
+func (e *ErrLaunchPending) Unwrap() error { return e.Err }
+
 // ErrStopNotProven is what Stop and ForceStop return when the VMM they were
 // asked to end could not be observed to die.
 //

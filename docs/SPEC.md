@@ -896,6 +896,57 @@ The CLI is a first-class operator interface, not a demo wrapper. Every command s
 
 Serve a terse agent operating guide from the running daemon (`GET /meta` links it): how to launch, watch, harvest and diagnose, with one worked fleet-loop example. Its reference material is generated from the OpenAPI contract and event-kind registry, not maintained by hand (P-07).
 
+### 14.2 Bounded agent slice
+
+The implemented bootstrap is `GET /api/v1/meta` (CLI: `vmobs --json meta`). Its
+`routes` array derives method, path template, feature and built state from the
+routing table; collection `links` derive from built GET routes. Auth-management
+routes stay in the catalog rather than generic collection links. Nil handlers
+remain `built:false`, including the SSE stream. The `agent` block states the
+workflow and current limitations. Selected route `purpose`, `request_example`
+and `instructions` describe launch with an attached operator-verdict run,
+conclusion, revision-bound stop, snapshot and event resume. Examples use the
+handler request types; this is not a full OpenAPI schema surface.
+
+VMs expose self/actions/runs links, operations expose self/VM links, and runs
+expose self/conclude/report links. A client starts from metadata, captures a
+snapshot cursor before mutation, persists its exact keyed launch request, then
+follows response links to watch, assess and stop. Launch replay requires the
+same owner, key and canonical request; lifecycle actions are not replay-safe
+merely because they carry a revision. An uncertain action must be inspected.
+
+Every structured non-2xx API error adds `retry_strategy`: stale revisions/cursors use `after_refresh`;
+otherwise an error with an operation uses `query_operation` and its concrete
+read link; bounds/capacity or other retryable errors use `after_precondition`;
+other failures use `never`. Strategies guide recovery rather than promise that
+an automatic repeat succeeds. `same_request` is reserved in the described
+vocabulary; the slice specifically permits exact keyed launch replay and safe
+reads, not blind repeats of arbitrary mutations. Existing `retryable` remains.
+
+Situation includes `attention_open` and `omitted` entries for attention head
+and changed VMs, each with `count` and `expand`. `at_least:true` denotes a lower
+bound from a one-extra-row changed-VM probe, including later byte shedding.
+Expansion is a current queue/inventory read, not an atomic historical snapshot.
+Counts and watch scope are never shed. If the irreducible envelope cannot
+fit the configured ceiling, return 503 `situation_envelope_exceeds_bound` with
+configured/minimum bytes and a configuration remediation. That fixed error
+envelope is exempt from the successful-summary byte ceiling.
+
+Client resume persists a processed event page's `next_after` and resource links.
+Use exclusive `after`, preserve filters, and optionally freeze `until`. Never
+skip to `latest_event_id` after a partial page. An empty page preserves the
+cursor. Situation `as_of_cursor` is an orientation anchor from separate live
+reads, not proof of consumption. Resume assumes the same retained database;
+installation/retention-gap detection and server checkpoints are unimplemented.
+Situation/events remain shared host observations; resource ownership rules do
+not make those views private.
+
+Exact plan approval, plan/apply, per-work budgets and mutation watch cursors are
+unimplemented and reported false in metadata. Host reservations and lifecycle
+deadlines do not substitute for work-budget accounting or human plan approval.
+The precise deferred approval/budget semantics, code-backed gap map and
+supplemental V2-AGENT scenarios live in `design/agent-control-contract.md`.
+
 ## 15. Security, secrets and operator authentication
 
 ### 15.1 Deployment mode

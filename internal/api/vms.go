@@ -71,6 +71,7 @@ type wireOperationError struct {
 }
 
 type wireOperation struct {
+	Links       map[string]string   `json:"links"`
 	OperationID string              `json:"operation_id"`
 	Kind        string              `json:"kind"`
 	VMID        *string             `json:"vm_id,omitempty"`
@@ -139,7 +140,10 @@ func renderVM(vm *store.VM, telemetryHealth string) wireVM {
 		CreatedAt:       vm.CreatedAt,
 		UpdatedAt:       vm.UpdatedAt,
 		Links: map[string]string{
-			"events": basePath + "/events?vm_id=" + vm.VMID,
+			"events":  basePath + "/events?vm_id=" + vm.VMID,
+			"self":    basePath + "/vms/" + vm.VMID,
+			"actions": basePath + "/vms/" + vm.VMID + "/actions",
+			"runs":    basePath + "/runs?vm_id=" + vm.VMID,
 		},
 	}
 	if vm.FailureStage != nil || vm.FailureReason != nil {
@@ -191,6 +195,7 @@ func parseOperationID(raw string) (int64, bool) {
 
 func renderOperation(op *store.Operation) wireOperation {
 	w := wireOperation{
+		Links:       map[string]string{"self": basePath + "/operations/" + renderOperationID(op.OperationID)},
 		OperationID: renderOperationID(op.OperationID),
 		Kind:        op.Kind,
 		VMID:        op.VMID,
@@ -199,6 +204,9 @@ func renderOperation(op *store.Operation) wireOperation {
 		Attempt:     op.Attempt,
 		CreatedAt:   op.CreatedAt,
 		UpdatedAt:   op.UpdatedAt,
+	}
+	if op.VMID != nil {
+		w.Links["vm"] = basePath + "/vms/" + *op.VMID
 	}
 	if op.ErrorCause != nil {
 		w.Error = &wireOperationError{Cause: *op.ErrorCause}
@@ -577,6 +585,16 @@ func writeVMErrorForOperation(w http.ResponseWriter, err error, op *store.Operat
 	status, e := vmErrorFor(err)
 	if op != nil && op.OperationID > 0 {
 		e.OperationID = renderOperationID(op.OperationID)
+		for i := range e.Remediation {
+			params := e.Remediation[i].Params
+			if target, ok := params["path"].(string); ok {
+				target = strings.ReplaceAll(target, "/operations/{id}", "/operations/"+e.OperationID)
+				if op.VMID != nil {
+					target = strings.ReplaceAll(target, "/vms/{id}", "/vms/"+*op.VMID)
+				}
+				params["path"] = target
+			}
+		}
 	}
 	writeError(w, status, e)
 }

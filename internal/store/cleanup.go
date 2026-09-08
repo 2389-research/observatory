@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"unicode/utf8"
 
 	"github.com/2389-research/observatory/internal/redact"
 )
@@ -24,10 +25,18 @@ func (s *Store) RecordCleanupFailure(ctx context.Context, vmID, state, reason st
 	if vmID == "" || state == "" || reason == "" {
 		return errors.New("cleanup failure record requires vm_id, state and reason")
 	}
+	reason = redacted(reason)
+	if len(reason) > 2048 {
+		reason = reason[:2045]
+		for !utf8.ValidString(reason) {
+			reason = reason[:len(reason)-1]
+		}
+		reason += "..."
+	}
 	return s.recordVMStatement(ctx, "vm.cleanup_failed", vmID, map[string]any{
 		"vm_id":  vmID,
 		"state":  state,
-		"reason": redacted(reason),
+		"reason": reason,
 	})
 }
 
@@ -75,8 +84,37 @@ func (s *Store) recordVMStatement(ctx context.Context, kind, vmID string, data m
 		s.systemEnvelope(kind, "registry", notApplicableQuality(), data)); err != nil {
 		return err
 	}
+	if kind == "vm.cleanup_failed" && data["state"] == "stopped" {
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO cleanup_debt(vm_id)
+  SELECT vm_id FROM vms WHERE vm_id = ? AND observed_state IN ('stopping', 'stopped')`, vmID); err != nil {
+			return err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit %s record for %s: %w", kind, vmID, err)
 	}
 	return nil
+}
+
+// ReleaseVMReservations releases failed VM debt after a full host release.
+// The caller must hold the lifecycle claim and have observed release success.
+func (s *Store) ReleaseVMReservations(ctx context.Context, vmID string) error {
+	_, err := s.writer.ExecContext(ctx, `UPDATE reservations SET released = 1, compute_released = 1,
+ updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE vm_id = ?
+ AND EXISTS (SELECT 1 FROM vms WHERE vm_id = ? AND observed_state = 'failed')`, vmID, vmID)
+	return err
+}
+
+// ClearCleanupDebt records that a fresh force-stop finished stopped jail cleanup.
+// It retains every reservation and disk needed for a later restart.
+func (s *Store) ClearCleanupDebt(ctx context.Context, vmID string) error {
+	_, err := s.writer.ExecContext(ctx, `DELETE FROM cleanup_debt WHERE vm_id = ?`, vmID)
+	return err
+}
+
+// HasCleanupDebt rechecks a candidate's durable marker after lifecycle ownership.
+func (s *Store) HasCleanupDebt(ctx context.Context, vmID string) (bool, error) {
+	var pending bool
+	err := s.readers.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM cleanup_debt WHERE vm_id = ?)`, vmID).Scan(&pending)
+	return pending, err
 }

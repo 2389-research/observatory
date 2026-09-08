@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"sync/atomic"
 
 	"github.com/2389-research/observatory/internal/events"
+	"github.com/2389-research/observatory/internal/spool"
 	"github.com/2389-research/observatory/internal/store"
 )
 
@@ -27,12 +29,13 @@ type Config struct {
 	SituationMaxResponseBytes int64
 }
 
-// Engine evaluates registered trigger rules over the durable stream. It holds
-// no state of its own: the cursor and the queue live in the store, so a fresh
-// process resumes exactly where the last one stopped.
+// Engine evaluates registered trigger rules over the durable stream. It keeps
+// its durable cursor and queue in the store, so a fresh process resumes where
+// the last one stopped. Optional importer diagnostics are process-local.
 type Engine struct {
-	st  *store.Store
-	cfg Config
+	importer atomic.Pointer[spool.Importer]
+	st       *store.Store
+	cfg      Config
 }
 
 func New(st *store.Store, cfg Config) *Engine {

@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/google/uuid"
 	"io"
 	"log"
 	"net"
@@ -124,7 +125,7 @@ func makeReq(t *testing.T, verb string, payload any) privd.Request {
 	if err != nil {
 		t.Fatalf("marshal payload: %v", err)
 	}
-	return privd.Request{V: privd.ProtoVersion, Verb: verb, Payload: json.RawMessage(raw)}
+	return privd.Request{V: privd.ProtoVersion, OpID: uuid.NewString(), Verb: verb, Payload: json.RawMessage(raw)}
 }
 
 // testLogger returns a *log.Logger that writes via t.Logf, so server output only

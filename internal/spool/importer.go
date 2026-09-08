@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/2389-research/observatory/internal/events"
@@ -34,10 +35,14 @@ type cursor struct {
 
 // Importer walks per-VM spool dirs under root and imports envelopes into st.
 type Importer struct {
-	st         *store.Store
-	root       string
-	interval   time.Duration
-	onImported func(*events.Envelope) // called per newly-appended envelope; may be nil
+	mu            sync.RWMutex // protects health snapshots read by HTTP handlers
+	cycleMu       sync.Mutex   // serializes manual and background cycles
+	health        map[string]importHealth
+	reportFailure func(context.Context, string, ImportStatus) error
+	st            *store.Store
+	root          string
+	interval      time.Duration
+	onImported    func(*events.Envelope) // called per newly-appended envelope; may be nil
 }
 
 // NewImporter constructs an Importer that polls root every interval.
@@ -45,13 +50,15 @@ type Importer struct {
 // (not deduped). Pass nil to omit the callback. The callback fires synchronously
 // in the import loop and must not block for long.
 func NewImporter(st *store.Store, root string, interval time.Duration, onImported func(*events.Envelope)) *Importer {
-	return &Importer{st: st, root: root, interval: interval, onImported: onImported}
+	if interval <= 0 {
+		interval = time.Second
+	}
+	return &Importer{health: make(map[string]importHealth), st: st, root: root, interval: interval, onImported: onImported}
 }
 
 // Run calls ImportOnce every interval until ctx is done.
-// Per-cycle errors from ImportOnce do not stop the loop; they are silently dropped
-// because no caller wires them in this task, and a single corrupt segment must
-// not kill the importer for all other VMs.
+// Per-cycle failures are recorded in health and coalesced attention; one VM
+// never delays another VM by sleeping during its retry backoff.
 // Run returns ctx.Err() when the context is cancelled or expired.
 func (imp *Importer) Run(ctx context.Context) error {
 	ticker := time.NewTicker(imp.interval)
@@ -61,8 +68,8 @@ func (imp *Importer) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			// per-cycle errors dropped intentionally; see doc comment
-			_, _ = imp.ImportOnce(ctx)
+			// Health retains failures even if the store cannot record attention.
+			_, _ = imp.importOnce(ctx, true)
 		}
 	}
 }
@@ -76,33 +83,66 @@ func (imp *Importer) Run(ctx context.Context) error {
 //  5. Writes cursor.json atomically after each segment's batch commits.
 //  6. Prunes fully-committed closed segments.
 func (imp *Importer) ImportOnce(ctx context.Context) (ImportStats, error) {
-	var total ImportStats
+	return imp.importOnce(ctx, false)
+}
 
+// Explicit cycles always attempt work; Run alone observes the retry schedule.
+func (imp *Importer) importOnce(ctx context.Context, backoff bool) (ImportStats, error) {
+	imp.cycleMu.Lock()
+	defer imp.cycleMu.Unlock()
+	var total ImportStats
+	if err := ctx.Err(); err != nil {
+		return total, err
+	}
+	if backoff && !imp.due("") {
+		return total, nil
+	}
 	entries, err := os.ReadDir(imp.root)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return total, nil
-		}
-		return total, fmt.Errorf("importer: readdir %s: %w", imp.root, err)
+		err = fmt.Errorf("importer: readdir %s: %w", imp.root, err)
+		imp.record(ctx, "", err)
+		return total, err
 	}
-
+	imp.record(ctx, "", nil)
+	var firstErr error
+	failed := 0
+	present := map[string]bool{"": true}
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
-		vmDir := filepath.Join(imp.root, e.Name())
-		stats, err := imp.importVM(ctx, vmDir)
-		if err != nil {
-			// Per-VM errors fold into partial totals; the cycle continues.
-			// In a production importer a caller would log or record these;
-			// this task has no logger, so the error is surfaced to ImportOnce's
-			// caller only if every VM fails (partial success returns nil here).
-			_ = err
+		id := e.Name()
+		present[id] = true
+		if err := ctx.Err(); err != nil {
+			return total, err
+		}
+		if backoff && !imp.due(id) {
 			continue
 		}
+		stats, err := imp.importVM(ctx, filepath.Join(imp.root, id))
 		total.Appended += stats.Appended
 		total.Deduped += stats.Deduped
 		total.Pruned += stats.Pruned
+		if ctx.Err() != nil {
+			return total, ctx.Err()
+		}
+		imp.record(ctx, id, err)
+		if err != nil {
+			failed++
+			if firstErr == nil {
+				firstErr = fmt.Errorf("VM %s: %w", id, err)
+			}
+		}
+	}
+	imp.mu.Lock()
+	for id := range imp.health {
+		if !present[id] {
+			delete(imp.health, id)
+		}
+	}
+	imp.mu.Unlock()
+	if failed > 0 {
+		return total, fmt.Errorf("importer: %d VM imports failed; first: %w", failed, firstErr)
 	}
 	return total, nil
 }
@@ -121,7 +161,10 @@ func (imp *Importer) importVM(ctx context.Context, vmDir string) (ImportStats, e
 	}
 
 	// Step 2: load cursor (absent = start of everything).
-	cur := imp.loadCursor(vmDir)
+	cur, err := imp.loadCursor(vmDir)
+	if err != nil {
+		return stats, fmt.Errorf("importer: read cursor: %w", err)
+	}
 
 	// Step 3: if recovery detected corrupt segments, append one gap envelope per
 	// segment to the store. Each envelope carries its own stable
@@ -169,14 +212,22 @@ func (imp *Importer) importVM(ctx context.Context, vmDir string) (ImportStats, e
 			// pruned — it is evidence whose last records never committed, and
 			// the prune rule requires the store batch containing its last record
 			// to have committed. Corrupt evidence survives on disk permanently.
-			n := countSegmentRecords(segPath)
+			n, err := countSegmentRecords(segPath)
+			if err != nil && !errors.Is(err, ErrCorruptRecord) {
+				return stats, fmt.Errorf("importer: count segment %s: %w", segPath, err)
+			}
 			if n > 0 {
 				stats.Deduped += n
 			}
-			if n >= 0 && segmentHasEndMarker(segPath) {
-				if rerr := os.Remove(segPath); rerr == nil {
-					stats.Pruned++
+			closed, err := segmentHasEndMarker(segPath)
+			if err != nil {
+				return stats, fmt.Errorf("importer: read end marker %s: %w", segPath, err)
+			}
+			if n >= 0 && closed {
+				if rerr := os.Remove(segPath); rerr != nil {
+					return stats, fmt.Errorf("importer: prune %s: %w", segPath, rerr)
 				}
+				stats.Pruned++
 			}
 			continue
 		}
@@ -184,8 +235,7 @@ func (imp *Importer) importVM(ctx context.Context, vmDir string) (ImportStats, e
 		// CURRENT or FUTURE: open the iterator.
 		iter, err := ReadSegment(segPath)
 		if err != nil {
-			// Unreadable header: skip without pruning.
-			continue
+			return stats, fmt.Errorf("importer: read segment: %w", err)
 		}
 
 		// Records 0..resumeFrom-1 are already committed (CURRENT case).
@@ -196,7 +246,7 @@ func (imp *Importer) importVM(ctx context.Context, vmDir string) (ImportStats, e
 
 		recIdx := 0
 		reachedEOF := false // true when iter exhausted this segment (end-marker or tail)
-		importErr := false
+		var importErr error
 
 		for {
 			env, nextErr := iter.Next()
@@ -209,7 +259,7 @@ func (imp *Importer) importVM(ctx context.Context, vmDir string) (ImportStats, e
 				break
 			}
 			if nextErr != nil {
-				importErr = true
+				importErr = nextErr
 				break
 			}
 
@@ -223,7 +273,7 @@ func (imp *Importer) importVM(ctx context.Context, vmDir string) (ImportStats, e
 			// Append this record to the store.
 			ar, appendErr := imp.st.Append(ctx, env)
 			if appendErr != nil {
-				importErr = true
+				importErr = appendErr
 				break
 			}
 			if ar.Deduped {
@@ -238,27 +288,28 @@ func (imp *Importer) importVM(ctx context.Context, vmDir string) (ImportStats, e
 			// §12.4 ordering: store committed → write cursor → then continue.
 			newCur := cursor{Segment: segName, Record: recIdx}
 			if writeErr := writeCursor(vmDir, newCur); writeErr != nil {
-				// Cursor write failed: advance in-memory cursor anyway so prune
-				// logic sees it, but break out — next cycle replays from old cursor.
-				cur = newCur
-				importErr = true
+				importErr = fmt.Errorf("write cursor: %w", writeErr)
 				break
 			}
 			cur = newCur
 			recIdx++
 		}
-		_ = iter.Close()
-
-		if importErr {
-			continue
+		closeErr := iter.Close()
+		if importErr != nil || closeErr != nil {
+			return stats, fmt.Errorf("importer: segment %s: %w", segPath, errors.Join(importErr, closeErr))
 		}
 
 		// Prune: remove segment if it had a clean end-marker and we reached EOF
 		// (meaning we processed all records and cur is at the last one).
-		if reachedEOF && segmentHasEndMarker(segPath) {
-			if rerr := os.Remove(segPath); rerr == nil {
-				stats.Pruned++
+		closed, err := segmentHasEndMarker(segPath)
+		if err != nil {
+			return stats, fmt.Errorf("importer: read end marker %s: %w", segPath, err)
+		}
+		if reachedEOF && closed {
+			if rerr := os.Remove(segPath); rerr != nil {
+				return stats, fmt.Errorf("importer: prune %s: %w", segPath, rerr)
 			}
+			stats.Pruned++
 		}
 	}
 
@@ -267,35 +318,43 @@ func (imp *Importer) importVM(ctx context.Context, vmDir string) (ImportStats, e
 
 // segmentHasEndMarker reads the last 4 bytes of segPath and returns true if
 // they are the end-marker (0xFFFFFFFF).
-func segmentHasEndMarker(segPath string) bool {
+func segmentHasEndMarker(segPath string) (bool, error) {
 	f, err := os.Open(segPath)
 	if err != nil {
-		return false
+		return false, err
 	}
 	defer f.Close()
 	info, err := f.Stat()
-	if err != nil || info.Size() < 4 {
-		return false
+	if err != nil {
+		return false, err
+	}
+	if info.Size() < 4 {
+		return false, io.ErrUnexpectedEOF
 	}
 	var tail [4]byte
 	if _, err := f.ReadAt(tail[:], info.Size()-4); err != nil {
-		return false
+		return false, err
 	}
-	return binary.BigEndian.Uint32(tail[:]) == endMarker
+	return binary.BigEndian.Uint32(tail[:]) == endMarker, nil
 }
 
-// loadCursor reads cursor.json from vmDir. If absent or unreadable, returns a
-// zero cursor (start from the beginning of all segments).
-func (imp *Importer) loadCursor(vmDir string) cursor {
+// loadCursor reads durable progress. Only an absent cursor means start at zero.
+func (imp *Importer) loadCursor(vmDir string) (cursor, error) {
 	data, err := os.ReadFile(filepath.Join(vmDir, "cursor.json"))
+	if os.IsNotExist(err) {
+		return cursor{}, nil
+	}
 	if err != nil {
-		return cursor{}
+		return cursor{}, err
 	}
 	var c cursor
 	if err := json.Unmarshal(data, &c); err != nil {
-		return cursor{}
+		return cursor{}, err
 	}
-	return c
+	if c.Segment == "" || filepath.Base(c.Segment) != c.Segment || c.Record < 0 {
+		return cursor{}, fmt.Errorf("invalid cursor")
+	}
+	return c, nil
 }
 
 // writeCursor writes cur to cursor.json in vmDir using tempfile+rename (atomic).
@@ -345,21 +404,21 @@ func writeCursor(vmDir string, cur cursor) error {
 // (controller ruling R8). Accepted consequence: a corrupt PAST segment
 // contributes nothing to the per-cycle Deduped stat — stats are observability,
 // not evidence; retention is what matters.
-func countSegmentRecords(segPath string) int {
+func countSegmentRecords(segPath string) (int, error) {
 	iter, err := ReadSegment(segPath)
 	if err != nil {
-		return -1
+		return -1, err
 	}
 	defer iter.Close()
 	count := 0
 	for {
 		_, err := iter.Next()
 		if errors.Is(err, io.EOF) {
-			return count
+			return count, nil
 		}
 		if err != nil {
 			// Non-EOF error (including ErrCorruptRecord): signal error to caller.
-			return -1
+			return -1, err
 		}
 		count++
 	}

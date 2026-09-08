@@ -184,10 +184,32 @@ type Reservation struct {
 
 // ReservationTotals is the aggregate admission view.
 type ReservationTotals struct {
-	MemoryMiB int64 // sum of memory_total_mib for non-released, non-compute-released rows
-	VCPU      int64 // sum of vcpu for non-released, non-compute-released rows
-	DiskMiB   int64 // sum of disk_mib for non-released rows (stopped VMs keep disk)
-	ActiveVMs int   // count of non-released rows
+	Disks     []DiskReservation // unreleased owners from the same snapshot as the sums
+	MemoryMiB int64             // sum of memory_total_mib for non-released, non-compute-released rows
+	VCPU      int64             // sum of vcpu for non-released, non-compute-released rows
+	DiskMiB   int64             // sum of disk_mib for non-released rows (stopped VMs keep disk)
+	ActiveVMs int               // count of non-released rows
+}
+
+// DiskReservation binds an outstanding disk promise to its VM owner.
+type DiskReservation struct {
+	VMID    string
+	DiskMiB int64
+}
+
+// WithReservationTotals holds the writer transaction through observation, so
+// capacity cannot combine old reservations with newly materialized disk files.
+func (s *Store) WithReservationTotals(ctx context.Context, observe func(ReservationTotals) error) error {
+	tx, err := s.writer.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	totals, err := reservationTotalsInTx(ctx, tx)
+	if err != nil {
+		return err
+	}
+	return observe(totals)
 }
 
 // --- inputs ---
@@ -264,10 +286,11 @@ type OperationUpdate struct {
 
 // VMQuery pages VMs by row_id keyset with optional state and owner filters.
 type VMQuery struct {
-	After  int64    // row_id cursor; 0 = from the start
-	Limit  int      // 0 = DefaultPageLimit
-	States []string // nil/empty = all states
-	Owner  string   // non-empty: restrict to this owner
+	IncludeStoppedCleanup bool     // include stopped rows with durable cleanup debt alongside States
+	After                 int64    // row_id cursor; 0 = from the start
+	Limit                 int      // 0 = DefaultPageLimit
+	States                []string // nil/empty = all states
+	Owner                 string   // non-empty: restrict to this owner
 }
 
 // --- CreateVMWithOperation ---
@@ -622,6 +645,13 @@ func (s *Store) TransitionVM(ctx context.Context, in TransitionInput) (*VM, erro
 		return nil, fmt.Errorf("update vm state: %w", err)
 	}
 
+	// Starting another lifecycle or deleting supersedes stopped cleanup debt.
+	if in.To != "stopped" {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM cleanup_debt WHERE vm_id = ?`, in.VMID); err != nil {
+			return nil, err
+		}
+	}
+
 	// Update reservation flags.
 	if in.ReleaseAll {
 		if _, err := tx.ExecContext(ctx,
@@ -845,7 +875,11 @@ func (s *Store) ListVMs(ctx context.Context, q VMQuery) ([]*VM, error) {
 	if len(q.States) > 0 {
 		placeholders := strings.Repeat("?,", len(q.States))
 		placeholders = placeholders[:len(placeholders)-1]
-		where += " AND observed_state IN (" + placeholders + ")"
+		where += " AND (observed_state IN (" + placeholders + ")"
+		if q.IncludeStoppedCleanup {
+			where += " OR (observed_state = 'stopped' AND EXISTS (SELECT 1 FROM cleanup_debt WHERE cleanup_debt.vm_id = vms.vm_id))"
+		}
+		where += ")"
 		for _, s := range q.States {
 			args = append(args, s)
 		}
@@ -1071,6 +1105,21 @@ func reservationTotalsInTx(ctx context.Context, tx *sql.Tx) (ReservationTotals, 
 		FROM reservations WHERE released = 0`).Scan(&t.MemoryMiB, &t.VCPU, &t.DiskMiB, &t.ActiveVMs)
 	if err != nil {
 		return t, fmt.Errorf("sum reservations in tx: %w", err)
+	}
+	rows, err := tx.QueryContext(ctx, "SELECT vm_id, disk_mib FROM reservations WHERE released = 0 ORDER BY vm_id")
+	if err != nil {
+		return t, fmt.Errorf("read disk reservations: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var disk DiskReservation
+		if err := rows.Scan(&disk.VMID, &disk.DiskMiB); err != nil {
+			return t, err
+		}
+		t.Disks = append(t.Disks, disk)
+	}
+	if err := rows.Err(); err != nil {
+		return t, err
 	}
 	return t, nil
 }

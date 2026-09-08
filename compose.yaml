@@ -82,6 +82,8 @@ services:
     # A crashed appliance stays down and keeps its logs. Restarting it would
     # reconcile against half-torn-down VMs before anyone had read why it fell over.
     restart: "no"
+    # Leave room for the daemon's bounded 85s drain before Docker sends SIGKILL.
+    stop_grace_period: 90s
 
 # Named to match scripts/vmobs-container, so the two start the same appliance and
 # `docker volume rm vmobs-state vmobs-runtime` means the same thing either way.

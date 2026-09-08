@@ -73,6 +73,7 @@ cmd_start() {
         --volume "$STATE_VOLUME:/var/lib/vmobs" \
         --volume "$RUNTIME_VOLUME:/srv/vmobs" \
         --restart no \
+        --stop-timeout 90 \
         "$tag" 2>&1 >/dev/null)"
     then
         docker rm -f "$NAME" >/dev/null 2>&1 || true

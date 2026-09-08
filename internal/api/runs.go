@@ -106,8 +106,10 @@ func renderRun(r *store.Run) wireRun {
 		CreatedAt:      r.CreatedAt,
 		UpdatedAt:      r.UpdatedAt,
 		Links: map[string]string{
-			"events": basePath + "/events?vm_id=" + r.VMID,
-			"report": basePath + "/runs/" + r.RunID + "/report",
+			"events":   basePath + "/events?vm_id=" + r.VMID,
+			"report":   basePath + "/runs/" + r.RunID + "/report",
+			"self":     basePath + "/runs/" + r.RunID,
+			"conclude": basePath + "/runs/" + r.RunID + "/conclude",
 		},
 	}
 

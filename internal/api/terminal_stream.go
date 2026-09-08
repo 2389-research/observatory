@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/coder/websocket"
 	"github.com/google/uuid"
@@ -150,6 +151,7 @@ func (rl *streamRelay) run(ctx context.Context) {
 		_ = rl.conn.CloseNow()
 	}()
 	go rl.watchLease(ctx)
+	go func() { defer cancel(); _ = terminalHeartbeat(ctx, rl.conn, 30*time.Second, 10*time.Second) }()
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -420,4 +422,23 @@ func (rl *streamRelay) send(ctx context.Context, m wireStreamMsg) error {
 		return err
 	}
 	return rl.conn.Write(ctx, websocket.MessageText, raw)
+}
+
+// terminalHeartbeat permits quiet sessions while bounding an unresponsive peer.
+func terminalHeartbeat(ctx context.Context, conn *websocket.Conn, interval, pongWait time.Duration) error {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			pingCtx, cancel := context.WithTimeout(ctx, pongWait)
+			err := conn.Ping(pingCtx)
+			cancel()
+			if err != nil {
+				return err
+			}
+		}
+	}
 }

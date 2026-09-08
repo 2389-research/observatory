@@ -59,6 +59,12 @@ type batchLaunchMember struct {
 // AT-001: runtime Availability is checked first; nothing is persisted on failure.
 // AT-015: idempotent replay returns the original batch without re-running admission.
 func (m *Manager) CreateBatch(ctx context.Context, owner string, req CreateBatchRequest) (*store.CreateVMBatchResult, error) {
+	if err := m.beginMutation(); err != nil {
+		return nil, err
+	}
+	defer m.wg.Done()
+	ctx, mutationCancel := m.mutationContext(ctx, launchBudget)
+	defer mutationCancel()
 	// AT-001: availability first.
 	if err := m.rt.Availability(ctx); err != nil {
 		return nil, fmt.Errorf("runtime not available: %w", err)
@@ -199,14 +205,23 @@ func (m *Manager) CreateBatch(ctx context.Context, owner string, req CreateBatch
 	coord := newBatchCoord(m, req.OnFailure, batchOpID, launchable)
 	for _, lm := range launchable {
 		lm := lm // capture
+		releaseClaim, err := m.claimLifecycle(m.ctx, lm.result.VM.VMID)
+		if err != nil {
+			m.failLaunch(m.ctx, lm.result.VM.VMID, lm.result.Operation.OperationID, "enqueue", err.Error())
+			coord.memberDone(false)
+			continue
+		}
 		// GoTracked returns false if the manager is closing; the member stays in
 		// provisioning until the next Reconcile repairs it — that is exactly what
 		// reconcile is for.
-		m.GoTracked(func() {
+		if !m.GoTracked(func() {
+			defer releaseClaim()
+			ctx, cancel := m.detachedContext(m.ctx, launchBudget)
+			defer cancel()
 			select {
 			case m.sem <- struct{}{}:
-			case <-m.ctx.Done():
-				m.failLaunch(m.ctx, lm.result.VM.VMID, lm.result.Operation.OperationID,
+			case <-ctx.Done():
+				m.failLaunch(ctx, lm.result.VM.VMID, lm.result.Operation.OperationID,
 					"enqueue", "manager closed before slot acquired")
 				coord.memberDone(false)
 				return
@@ -218,9 +233,13 @@ func (m *Manager) CreateBatch(ctx context.Context, owner string, req CreateBatch
 				coord.memberDone(false)
 				return
 			}
-			ok := m.runBatchMemberLaunch(lm, coord)
+			ok := m.runBatchMemberLaunch(ctx, lm, coord)
 			coord.memberDone(ok)
-		})
+		}) {
+			releaseClaim()
+			m.failLaunch(m.ctx, lm.result.VM.VMID, lm.result.Operation.OperationID, "enqueue", "manager closed before launch was scheduled")
+			coord.memberDone(false)
+		}
 	}
 
 	return result, nil
@@ -287,8 +306,7 @@ func (m *Manager) resolveMember(mr BatchMemberRequest) (store.BatchMemberInput, 
 }
 
 // runBatchMemberLaunch runs one member's launch sequence and returns true on success.
-func (m *Manager) runBatchMemberLaunch(lm batchLaunchMember, coord *batchCoord) bool {
-	ctx := m.ctx
+func (m *Manager) runBatchMemberLaunch(ctx context.Context, lm batchLaunchMember, coord *batchCoord) bool {
 	vm := lm.result.VM
 	opID := lm.result.Operation.OperationID
 	bootID := uuid.NewString()
@@ -329,12 +347,13 @@ func (m *Manager) runBatchMemberLaunch(lm batchLaunchMember, coord *batchCoord) 
 
 	staged, err := m.rt.Launch(ctx, spec)
 	if err != nil {
-		m.failLaunch(ctx, vm.VMID, opID, "launch", err.Error())
-		_ = m.rt.ForceStop(ctx, vm.VMID)
+		m.failLaunch(ctx, vm.VMID, opID, launchFailureStage(err), err.Error())
 		coord.stopSiblings(vm.VMID)
 		return false
 	}
 
+	ctx, recoverCancel := m.recoveryContext(ctx)
+	defer recoverCancel()
 	from = "starting"
 	if _, err := m.st.TransitionVM(ctx, store.TransitionInput{
 		VMID:        vm.VMID,
@@ -348,7 +367,6 @@ func (m *Manager) runBatchMemberLaunch(lm batchLaunchMember, coord *batchCoord) 
 			return false
 		}
 		m.failLaunch(ctx, vm.VMID, opID, "running", err.Error())
-		_ = m.rt.ForceStop(ctx, vm.VMID)
 		coord.stopSiblings(vm.VMID)
 		return false
 	}
@@ -414,7 +432,8 @@ func (c *batchCoord) stopSiblings(failedVMID string) {
 	c.stopped = true
 	c.mu.Unlock()
 
-	ctx := c.m.ctx
+	ctx, cancel := c.m.recoveryContext(c.m.ctx)
+	defer cancel()
 	grace := time.Duration(c.m.cfg.VMDefaults.StopGraceSeconds) * time.Second
 	cause := "batch_stop_successful"
 	msg := "sibling member failed, on_failure=stop_successful"
@@ -436,6 +455,11 @@ func (c *batchCoord) stopSiblings(failedVMID string) {
 			continue
 		}
 		vmID := lm.result.VM.VMID
+		releaseClaim, err := c.m.claimLifecycle(ctx, vmID)
+		if err != nil {
+			return
+		}
+		defer releaseClaim()
 		opID := lm.result.Operation.OperationID
 		for attempt := 0; attempt < 3; attempt++ {
 			vm, err := c.m.st.GetVM(ctx, vmID)
@@ -473,8 +497,14 @@ func (c *batchCoord) stopSiblings(failedVMID string) {
 			}
 			// A member still in provisioning was queued behind the semaphore:
 			// no VMM exists yet, so there is nothing for the runtime to stop.
+			var stopErr error
 			if state != "provisioning" {
-				_, _ = c.m.rt.Stop(ctx, vmID, grace)
+				_, stopErr = c.m.rt.Stop(ctx, vmID, grace)
+				if stopErr != nil && cleanupDebt(stopErr) == nil {
+					_ = c.m.st.RecordCleanupFailure(ctx, vmID, "stopping", stopErr.Error())
+					failOp(opID)
+					break
+				}
 			}
 			fromStopping := "stopping"
 			if _, err := c.m.st.TransitionVM(ctx, store.TransitionInput{
@@ -487,6 +517,10 @@ func (c *batchCoord) stopSiblings(failedVMID string) {
 			}); err != nil {
 				continue
 			}
+			if stopErr != nil {
+				_ = c.m.st.RecordCleanupFailure(ctx, vmID, "stopped", stopErr.Error())
+			}
+			c.m.onVMTerminal(ctx, vmID)
 			failOp(opID)
 			break
 		}
@@ -508,7 +542,8 @@ func (c *batchCoord) memberDone(ok bool) {
 	if c.batchOpID == 0 {
 		return
 	}
-	ctx := c.m.ctx
+	ctx, cancel := c.m.recoveryContext(c.m.ctx)
+	defer cancel()
 	succeeded := c.succeeded.Load()
 	failed := c.failed.Load()
 	switch {

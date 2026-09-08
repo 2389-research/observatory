@@ -1,5 +1,5 @@
 // ABOUTME: Transit-subnet allocator with host-route overlap detection (§10.1).
-// ABOUTME: Carves sequential /30s from non-overlapping pools; uses netip throughout.
+// ABOUTME: Reserves reusable /30s by VM owner; uses netip throughout.
 package network
 
 import (
@@ -7,19 +7,24 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"sync"
 )
 
 // Route represents a single entry from `ip -json route` output.
 type Route struct {
-	Dst netip.Prefix
+	Dst     netip.Prefix
+	Dev     string
+	Gateway string
 }
 
 // ipRouteEntry is the raw JSON shape produced by `ip -json route show table all`.
 // The Type field is present on local, broadcast, and multicast entries; absent
 // (empty string) on ordinary unicast/transit routes.
 type ipRouteEntry struct {
-	Dst  string `json:"dst"`
-	Type string `json:"type"`
+	Dst     string `json:"dst"`
+	Type    string `json:"type"`
+	Dev     string `json:"dev"`
+	Gateway string `json:"gateway"`
 }
 
 // ParseIPRoutes parses the JSON output of `ip -json route show table all` (or
@@ -62,7 +67,7 @@ func ParseIPRoutes(jsonOut []byte) ([]Route, error) {
 		} else {
 			return nil, fmt.Errorf("parse prefix %q: %w", e.Dst, err)
 		}
-		routes = append(routes, Route{Dst: p})
+		routes = append(routes, Route{Dst: p, Dev: e.Dev, Gateway: e.Gateway})
 	}
 	return routes, nil
 }
@@ -71,25 +76,42 @@ func ParseIPRoutes(jsonOut []byte) ([]Route, error) {
 // overlaps at least one host route and no usable pool remains.
 var ErrAllPoolsOverlap = errors.New("network: all pools overlap host routes; no usable pool")
 
-// ErrPoolExhausted is returned by Next when all /30s in all pools have been allocated.
+// ErrPoolExhausted is returned by Acquire when all /30s in all pools have been allocated.
 var ErrPoolExhausted = errors.New("network: all /30 subnets exhausted")
 
-// Allocator hands out sequential /30 prefixes from a set of pool prefixes that
-// do not conflict with host routing table entries.
-//
-// Not safe for concurrent use. M0's single fixture owner calls Next() serially.
+// Allocator caches VM leases reconstructed from provisioning manifests.
+// Acquisition, restoration and release are atomic; callers release only after
+// durable teardown. This cache is not a second ownership database.
 type Allocator struct {
-	// pools are the non-overlapping pools, in order.
+	mu         sync.Mutex
 	pools      []netip.Prefix
 	exclusions []string
-	// cursor into pools and within the current pool.
-	poolIdx int
-	next    netip.Addr // first address of the next /30 to hand out
+	leases     map[string]netip.Prefix
+	occupied   map[netip.Prefix]string
+}
+
+// ExcludeOwnedRoutes removes only a direct route whose prefix and interface
+// match a validated provisioning manifest. Similar names and foreign routes
+// remain collision evidence, including routes with a gateway.
+func ExcludeOwnedRoutes(routes []Route, leases map[string]netip.Prefix) []Route {
+	owned := make(map[string]netip.Prefix, len(leases))
+	for vmID, p := range leases {
+		owned[VethName(vmID)] = p
+	}
+	result := make([]Route, 0, len(routes))
+	for _, r := range routes {
+		if p, ok := owned[r.Dev]; ok && p == r.Dst && r.Gateway == "" {
+			continue
+		}
+		result = append(result, r)
+	}
+	return result
 }
 
 // NewAllocator constructs an Allocator from the given host routes and pool prefixes.
 // Pools that overlap any non-default host route are excluded and recorded.
-// Returns ErrAllPoolsOverlap if no usable pool remains after exclusion.
+// Returns a recovery-only allocator and ErrAllPoolsOverlap if no usable pool
+// remains. That allocator can restore and release ownership but has no free pool.
 //
 // All pools must be plain IPv4 (Addr().Is4() == true). IPv4-in-IPv6 mapped
 // form (Is4In6()) is also rejected. The internal /30 arithmetic (As4, addUint32,
@@ -130,15 +152,15 @@ func NewAllocator(hostRoutes []Route, pools []netip.Prefix) (*Allocator, error) 
 		}
 	}
 
-	if len(usable) == 0 {
-		return nil, ErrAllPoolsOverlap
-	}
-
 	a := &Allocator{
 		pools:      usable,
 		exclusions: exclusions,
 	}
-	a.next = usable[0].Masked().Addr()
+	a.leases = make(map[string]netip.Prefix)
+	a.occupied = make(map[netip.Prefix]string)
+	if len(usable) == 0 {
+		return a, ErrAllPoolsOverlap
+	}
 	return a, nil
 }
 
@@ -147,46 +169,64 @@ func (a *Allocator) Exclusions() []string {
 	return a.exclusions
 }
 
-// Next returns the next available /30 prefix, advancing the cursor.
-// Returns ErrPoolExhausted when all pools are consumed.
-func (a *Allocator) Next() (netip.Prefix, error) {
-	const bits = 30
-	blockSize := uint32(1) << (32 - bits) // 4 addresses per /30
-
-	for a.poolIdx < len(a.pools) {
-		pool := a.pools[a.poolIdx]
-		candidate, ok := netip.AddrFromSlice(a.next.AsSlice())
-		if !ok {
-			return netip.Prefix{}, fmt.Errorf("internal: bad cursor address")
-		}
-		candidate = candidate.Unmap()
-		// Build the candidate prefix anchored at the cursor.
-		p, err := candidate.Prefix(bits)
-		if err != nil {
-			return netip.Prefix{}, err
-		}
-		p = p.Masked()
-
-		// Advance cursor for next call.
-		nextAddr, overflow := addUint32(p.Addr(), blockSize)
-		a.next = nextAddr
-
-		// If the candidate fits in the current pool, return it.
-		if pool.Contains(p.Addr()) && pool.Contains(lastAddr(p)) {
-			return p, nil
-		}
-
-		// Candidate is outside the current pool; move to next pool.
-		a.poolIdx++
-		if a.poolIdx < len(a.pools) {
-			a.next = a.pools[a.poolIdx].Masked().Addr()
-		}
-		// overflow is safe to ignore: a wrapped address fails pool.Contains,
-		// so the pool advances and the cursor resets — the pool is exhausted cleanly.
-		_ = overflow
+// Acquire returns the owner's existing prefix or reserves the first free /30.
+func (a *Allocator) Acquire(vmID string) (netip.Prefix, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if vmID == "" {
+		return netip.Prefix{}, errors.New("network: lease owner is required")
 	}
-
+	if p, ok := a.leases[vmID]; ok {
+		return p, nil
+	}
+	for _, pool := range a.pools {
+		for addr := pool.Masked().Addr(); ; {
+			p := netip.PrefixFrom(addr, 30)
+			if !pool.Contains(addr) || !pool.Contains(lastAddr(p)) {
+				break
+			}
+			if _, taken := a.occupied[p]; !taken {
+				a.leases[vmID] = p
+				a.occupied[p] = vmID
+				return p, nil
+			}
+			next, overflow := addUint32(addr, 4)
+			if overflow {
+				break
+			}
+			addr = next
+		}
+	}
 	return netip.Prefix{}, ErrPoolExhausted
+}
+
+// Restore reserves the exact manifest prefix, including prefixes outside today's
+// usable pools. Existing resources keep their identity when host routes change.
+func (a *Allocator) Restore(vmID string, p netip.Prefix) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if vmID == "" || !p.Addr().Is4() || p.Bits() != 30 || p != p.Masked() {
+		return fmt.Errorf("network: invalid lease %q %s", vmID, p)
+	}
+	if owner, ok := a.occupied[p]; ok && owner != vmID {
+		return fmt.Errorf("network: prefix %s belongs to %s, not %s", p, owner, vmID)
+	}
+	if old, ok := a.leases[vmID]; ok && old != p {
+		return fmt.Errorf("network: owner %s already holds %s, not %s", vmID, old, p)
+	}
+	a.leases[vmID] = p
+	a.occupied[p] = vmID
+	return nil
+}
+
+// Release forgets the owner only after the caller proves durable teardown.
+func (a *Allocator) Release(vmID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if p, ok := a.leases[vmID]; ok {
+		delete(a.occupied, p)
+		delete(a.leases, vmID)
+	}
 }
 
 // prefixesOverlap reports whether two prefixes intersect (either contains the

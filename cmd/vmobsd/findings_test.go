@@ -3,10 +3,59 @@
 package main
 
 import (
+	"io"
+	"log/slog"
+	"path/filepath"
 	"testing"
 
 	"github.com/2389-research/observatory/internal/jailer"
+	"github.com/2389-research/observatory/internal/runtime"
+	"github.com/2389-research/observatory/internal/store"
 )
+
+func TestAdapterFindingHandoffPreservesAmbiguousCompute(t *testing.T) {
+	for _, state := range []string{"running", "paused"} {
+		t.Run(state, func(t *testing.T) {
+			st, err := store.Open(filepath.Join(t.TempDir(), "findings.sqlite"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer st.Close()
+			vm, _, _, err := st.CreateVMWithOperation(t.Context(), store.CreateVMInput{VMID: "uncertain", Name: "uncertain", Owner: "test", TemplateID: "test", TemplateDigest: "sha256:test", VCPUCount: 1, MemoryMiB: 128, MemoryTotalMiB: 128, RootDiskMiB: 64, Kind: "vm.create", Admit: func(store.ReservationTotals) error { return nil }})
+			if err != nil {
+				t.Fatal(err)
+			}
+			states := []string{"starting", "running"}
+			if state == "paused" {
+				states = append(states, "paused")
+			}
+			for _, to := range states {
+				if _, err := st.TransitionVM(t.Context(), store.TransitionInput{VMID: vm.VMID, To: to, Reason: "fixture"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			findings := []jailer.Finding{{VMID: vm.VMID, Outcome: "ambiguous", Detail: "runner identity mismatch"}}
+			adopted, ambiguous := classifyFindings(findings)
+			mgr, err := runtime.NewManager(st, runtime.ForHost(), runtime.ManagerConfig{AdoptedVMs: adopted, AmbiguousVMs: ambiguous})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer mgr.Close()
+			applyAdapterFindings(t.Context(), mgr, findings, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			got, err := st.GetVM(t.Context(), vm.VMID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			totals, err := st.ReservationTotals(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.ObservedState != state || totals.MemoryMiB != 128 || totals.VCPU != 1 {
+				t.Fatalf("ambiguous handoff changed state/compute: state=%s totals=%+v", got.ObservedState, totals)
+			}
+		})
+	}
+}
 
 func TestClassifyFindingsCarriesAnUnclassifiableVMAndItsReason(t *testing.T) {
 	adopted, ambiguous := classifyFindings([]jailer.Finding{

@@ -95,3 +95,40 @@ Near the host disk reserve, a separate capacity snapshot issue can refuse the
 successor even after deletion releases all reservations. Kata `n0vw` records
 that observed failure; the passing run had ample disk space. This fix does not
 change admission policy or weaken its reserve.
+
+## Mutation outcomes and bounded controller recovery
+
+Each privileged mutation carries a durable operation ID. The helper writes its
+receipt before host effects, then records success, proven failure or uncertainty.
+Exact replay returns the stored result; reusing an ID for different input is
+refused. A caller can query the outcome after a lost socket reply. Pending and
+unknown outcomes retain ownership. The helper serializes host mutations through
+receipt publication and checks unresolved predecessors again after dequeuing.
+
+On restart, trusted ownership records can settle committed starts and network
+mutations. Otherwise interrupted work remains unknown and blocks new claims.
+The controller saves its start operation ID before calling the helper and resolves
+that outcome before rollback, stopping or adoption. A guest-owned PID file is
+never proof that an attempted launch left no live process: even a valid dead PID
+can be stale or replaced. Proven failure to execute the jailer can clean up
+pre-execution files; attempted execution without trusted identity retains them.
+Ambiguous adapter findings retain compute through the daemon's startup handoff.
+
+Initial and batch launches share a 240-second budget, including queue time.
+Recovery receives an independent 75-second budget, with 15 seconds reserved for
+final control records after host cleanup. The jailer bounds controller waiting
+while retaining one host worker and its lifecycle lock until actual work finishes.
+Late host work must not use SQLite or authorize premature reservation release.
+
+Shutdown closes admission, cancels requests and launches, then drains tracked
+work against one 85-second deadline. HTTP shutdown gets at most 10 seconds of
+that budget. A failed drain leaves SQLite open until process exit and returns an
+error. Compose allows 90 seconds; its entrypoint waits for the controller before
+terminating privd so recovery can still query and clean up. The periodic cleanup
+controller is described in `cleanup-retry.md`.
+
+A context cannot interrupt every kernel filesystem call. Unknown work may keep
+new launches blocked until an operator establishes host ownership. Completed
+receipts remain stored indefinitely so an old replay cannot create a second
+effect; deleting them to unblock work is unsafe. Any future retention scheme
+needs durable rejection tombstones or an explicit replay horizon.

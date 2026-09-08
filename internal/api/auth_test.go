@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -35,7 +36,11 @@ const (
 // with testOperator / testPassword. Returns the server and the cred store.
 func newAuthServer(t *testing.T) (*httptest.Server, *store.Store, *auth.Store) {
 	t.Helper()
-	dir := t.TempDir()
+	return newAuthServerInDir(t, t.TempDir())
+}
+
+func newAuthServerInDir(t *testing.T, dir string) (*httptest.Server, *store.Store, *auth.Store) {
+	t.Helper()
 	credDir := filepath.Join(dir, "creds")
 	credStore, err := auth.InitStore(credDir, testOperator, testPassword)
 	if err != nil {
@@ -936,5 +941,128 @@ func TestTokenEndpointsDisabled(t *testing.T) {
 		if e.Code != "auth_disabled" {
 			t.Errorf("%s %s: code = %q, want auth_disabled", p.method, p.path, e.Code)
 		}
+	}
+}
+
+func TestTokenTTLBoundaries(t *testing.T) {
+	srv, _, creds := newAuthServer(t)
+	csrf, client := loginAndGetSession(t, srv.URL)
+	for _, tc := range []struct {
+		value string
+		valid bool
+	}{
+		{"", true}, {"0", true}, {"-1", false}, {"1", true},
+		{"153722867", true}, {"153722868", false},
+		{"9223372036854775807", false}, {"9223372036854775808", false},
+		{"-9223372036854775809", false},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			payload := `{"name":"bounds"`
+			if tc.value != "" {
+				payload += `,"ttl_minutes":` + tc.value
+			}
+			payload += "}"
+			before, _ := creds.ListTokens()
+			resp := doWithCSRF(t, client, http.MethodPost, srv.URL+"/api/v1/auth/tokens", csrf, strings.NewReader(payload), "application/json")
+			raw, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			after, _ := creds.ListTokens()
+			if !tc.valid {
+				if resp.StatusCode != 400 || len(after) != len(before) {
+					t.Fatalf("invalid TTL: status=%d token delta=%d body=%s", resp.StatusCode, len(after)-len(before), raw)
+				}
+				var body struct {
+					Code  string `json:"code"`
+					Cause string `json:"cause"`
+				}
+				if err := json.Unmarshal(raw, &body); err != nil || body.Code == "" || body.Cause == "" {
+					t.Fatalf("missing typed error: %s", raw)
+				}
+				if body.Cause == "ttl_invalid" {
+					var detail api.Error
+					if err := json.Unmarshal(raw, &detail); err != nil {
+						t.Fatal(err)
+					}
+					if len(detail.Remediation) != 1 || detail.Remediation[0].Action != "set_token_ttl" || detail.Remediation[0].Params["max_minutes"] != float64(auth.MaxTokenTTLMinutes) || detail.Remediation[0].Params["min_minutes"] != float64(0) || detail.Remediation[0].Rationale == "" {
+						t.Fatalf("missing TTL remediation: %s", raw)
+					}
+				}
+				return
+			}
+			if resp.StatusCode != 201 || len(after) != len(before)+1 {
+				t.Fatalf("valid TTL: %d %s", resp.StatusCode, raw)
+			}
+			rec := after[len(after)-1]
+			if (rec.ExpiresAt == "") != (tc.value == "" || tc.value == "0") {
+				t.Fatalf("wrong expiry: %+v", rec)
+			}
+		})
+	}
+}
+
+func TestHTTPRevocationPublicationRetry(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("permission failure requires unprivileged process")
+	}
+	dir := t.TempDir()
+	srv, _, creds := newAuthServerInDir(t, dir)
+	bootstrap, _, err := creds.CreateToken("bootstrap", testOperator, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret, rec, err := creds.CreateToken("revoked", testOperator, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credDir := filepath.Join(dir, "creds")
+	if err := os.Chmod(credDir, 0300); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(credDir, 0700) })
+	revoke := func(want int) {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodDelete, srv.URL+"/api/v1/auth/tokens/"+rec.ID, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+bootstrap)
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		raw, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != want {
+			t.Fatalf("revoke status=%d want=%d body=%s", resp.StatusCode, want, raw)
+		}
+		if want == 500 && !strings.Contains(string(raw), `"cause":"storage_failure"`) {
+			t.Fatalf("untyped failure: %s", raw)
+		}
+	}
+	revoke(500)
+	revoke(500)
+	if err := os.Chmod(credDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	revoke(200)
+	reopened, err := auth.OpenStore(credDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reopened.VerifyToken(secret); err == nil {
+		t.Fatal("reopened store accepts revoked token")
+	}
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/auth/session", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+secret)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 401 {
+		t.Fatalf("revoked token service access: %d", resp.StatusCode)
 	}
 }

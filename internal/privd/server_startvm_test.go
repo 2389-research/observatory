@@ -5,10 +5,12 @@ package privd
 import (
 	"encoding/json"
 	"errors"
+	"github.com/google/uuid"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -93,7 +95,7 @@ func allocate(t *testing.T, s *Server, vmID string) {
 	if err != nil {
 		t.Fatalf("marshal allocate: %v", err)
 	}
-	resp := s.dispatch(Request{V: ProtoVersion, Verb: "allocate_network", Payload: payload})
+	resp := s.dispatch(Request{V: ProtoVersion, OpID: uuid.NewString(), Verb: "allocate_network", Payload: payload})
 	if !resp.OK {
 		t.Fatalf("allocate_network: cause=%q message=%q", resp.Cause, resp.Message)
 	}
@@ -112,7 +114,7 @@ func startVM(t *testing.T, s *Server, vmID, stageDir string) Response {
 	if err != nil {
 		t.Fatalf("marshal start: %v", err)
 	}
-	return s.dispatch(Request{V: ProtoVersion, Verb: "start_vm", Payload: payload})
+	return s.dispatch(Request{V: ProtoVersion, OpID: uuid.NewString(), Verb: "start_vm", Payload: payload})
 }
 
 // TestStartVMFailureRollsBackPartialStart: a StartVM that fails after building
@@ -154,8 +156,8 @@ func TestStartVMFailureRollsBackPartialStart(t *testing.T) {
 }
 
 // TestStartVMFailureKeepsTheOriginalCause: the undo must not overwrite the
-// reason the start failed. A digest mismatch has to reach the caller as
-// digest_mismatch, not as whatever the rollback did next.
+// reason the start failed. A failed rollback must also preserve uncertainty
+// so callers cannot reclaim a potentially live VM as an ordinary failure.
 func TestStartVMFailureKeepsTheOriginalCause(t *testing.T) {
 	s, ops, stageDir := startVMFixture(t)
 	const vmID = "vm-rollback"
@@ -168,10 +170,10 @@ func TestStartVMFailureKeepsTheOriginalCause(t *testing.T) {
 	if resp.OK {
 		t.Fatal("start_vm reported OK after the backend failed")
 	}
-	if resp.Cause != "digest_mismatch" {
-		t.Errorf("cause = %q; want digest_mismatch", resp.Cause)
+	if resp.Cause != "outcome_unknown" {
+		t.Errorf("cause = %q; want outcome_unknown", resp.Cause)
 	}
-	if resp.Message != "rootfs.ext4 digest mismatch" {
+	if !strings.Contains(resp.Message, "rootfs.ext4 digest mismatch") {
 		t.Errorf("message = %q; want the original backend message", resp.Message)
 	}
 }
@@ -213,7 +215,7 @@ func startVMWithFiles(t *testing.T, s *Server, vmID, stageDir string, files []St
 	if err != nil {
 		t.Fatalf("marshal start: %v", err)
 	}
-	return s.dispatch(Request{V: ProtoVersion, Verb: "start_vm", Payload: payload})
+	return s.dispatch(Request{V: ProtoVersion, OpID: uuid.NewString(), Verb: "start_vm", Payload: payload})
 }
 
 // TestStartVMRefusesAStagedNameThatIsNotOneOfOurs: the handler validates the

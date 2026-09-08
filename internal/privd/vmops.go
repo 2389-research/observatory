@@ -210,6 +210,10 @@ func readPidFileAt(dir *os.File, name string) (string, error) {
 //
 // §15.3: error messages name the file, never dump its contents.
 func VerifyStagedFileAt(dir *os.File, f StagedFile) (*os.File, error) {
+	return verifyStagedFileContext(context.Background(), dir, f)
+}
+
+func verifyStagedFileContext(ctx context.Context, dir *os.File, f StagedFile) (*os.File, error) {
 	// The name is resolved against dir here and against the jail root by
 	// CopyFromPinnedFd. A descriptor bounds symlinks, not traversal -- openat
 	// walks ".." exactly like a path does -- so the whitelist is what keeps both
@@ -246,7 +250,7 @@ func VerifyStagedFileAt(dir *os.File, f StagedFile) (*os.File, error) {
 
 	// Stream SHA-256 from the open fd.
 	h := sha256.New()
-	if _, err := io.Copy(h, file); err != nil {
+	if _, err := io.Copy(h, contextReader{ctx: ctx, reader: file}); err != nil {
 		file.Close()
 		return nil, fmt.Errorf("privd: hash staged file %q: %w", f.Name, err)
 	}
@@ -267,6 +271,10 @@ func VerifyStagedFileAt(dir *os.File, f StagedFile) (*os.File, error) {
 // was opened and digest-verified by VerifyStagedFile; we never reopen the path.
 // Mode: 0644 for most files, 0640 for fc-config.json. Chowns to uid:gid.
 func CopyFromPinnedFd(src *os.File, dstDir *os.File, f StagedFile, uid, gid int) error {
+	return copyFromPinnedContext(context.Background(), src, dstDir, f, uid, gid)
+}
+
+func copyFromPinnedContext(ctx context.Context, src *os.File, dstDir *os.File, f StagedFile, uid, gid int) error {
 	// Seek the verified fd back to the start — same open, never a new path open.
 	if _, err := src.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("privd: seek staged file %q: %w", f.Name, err)
@@ -317,7 +325,7 @@ func CopyFromPinnedFd(src *os.File, dstDir *os.File, f StagedFile, uid, gid int)
 	dst := os.NewFile(uintptr(fd), f.Name)
 	defer func() { _ = dst.Close() }()
 
-	if _, err := io.Copy(dst, src); err != nil {
+	if _, err := io.Copy(dst, contextReader{ctx: ctx, reader: src}); err != nil {
 		return fmt.Errorf("privd: copy %q: %w", f.Name, err)
 	}
 	// fchown, not a chown by name: the name is never consulted again, so nothing
@@ -416,6 +424,14 @@ func CheckSignalIdentity(entry VMEntry) error {
 //     Wait up to 10s for <root>/v.sock, then chmod root 0750.
 //  4. Read <root>/firecracker.pid, read /proc/<pid>/stat field 22, return both.
 func (r *RealOps) StartVM(entry *VMEntry, req StartVMReq) (StartVMResp, error) {
+	return r.StartVMContext(context.Background(), entry, req)
+}
+
+// StartVMContext bounds staging and jailer execution independently of socket I/O.
+func (r *RealOps) StartVMContext(ctx context.Context, entry *VMEntry, req StartVMReq) (StartVMResp, error) {
+	if err := ctx.Err(); err != nil {
+		return StartVMResp{}, err
+	}
 	// Capture kernel identity before launching; neither the caller nor a guest
 	// pidfile supplies the ownership context persisted alongside the process.
 	boot, namespace, err := hostIdentity()
@@ -439,7 +455,7 @@ func (r *RealOps) StartVM(entry *VMEntry, req StartVMReq) (StartVMResp, error) {
 
 	fds := make([]*os.File, len(req.Files))
 	for i, f := range req.Files {
-		pinned, err := VerifyStagedFileAt(stageDir, f)
+		pinned, err := verifyStagedFileContext(ctx, stageDir, f)
 		if err != nil {
 			// Close fds opened so far.
 			for _, open := range fds[:i] {
@@ -463,7 +479,7 @@ func (r *RealOps) StartVM(entry *VMEntry, req StartVMReq) (StartVMResp, error) {
 	defer func() { _ = rootDir.Close() }()
 
 	for i, f := range req.Files {
-		err := CopyFromPinnedFd(fds[i], rootDir, f, req.UID, req.GID)
+		err := copyFromPinnedContext(ctx, fds[i], rootDir, f, req.UID, req.GID)
 		fds[i].Close() // close immediately after copy, regardless of outcome
 		if err != nil {
 			// Close remaining open fds.
@@ -481,18 +497,20 @@ func (r *RealOps) StartVM(entry *VMEntry, req StartVMReq) (StartVMResp, error) {
 	}
 
 	// Step 3: exec jailer.
+	entry.StartAttempted = true
 	argv := JailerArgv(r.cfg, *entry)
 	if r.hooks.RunCmd != nil {
 		if err := r.hooks.RunCmd(argv); err != nil {
 			return StartVMResp{}, fmt.Errorf("privd: jailer exec: %w", err)
 		}
 	} else {
-		ctx := context.Background()
 		/* #nosec G204 — argv is built from JailerArgv, literal path constants only. */
 		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...) //nolint:gosec
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
+			// A nil Process proves exec never started; no descendant can own the jail.
+			entry.StartAttempted = cmd.Process != nil
 			return StartVMResp{}, fmt.Errorf("privd: jailer: %w: %s", err, truncateStderr(stderr.Bytes()))
 		}
 
@@ -506,7 +524,11 @@ func (r *RealOps) StartVM(entry *VMEntry, req StartVMReq) (StartVMResp, error) {
 				sockFound = true
 				break
 			}
-			time.Sleep(100 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				return StartVMResp{}, ctx.Err()
+			case <-time.After(100 * time.Millisecond):
+			}
 		}
 		if !sockFound {
 			r.log.Printf("v.sock not found after 10s in the jail root for %s — proceeding with chmod anyway", req.VMID)
@@ -552,13 +574,20 @@ func (r *RealOps) StartVM(entry *VMEntry, req StartVMReq) (StartVMResp, error) {
 // success, and not in the jailer's manifest, which is written only after
 // start_vm returns. Nothing would ever find it again.
 //
-// So kill first, then remove: an unlinked chroot would leave a running VMM with
-// no pid file for anyone to find it by. Returning an error here is advisory —
-// the server surfaces the original start failure, not this one — which is why
-// every step that does not happen is logged instead.
+// An attempted launch has no trusted process identity on this error path.
+// Preserve its jail and return uncertainty so the server retains ownership.
+// Only a proven pre-exec failure may remove debris.
 func (r *RealOps) AbortStartVM(entry VMEntry) error {
+	if entry.StartAttempted {
+		// The guest UID can replace or remove its pidfile. Even an exited
+		// target proves nothing about the process this launch actually started.
+		// StartVM has not committed a trusted process witness on this error path.
+		return fmt.Errorf("launch attempted without trusted process witness; ownership retained")
+	}
 	jailDir := filepath.Join(r.cfg.JailBase, "firecracker", entry.VMID)
-	r.killJailedVMM(entry.VMID)
+	if err := r.killJailedVMM(entry.VMID); err != nil {
+		return err
+	}
 	if err := os.RemoveAll(jailDir); err != nil {
 		return fmt.Errorf("privd: abort start %s: remove jail dir %q: %w", entry.VMID, jailDir, err)
 	}
@@ -639,21 +668,27 @@ func argvServesVM(argv []string, vmID string) bool {
 // what makes a wrong guess about the argv visible: if a future jailer ever
 // spelled it "--id=<vmID>", every withheld kill would print the spelling that
 // defeated it.
-func (r *RealOps) killJailedVMM(vmID string) {
+func (r *RealOps) killJailedVMM(vmID string) error {
 	rootDir, err := r.jailRoot(vmID, false)
 	if err != nil {
-		return // no jail root to read: nothing here names a process
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
 	}
 	defer func() { _ = rootDir.Close() }()
 
 	raw, err := readPidFileAt(rootDir, "firecracker.pid")
 	if err != nil {
-		return // no pid file: the jailer never got far enough to write one
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
 	}
 	pid, err := strconv.Atoi(raw)
 	if err != nil || pid <= 1 {
 		r.log.Printf("abort start %s: firecracker.pid holds %q, which is not a pid; killing nothing", vmID, raw)
-		return
+		return fmt.Errorf("abort start %s: process ownership or exit unproved", vmID)
 	}
 	// The descriptor comes before the three reads that decide whether to kill.
 	// This path has the longer window of the two -- stat, then comm, then cmdline,
@@ -661,32 +696,61 @@ func (r *RealOps) killJailedVMM(vmID string) {
 	// wrong, so the pid it holds is the likeliest in privd to have been freed.
 	p, err := openProcess(pid)
 	if err != nil {
-		return // process already gone; nothing to kill
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, unix.ESRCH) {
+			return nil
+		}
+		return err
 	}
 	defer func() { _ = p.Release() }()
 
 	statData, err := os.ReadFile(ProcStatPath(pid))
 	if err != nil {
-		return // process already gone; nothing to kill
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, unix.ESRCH) {
+			return nil
+		}
+		return err
+	}
+	if alive, err := processAlive(pid, ParseStartTime(string(statData))); err != nil {
+		return err
+	} else if !alive {
+		r.log.Printf("abort start %s: pid %d already exited", vmID, pid)
+		return nil
 	}
 	if comm := ParseComm(string(statData)); comm != "firecracker" {
 		r.log.Printf("abort start %s: pid %d is %q, not firecracker; leaving it alone — a vmm may survive this rollback", vmID, pid, comm)
-		return
+		return fmt.Errorf("abort start %s: process ownership or exit unproved", vmID)
 	}
 	argv, err := procCmdline(pid)
 	if err != nil {
 		r.log.Printf("abort start %s: cannot read the argv of firecracker pid %d (%v); leaving it alone — a vmm may survive this rollback", vmID, pid, err)
-		return
+		return fmt.Errorf("abort start %s: process ownership or exit unproved", vmID)
 	}
 	if !argvServesVM(argv, vmID) {
 		r.log.Printf("abort start %s: firecracker pid %d has argv %q, which does not carry --id %s; leaving it alone — a vmm may survive this rollback", vmID, pid, argv, vmID)
-		return
+		return fmt.Errorf("abort start %s: process ownership or exit unproved", vmID)
 	}
 	if err := p.Signal(unix.SIGKILL); err != nil {
 		r.log.Printf("abort start %s: kill firecracker pid %d: %v", vmID, pid, err)
-		return
+		return fmt.Errorf("abort start %s: process ownership or exit unproved", vmID)
 	}
-	r.log.Printf("abort start %s: killed firecracker pid %d left running by a failed start", vmID, pid)
+
+	start := ParseStartTime(string(statData))
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		alive, err := processAlive(pid, start)
+		if err != nil {
+			return err
+		}
+		if !alive {
+			break
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("abort start %s: process exit not observed", vmID)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	r.log.Printf("abort start %s: observed exit of firecracker pid %d left running by a failed start", vmID, pid)
+	return nil
 }
 
 // SignalVM implements OpsBackend.SignalVM.

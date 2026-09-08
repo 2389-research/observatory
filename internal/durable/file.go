@@ -94,61 +94,42 @@ func Remove(path string) error {
 // RemoveAll deletes the tree at path and makes its disappearance durable.
 // Like Remove, an absent path is not an error.
 func RemoveAll(path string) error {
-	if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
 	if err := os.RemoveAll(path); err != nil {
 		return fmt.Errorf("durable: remove tree %s: %w", path, err)
 	}
-	if err := SyncDir(filepath.Dir(path)); err != nil {
-		return fmt.Errorf("durable: sync directory after removing %s: %w", path, err)
+	// A prior attempt may have removed the tree but failed its barrier. Absence
+	// is not durability: retry the barrier on the nearest surviving ancestor.
+	parent := filepath.Dir(path)
+	for {
+		err := SyncDir(parent)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) || filepath.Dir(parent) == parent {
+			return fmt.Errorf("durable: sync directory after removing %s: %w", path, err)
+		}
+		parent = filepath.Dir(parent)
 	}
-	return nil
 }
 
-// MkdirAll creates path and any missing parents, then makes each directory it
-// created durable by syncing the directory that holds it. A record published
-// inside a directory whose own entry never reached the disk is lost with it.
+// MkdirAll creates path and any missing parents, then syncs its ancestor entries.
+// Existing entries also need barriers: they may come from an earlier failed call,
+// including one in another process. Visibility alone is not durable publication.
 func MkdirAll(path string, mode os.FileMode) error {
-	missing, err := missingAncestors(path)
-	if err != nil {
-		return err
-	}
-	if len(missing) == 0 {
-		return nil
-	}
 	if err := os.MkdirAll(path, mode); err != nil {
 		return fmt.Errorf("durable: mkdir %s: %w", path, err)
 	}
-	// Shallowest first: a directory's entry is only durable once the directory
-	// holding it has been synced, and that one must exist by then.
-	for i := len(missing) - 1; i >= 0; i-- {
-		parent := filepath.Dir(missing[i])
-		if err := SyncDir(parent); err != nil {
-			return fmt.Errorf("durable: sync directory after creating %s: %w", missing[i], err)
-		}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("durable: absolute directory %s: %w", path, err)
 	}
-	return nil
-}
-
-// missingAncestors lists path and each of its parents that does not yet exist,
-// deepest first. It stops at the first ancestor that does.
-func missingAncestors(path string) ([]string, error) {
-	var missing []string
-	for p := filepath.Clean(path); ; {
-		_, err := os.Lstat(p)
-		if err == nil {
-			return missing, nil
+	for parent := filepath.Dir(abs); ; parent = filepath.Dir(parent) {
+		if err := SyncDir(parent); err != nil {
+			return fmt.Errorf("durable: sync ancestor after creating %s: %w", path, err)
 		}
-		if !errors.Is(err, fs.ErrNotExist) {
-			return nil, fmt.Errorf("durable: stat %s: %w", p, err)
+		if filepath.Dir(parent) == parent {
+			return nil
 		}
-		missing = append(missing, p)
-		parent := filepath.Dir(p)
-		if parent == p {
-			return missing, nil
-		}
-		p = parent
 	}
 }
 

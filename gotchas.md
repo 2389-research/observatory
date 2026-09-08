@@ -817,3 +817,21 @@ disk while existing VMs occupy space; successful deletion releases reservations
 but does not refresh that capacity figure. Near the inspection scratch reserve,
 an equal-size successor can still be refused. Kata `n0vw` tracks the fix; keep
 the actual capacity failure evidence separate from ownership recovery results.
+
+## Kata acceptance and durability retries
+
+Visible directories and absent manifests do not prove a failed fsync succeeded.
+Credential initialization retries must settle ancestor creation barriers, and
+lease restoration must settle manifest-directory removal barriers before absence
+permits reuse. Restore privd-only subnet claims as well as daemon manifests.
+The new Docker/KVM tests in `kata_hardening_gate_test.go` exercise real import
+failure/recovery and low-headroom restart/delete/successor admission. Call
+`apiDelete(...?force=true)` for their running VMs; `deleteVM` requires a stopped VM.
+
+## Filesystem identity and recovery evidence
+
+Docker may put state on overlay and jail/stage on a volume. Disk admission must
+sample each configured filesystem and credit guest allocation only on its own
+device; state free space cannot authorize writes elsewhere. Ambiguous startup
+findings must not enter the proven-exit callback. After an attempted launch,
+a guest-owned dead PID file cannot prove the actual VMM absent.

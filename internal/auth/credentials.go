@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/2389-research/observatory/internal/durable"
 	"golang.org/x/crypto/argon2"
 )
 
@@ -86,7 +87,7 @@ func (p passwordHash) verify(password string) bool {
 // If the directory already exists with wider permissions, InitStore tightens
 // it to 0700 before proceeding.
 func InitStore(dir, username, password string) (*Store, error) {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := durable.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("create credential dir: %w", err)
 	}
 	// MkdirAll does not chmod an existing directory; enforce 0700 explicitly.
@@ -161,34 +162,10 @@ func (s *Store) VerifyPassword(username, password string) (owner string, err err
 	return rec.Username, nil
 }
 
-// writeFileAtomic writes data to path using a temp file + rename so the
-// target is never partially written. The file is created with mode 0600.
+// writeFileAtomic publishes private credentials with file and directory barriers.
+// A post-rename failure may leave the new bytes visible; callers must return it.
 func writeFileAtomic(path string, data []byte) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".tmp-")
-	if err != nil {
-		return fmt.Errorf("create temp file: %w", err)
-	}
-	tmpName := tmp.Name()
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
-		return fmt.Errorf("chmod temp file: %w", err)
-	}
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
-		return fmt.Errorf("write temp file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
-		return fmt.Errorf("close temp file: %w", err)
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		os.Remove(tmpName)
-		return fmt.Errorf("rename temp file: %w", err)
-	}
-	return nil
+	return durable.WriteFile(path, 0o600, data)
 }
 
 func nowUTC() string {
