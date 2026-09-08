@@ -743,3 +743,10 @@ AppArmor loader, with no host installer. `uv run docs/validation/check.py`
 returned **47/47 package checks passed** (exit 0). This validates the docs
 package; the real Compose and VM measurements are recorded in
 `docs/design/container-boundary.md` §11 and `PLAN.md`.
+
+## Revision — 2026-09-07, published Compose verification
+
+Recorded the merged revision, successful image publication and the real Compose
+test against the registry image. `uv run docs/validation/check.py` returned
+**47/47 package checks passed** (exit 0). No implementation or acceptance verdict
+was changed by this documentation update.

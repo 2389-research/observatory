@@ -14,12 +14,14 @@
 - [x] Implement the Compose service, bundled parser/profile, and wrapper integration; delete the host installer and update obsolete tests to the new contract.
 - [x] Run a real Linux Compose test for absent policy, repeat startup, profile loss, loader failure, and VM lifecycle under the confined profile. Preserve logs outside throwaway containers.
 - [x] Update operator docs, gotchas and this session's PLAN.md entry.
-- [ ] Run `scripts/check`, docs validation, and independent final review; commit the reviewed change.
+- [x] Run `scripts/check`, docs validation, and independent final review; commit the reviewed change.
 
 ## Status
 
-Implementation and independent review complete. Working branch: `compose-profile-loader`, base `7cea9d3`. Compactions: 0. Final gate and image publication next.
+Complete. PR #2 merged at `a6a13949e60ef9daf38e07d745043fe145b8a161`; image workflow `34181381348` published that revision to GHCR. Compactions: 0.
 
 Evidence: six portable tests failed before implementation, then deployment tests passed. Real Compose test initially refused the old published image because it lacks the parser. With the built image it passed all startup/failure/reload/VM checks (15.35s); the first test revision read POST's VM at the wrong JSON level, corrected against the handler and actual response. M0 gate passed through the loader under confinement (11.19s). `scripts/check` passed all ten gates; docs validation passed 47/47. Logs: `/tmp/vmobs-compose-{red,live,gate,check,docs}.log` on the development machine; M0 transcript preserved at `/tmp/vmobs-compose-m0-evidence.txt` on aibox03. No reboot performed.
 
-Review found no blockers. The loader has shared-kernel policy authority, not authority restricted by the kernel to one profile name; the shipped command loads only the bundled profile. A locally built image has been tested; the default registry image must be published before the install change is available to a fresh checkout.
+Review found no blockers. The loader has shared-kernel policy authority, not authority restricted by the kernel to one profile name; the shipped command loads only the bundled profile.
+
+Final registry verification: a fresh checkout at `~/observatory-compose-install` on aibox03 pulled `ghcr.io/2389-research/observatory:latest`. `TestComposeLive` passed against that published image (15.28s), including the real VM lifecycle and policy-loss recovery. Log: `/tmp/vmobs-compose-published-live.log` on the development machine. No installer or host configuration file was used.
