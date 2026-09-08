@@ -285,6 +285,13 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready f
 	if err := os.MkdirAll(filepath.Dir(cfg.Storage.Database), 0o755); err != nil {
 		return fmt.Errorf("create state directory: %w", err)
 	}
+	var spoolRoot string
+	if cfg.Runtime.Mode == "firecracker" {
+		spoolRoot = filepath.Join(cfg.Paths.State, "spool")
+		if err := os.MkdirAll(spoolRoot, 0o700); err != nil {
+			return fmt.Errorf("create spool root: %w", err)
+		}
+	}
 	st, err := store.Open(cfg.Storage.Database)
 	if err != nil {
 		return fmt.Errorf("open store: %w", err)
@@ -364,7 +371,6 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready f
 	// Build runtime adapter and wire the importer based on runtime.mode.
 	var rt runtime.Runtime
 	var adapterFindings []jailer.Finding
-	var spoolRoot string
 
 	switch cfg.Runtime.Mode {
 	case "firecracker":
@@ -383,7 +389,6 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready f
 			logger.Info("adapter reconcile complete", "findings", len(adapterFindings))
 		}
 		rt = adapter
-		spoolRoot = filepath.Join(cfg.Paths.State, "spool")
 	default:
 		// "unavailable": keep the existing ForHost path unchanged.
 		rt = runtime.ForHost(func() string {

@@ -817,6 +817,14 @@ HTTP listener binds `0.0.0.0:8787` with authentication disabled by request.
 Host networking is a VM runtime requirement, not a reason to bind loopback.
 Set `server.public_origin` to the browser's exact origin for remote terminals.
 
+## Fresh-host spool initialization
+
+The daemon must create its spool root before starting the importer. Waiting for
+the first VM runner to create it raises a false startup incident. A VM launch
+can mask this bug, so test an import cycle before launching any guest and avoid
+pre-creating the spool root in the daemon fixture. Attention history persists
+after recovery; check live importer health before acknowledging an old incident.
+
 ## Disk capacity after restart (n0vw)
 
 The restart regression exposed a separate admission limit: startup samples free
