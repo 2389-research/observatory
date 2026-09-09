@@ -14,7 +14,13 @@ import (
 const (
 	namespaceGatewayTable = "vmobs_gateway"
 	namespaceIngressTable = "vmobs_gateway_ingress"
+	// NamespaceNFLogGroup is local to each VM namespace, so it can be reused there.
+	NamespaceNFLogGroup uint16 = 100
+	// MinHostNFLogGroup separates durable host ownership from low externally managed groups.
+	MinHostNFLogGroup uint16 = 1024
 )
+
+func IsHostNFLogGroup(group uint16) bool { return group >= MinHostNFLogGroup }
 
 // GatewayRuleConfig contains only host-validated values. Interface names are
 // derived here rather than accepted from a request or policy file.
@@ -24,6 +30,7 @@ type GatewayRuleConfig struct {
 	Policy           EffectivePolicy
 	HostDenyPrefixes []netip.Prefix
 	Ready            bool
+	HostNFLogGroup   uint16
 }
 
 // NFTTable identifies one owned nftables object without relying on an implied
@@ -50,6 +57,9 @@ type GatewayRules struct {
 // privileged boundary, then renders complete rulesets without accepting nft
 // fragments, interface overrides, or guest-controlled paths.
 func BuildGatewayRules(config GatewayRuleConfig) (GatewayRules, error) {
+	if !IsHostNFLogGroup(config.HostNFLogGroup) {
+		return GatewayRules{}, fmt.Errorf("network: owned host NFLOG group required")
+	}
 	expected, err := NewLayout(config.VMID, config.Layout.TransitPrefix)
 	if err != nil {
 		return GatewayRules{}, fmt.Errorf("network: gateway layout: %w", err)
@@ -170,7 +180,7 @@ func buildNamespaceRules(config GatewayRuleConfig, denied []netip.Prefix) string
   counter denied { }
   chain deny {
     counter name denied
-    limit rate 10/second burst 20 packets log group 100 prefix "vmobs namespace ingress denied "
+    limit rate 10/second burst 20 packets log group %d prefix "vmobs namespace ingress denied "
     drop
   }
   chain ingress {
@@ -184,7 +194,7 @@ func buildNamespaceRules(config GatewayRuleConfig, denied []netip.Prefix) string
     jump deny
   }
 }
-`, namespaceIngressTable, mac, layout.GuestAddress, mac, layout.GuestAddress, layout.GuestGateway)
+`, namespaceIngressTable, NamespaceNFLogGroup, mac, layout.GuestAddress, mac, layout.GuestAddress, layout.GuestGateway)
 
 	fmt.Fprintf(&script, `table inet %s {
   set denied_destinations {
@@ -197,12 +207,12 @@ func buildNamespaceRules(config GatewayRuleConfig, denied []netip.Prefix) string
   counter observed { }
   chain deny {
     counter name denied
-    limit rate 10/second burst 20 packets log group 100 prefix "vmobs namespace denied "
+    limit rate 10/second burst 20 packets log group %d prefix "vmobs namespace denied "
     drop
   }
   chain input {
     type filter hook input priority filter; policy drop;
-`, namespaceGatewayTable, nftPrefixSet(denied))
+`, namespaceGatewayTable, nftPrefixSet(denied), NamespaceNFLogGroup)
 	if config.Ready && config.Policy.Profile() == ProfileTransport {
 		fmt.Fprintf(&script, "    iifname \"tap0\" ip saddr %s udp dport 53 counter name accepted accept\n", layout.GuestAddress)
 		fmt.Fprintf(&script, "    iifname \"tap0\" ip saddr %s tcp dport 53 counter name accepted accept\n", layout.GuestAddress)
@@ -246,7 +256,7 @@ func buildHostRules(config GatewayRuleConfig, denied []netip.Prefix, table, natT
   counter accepted { }
   chain deny {
     counter name denied
-    limit rate 10/second burst 20 packets log group 100 prefix "vmobs host denied "
+    limit rate 10/second burst 20 packets log group %d prefix "vmobs host denied "
     drop
   }
   chain forward {
@@ -256,7 +266,7 @@ func buildHostRules(config GatewayRuleConfig, denied []netip.Prefix, table, natT
     iifname "%s" ip daddr @denied_destinations jump deny
     iifname "%s" fib daddr type { local, broadcast, multicast } jump deny
     iifname "%s" oifname "veth-*" jump deny
-`, table, nftPrefixSet(denied), veth, veth, layout.TransitNamespace, veth, veth, veth)
+`, table, nftPrefixSet(denied), config.HostNFLogGroup, veth, veth, layout.TransitNamespace, veth, veth, veth)
 	if config.Ready && config.Policy.Profile() == ProfileTransport {
 		fmt.Fprintf(&script, "    iifname \"%s\" ip daddr %s meta l4proto { tcp, udp } th dport 53 ct state new,established counter name accepted accept\n", veth, config.Policy.DNSUpstream())
 		fmt.Fprintf(&script, "    iifname \"%s\" tcp dport { %s } ct state new,established counter name accepted accept\n", veth, nftPorts(config.Policy.TCPPorts()))

@@ -61,7 +61,7 @@ func gatewayLifecycleChild(t *testing.T) {
 		t.Fatal(err)
 	}
 	ops := privd.NewRealOps(privd.RealOpsCfg{PolicyDirectory: policyDirectory})
-	entry := privd.VMEntry{VMID: uuid.NewString(), NetCIDR: "10.201.0.0/30"}
+	entry := privd.VMEntry{NetworkHostNFLogGroup: 1024, VMID: uuid.NewString(), NetCIDR: "10.201.0.0/30"}
 	req := privd.AllocateNetworkReq{VMID: entry.VMID, CIDR: entry.NetCIDR, Profile: "offline", PolicyID: "offline", GuestBootID: uuid.NewString()}
 	if err := ops.PrepareNetworkEntry(t.Context(), &entry, req); err != nil {
 		t.Fatal(err)

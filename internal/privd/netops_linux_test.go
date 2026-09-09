@@ -38,8 +38,9 @@ func TestRealOpsNetworkLifecycle(t *testing.T) {
 	ops := privd.NewRealOps(cfg)
 
 	entry := privd.VMEntry{
-		VMID:    "test-net-001",
-		NetCIDR: "10.99.0.0/30",
+		NetworkHostNFLogGroup: 1024,
+		VMID:                  "test-net-001",
+		NetCIDR:               "10.99.0.0/30",
 	}
 	req := privd.AllocateNetworkReq{
 		VMID:    entry.VMID,

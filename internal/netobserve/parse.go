@@ -61,14 +61,7 @@ func messages(data []byte) ([]message, error) {
 				return nil, &KernelError{Code: code}
 			}
 		case 3: // NLMSG_DONE can terminate a failed dump.
-			if len(m.data) > 0 {
-				if len(m.data) < 4 {
-					return nil, fmt.Errorf("%w: short dump status", ErrMalformed)
-				}
-				if code := int32(binary.NativeEndian.Uint32(m.data)); code != 0 {
-					return nil, &KernelError{Code: code}
-				}
-			}
+			out = append(out, m)
 		case 4:
 			return nil, ErrOverrun
 		default:
@@ -279,6 +272,17 @@ func ParseConntrack(data []byte, snapshot bool) ([]Flow, error) {
 	}
 	var out []Flow
 	for _, m := range ms {
+		if m.kind == 3 {
+			if len(m.data) > 0 {
+				if len(m.data) < 4 {
+					return nil, fmt.Errorf("%w: short dump status", ErrMalformed)
+				}
+				if code := int32(binary.NativeEndian.Uint32(m.data)); code != 0 {
+					return nil, &KernelError{Code: code}
+				}
+			}
+			continue
+		}
 		d, err := payload(m, conntrackSubsystem)
 		if err != nil {
 			return nil, err
@@ -335,14 +339,28 @@ func ParseNFLog(data []byte) ([]Denial, error) {
 	}
 	var out []Denial
 	for _, m := range ms {
-		d, err := payload(m, logSubsystem)
-		if err != nil {
-			return nil, err
+		if m.kind == 3 {
+			// nfnetlink_log reserves sizeof(nfgenmsg) for batched NLMSG_DONE
+			// without initializing those four opaque bytes.
+			if len(m.data) != 4 {
+				return nil, fmt.Errorf("%w: invalid NFLOG batch terminator", ErrMalformed)
+			}
+			continue
 		}
+		if m.kind>>8 != logSubsystem {
+			return nil, fmt.Errorf("%w: unexpected subsystem %d", ErrMalformed, m.kind>>8)
+		}
+		if len(m.data) < 4 {
+			return nil, fmt.Errorf("%w: short nfgenmsg", ErrMalformed)
+		}
+		if m.data[1] != 0 {
+			return nil, fmt.Errorf("%w: unsupported nfnetlink version", ErrMalformed)
+		}
+		d := decode(m.data[4:])
 		if m.kind&0xff != 0 {
 			return nil, fmt.Errorf("%w: unexpected NFLOG operation", ErrMalformed)
 		}
-		n := Denial{Group: binary.BigEndian.Uint16(m.data[2:])}
+		n := Denial{Family: m.data[0], Group: binary.BigEndian.Uint16(m.data[2:])}
 		if p := d.scalar(1, 4); p != nil {
 			proto := binary.BigEndian.Uint16(p)
 			hook := p[2]
@@ -373,7 +391,13 @@ func ParseNFLog(data []byte) ([]Denial, error) {
 			}
 		}
 		if p := d.scalar(9, -1); p != nil {
-			parsePacket(p, &n)
+			n.CapturedLength = len(p)
+			n.ScopeLimitation = ipv4ScopeLimitation(n.Family, n.HardwareProtocol)
+			if n.ScopeLimitation == "" {
+				parsePacket(p, &n)
+			}
+		} else {
+			n.ScopeLimitation = ipv4ScopeLimitation(n.Family, n.HardwareProtocol)
 		}
 		if d.err != nil {
 			return nil, d.err
@@ -382,8 +406,27 @@ func ParseNFLog(data []byte) ([]Denial, error) {
 	}
 	return out, nil
 }
+
+func ipv4ScopeLimitation(family uint8, hardwareProtocol *uint16) string {
+	if family != 2 && family != 5 {
+		if hardwareProtocol != nil && *hardwareProtocol == 0x0800 {
+			return "family_hardware_protocol_conflict"
+		}
+		return "unsupported_nfgen_family"
+	}
+	if hardwareProtocol == nil {
+		return "hardware_protocol_missing"
+	}
+	if *hardwareProtocol == 0x0800 {
+		return ""
+	}
+	if family == 2 {
+		return "family_hardware_protocol_conflict"
+	}
+	return "unsupported_hardware_protocol"
+}
+
 func parsePacket(p []byte, n *Denial) {
-	n.CapturedLength = len(p)
 	if len(p) < 20 {
 		n.PacketTruncated = true
 		return

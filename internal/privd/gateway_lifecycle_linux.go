@@ -22,6 +22,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/2389-research/observatory/internal/netobserve"
 	"github.com/2389-research/observatory/internal/network"
 	"github.com/google/uuid"
 	"golang.org/x/sys/unix"
@@ -47,6 +48,9 @@ func (r *RealOps) inNamespace(id string, argv ...string) []string {
 // A future activation unit must acquire real resolver/observer handles bound to this
 // generation; this unit exposes no request boolean or operation that opens egress.
 func (r *RealOps) PrepareNetworkEntry(ctx context.Context, entry *VMEntry, req AllocateNetworkReq) error {
+	if !network.IsHostNFLogGroup(entry.NetworkHostNFLogGroup) {
+		return fmt.Errorf("privd: host NFLOG group ownership required")
+	}
 	if entry.VMID != req.VMID || entry.NetCIDR != req.CIDR {
 		return fmt.Errorf("privd: network ownership/request mismatch")
 	}
@@ -244,6 +248,9 @@ func (r *RealOps) loadNetworkPolicy(id string) (network.EffectivePolicy, string,
 func (r *RealOps) boundNetwork(entry VMEntry, req AllocateNetworkReq) (network.Layout, network.EffectivePolicy, error) {
 	var layout network.Layout
 	var policy network.EffectivePolicy
+	if !network.IsHostNFLogGroup(entry.NetworkHostNFLogGroup) {
+		return layout, policy, fmt.Errorf("privd: host NFLOG group ownership missing")
+	}
 	if entry.VMID != req.VMID || entry.NetCIDR != req.CIDR || entry.NetworkGuestBootID != req.GuestBootID || entry.NetworkProfile != req.Profile || entry.NetworkPolicyID != req.PolicyID || entry.NetworkPolicyVersion != network.PolicySchemaVersion || len(entry.GatewayGeneration) != 32 || entry.NetworkGuestBootID == "" {
 		return layout, policy, fmt.Errorf("privd: gateway binding mismatch or unprepared ownership")
 	}
@@ -292,7 +299,7 @@ func (r *RealOps) gatewayRules(entry VMEntry, layout network.Layout, policy netw
 			}
 		}
 	}
-	rules, err := network.BuildGatewayRules(network.GatewayRuleConfig{VMID: entry.VMID, Layout: layout, Policy: policy, HostDenyPrefixes: prefixes, Ready: false})
+	rules, err := network.BuildGatewayRules(network.GatewayRuleConfig{VMID: entry.VMID, Layout: layout, Policy: policy, HostDenyPrefixes: prefixes, Ready: false, HostNFLogGroup: entry.NetworkHostNFLogGroup})
 	if err != nil {
 		return rules, err
 	}
@@ -589,7 +596,7 @@ func gatewayTables(entry VMEntry) (network.GatewayRules, error) {
 	if err != nil {
 		return network.GatewayRules{}, err
 	}
-	return network.BuildGatewayRules(network.GatewayRuleConfig{VMID: entry.VMID, Layout: layout, Policy: policy, HostDenyPrefixes: []netip.Prefix{layout.TransitPrefix}})
+	return network.BuildGatewayRules(network.GatewayRuleConfig{VMID: entry.VMID, Layout: layout, Policy: policy, HostDenyPrefixes: []netip.Prefix{layout.TransitPrefix}, HostNFLogGroup: entry.NetworkHostNFLogGroup})
 }
 
 func (r *RealOps) topologyDigest(ctx context.Context, entry VMEntry) (string, error) {
@@ -600,7 +607,15 @@ func (r *RealOps) topologyDigest(ctx context.Context, entry VMEntry) (string, er
 	if err != nil {
 		return "", err
 	}
-	var snapshots []json.RawMessage
+	// Bind the assigned group as well as the installed rules, so changing only
+	// the ledger group cannot authorize a reader for another VM's kernel group.
+	groupBinding, err := json.Marshal(struct {
+		HostNFLogGroup uint16 `json:"host_nflog_group"`
+	}{entry.NetworkHostNFLogGroup})
+	if err != nil {
+		return "", err
+	}
+	snapshots := []json.RawMessage{groupBinding}
 	for _, object := range []struct {
 		namespace string
 		table     network.NFTTable
@@ -826,5 +841,14 @@ func (r *RealOps) ReleaseNetworkContext(ctx context.Context, entry VMEntry) erro
 			return errors.Join(cleanupErr, fmt.Errorf("privd: host nft table survives teardown"))
 		}
 	}
-	return cleanupErr
+	if cleanupErr != nil {
+		return cleanupErr
+	}
+	// A transferred descriptor can outlive its worker session. Do not recycle
+	// this group while an old reader could receive the next VM's denial records.
+	group, _, err := netobserve.OpenNFLog(ctx, entry.NetworkHostNFLogGroup)
+	if err != nil {
+		return fmt.Errorf("privd: host NFLOG group still owned or release unproven: %w", err)
+	}
+	return group.Close()
 }

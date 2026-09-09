@@ -45,6 +45,7 @@ type Flow struct {
 // Denial is an NFLOG record from a caller-verified denial group. NFLOG alone
 // cannot prove a verdict; the caller must bind Group/Prefix to installed policy.
 type Denial struct {
+	Family                                                               uint8
 	Group                                                                uint16
 	HardwareProtocol                                                     *uint16
 	Hook                                                                 *uint8
@@ -58,6 +59,7 @@ type Denial struct {
 	PacketTruncated                                                      bool
 	PacketMalformed                                                      bool
 	FragmentOffset                                                       *uint16
+	ScopeLimitation                                                      string
 }
 
 // Scope is host-owned acquisition identity, fixed for a tracker's lifetime.

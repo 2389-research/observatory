@@ -815,3 +815,10 @@ Updated the plan with reviewed packet/lifecycle evidence and the guest netlink
 completion fix. The final canonical check passed all gates; the separate
 `uv run docs/validation/check.py` run passed **47/47** (exit 0). Live traffic
 collection, a rebuilt guest image and published acceptance remain outstanding.
+
+## Revision — 2026-09-08, observer and DNS checkpoint
+
+Recorded NFLOG acquisition, mixed-family packet parsing, durable host group
+ownership and the managed DNS worker in the introspection plan. The separate
+`uv run docs/validation/check.py` run passed **47/47** (exit 0). Runner delivery,
+DNS socket adapters, transport activation and published acceptance remain open.

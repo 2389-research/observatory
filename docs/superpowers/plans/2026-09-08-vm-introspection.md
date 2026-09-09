@@ -41,7 +41,7 @@ Read every numbered acceptance requirement back from Kata and match it to source
 
 ## Session state
 
-2026-09-08: goal started on main `7739dec`; all ten children and epic remain open. Branch: `vm-introspection-s8e2`. Filesystem checkpoint `c663d0e` and process/network prerequisite checkpoint `fcc5818` are pushed. Gateway and guest network boot checkpoint evidence follows; save its reviewed source before continuing NFLOG acquisition. No deployment or child completion claimed. Compaction count: 5; resume in a fresh goal turn after this checkpoint.
+2026-09-08: goal started on main `7739dec`; all ten children and epic remain open. Branch: `vm-introspection-s8e2`. Filesystem checkpoint `c663d0e`, process/network prerequisite checkpoint `fcc5818` and gateway checkpoint `c3e6f77` are pushed. Observer acquisition and managed DNS checkpoint evidence follows. No deployment or child completion claimed. Compaction count: 6; resume in a fresh turn after saving this checkpoint.
 
 ## Filesystem checkpoint evidence — 2026-09-08
 
@@ -148,3 +148,63 @@ All ten Kata contracts remain open. Process capture still lacks UID/GID, executa
   checkpoint is checked and committed. It is not part of the checkpoint or a
   capture-completeness claim. Restore it and resume its recorded RED after the
   commit; no implemented collector test has been removed.
+
+## Network observer and DNS checkpoint — 2026-09-08
+
+- NFLOG acquisition now binds a bounded current-namespace socket, validates its
+  kernel configuration ACK and refuses an existing owner. Real isolated Linux
+  tests prove packet reception, duplicate refusal, close/reacquisition, and mixed
+  netdev IPv4/unsupported-EtherType batches. Unsupported metadata survives with
+  unknown tuple fields. NFLOG's opaque batch DONE payload is distinct from a
+  conntrack dump status. Fresh root package evidence:
+  `.superpowers/sdd/network-observer-root-linux.log` (exit 0). The separate older
+  conntrack opt-in test was not enabled in that run.
+- The managed DNS worker serves supplied UDP/TCP listeners with bounded queries,
+  connections, wire sizes, timeouts and retained observations. It validates reply
+  identity, handles EDNS and TCP fallback, and reports loss separately from DNS
+  outcomes. Tests use real loopback upstreams and clients. Root DNS/netobserve
+  race checks passed (`network-observer-root-race.log`). Namespace-bound socket
+  adapters and durable DNS events remain integration work.
+- Host denial groups are assigned per VM from durable ledger claims. Namespace
+  groups remain local to each VM. Topology proof binds the assigned host group;
+  release refuses reuse while an old reader survives. Review caught valid ledger
+  entries with missing ownership being treated as free or recovered success;
+  the fix requires explicit ownership and preserves uncertainty.
+- The privileged observer API binds three transferred sockets to the VM, guest
+  boot, host boot, namespace inode/device, policy digest, gateway generation and
+  a fresh acquisition UUID. It authenticates the existing UID boundary, verifies
+  root on the client, validates actual socket properties and closes partial
+  acquisitions. It does not activate transport or claim a completed baseline.
+- Root's normal Linux test command passed closed gateway lifecycle and all
+  observer checks with no skips (`observer-handoff-root-linux-final.log`, exit 0,
+  0.509s). It exercises the real server, ledger, namespace and an unprivileged
+  recipient. The first run failed because Go's private build directory blocked
+  child execution; the fixture now copies only its executable into an owned
+  traversable directory. The original failure log is retained. The implementer's
+  final normal Linux race component also passed (8.789s).
+- Final `scripts/check` passed native/Linux lint, vet, Go tests, web checks and
+  docs validation (`network-observer-check-final.log`, exit 0). The separate docs
+  validator passed 47/47. Independent group re-review accepted the missing-group
+  fix; root acquisition/parser and DNS reviews found no remaining unit blocker.
+- Independent observer handoff review and root fresh-eyes review accepted the
+  final checkpoint. The full Linux privd package passed as non-root (5.695s,
+  `observer-root-linux-nonroot-suite.log`). An extra root-run package attempt
+  failed older recording-backend tests that derive jail UID zero from the test
+  user; the same `TestHappyPath` failure reproduces on unchanged `c3e6f77`
+  (`observer-root-uid-baseline.log`). That existing fixture limitation is not
+  evidence against or a substitute for the passing real privileged components.
+
+### Next execution unit and shipping limits
+
+Connect these descriptors to bounded runner readers and the existing spool.
+Validate each conntrack message's sequence and matching successful DONE before
+reporting a baseline; keep snapshot observations distinct from observed starts.
+Bind denial groups and prefixes to policy. Reserve health/loss capacity outside
+flow queues and expose current source health even when persistence fails.
+
+Then supply namespace-bound DNS adapters, bind activation to collector readiness
+and durable evidence, and close egress on loss of that ownership. Finish network
+UI/correlation, final disk diffs, explicit HTTP inspection, guest-image rebuild,
+publication and the full two-VM acceptance. The current work does not establish
+shipped confinement for the new handoff or deliver network events to the live
+appliance. No live restart, deployment or host policy change occurred.

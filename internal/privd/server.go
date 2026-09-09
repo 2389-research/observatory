@@ -127,8 +127,8 @@ func (s *Server) handleConn(conn net.Conn) {
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(framing))
 
-	var req Request
-	if err := ReadMsg(conn, &req); err != nil {
+	var rawRequest json.RawMessage
+	if err := ReadMsg(conn, &rawRequest); err != nil {
 		// io.EOF on the first byte means the client closed after sending its request
 		// on a previous connection — clean disconnect, not an error worth logging.
 		if errors.Is(err, io.EOF) {
@@ -138,7 +138,16 @@ func (s *Server) handleConn(conn net.Conn) {
 		return
 	}
 
+	var req Request
+	if err := json.Unmarshal(rawRequest, &req); err != nil {
+		s.log.Printf("decode request: %v", err)
+		return
+	}
 	_ = conn.SetReadDeadline(time.Time{})
+	if req.Verb == observerVerb {
+		s.handleObserverConn(uc, req, rawRequest, framing)
+		return
+	}
 	resp := s.dispatch(req)
 	_ = conn.SetWriteDeadline(time.Now().Add(framing))
 	if err := WriteMsg(conn, resp); err != nil {
@@ -233,11 +242,16 @@ func (s *Server) handleAllocateNetwork(ctx context.Context, raw json.RawMessage)
 	}
 
 	opID, _ := ctx.Value(operationIDKey{}).(string)
+	group, err := s.ledger.nextHostNFLogGroup()
+	if err != nil {
+		return errResp("invalid_state", "host NFLOG group allocation failed: "+err.Error())
+	}
 	entry := VMEntry{
-		NetworkOpID:   opID,
-		VMID:          r.VMID,
-		NetCIDR:       r.CIDR,
-		CreatedAtUnix: time.Now().Unix(),
+		NetworkHostNFLogGroup: group,
+		NetworkOpID:           opID,
+		VMID:                  r.VMID,
+		NetCIDR:               r.CIDR,
+		CreatedAtUnix:         time.Now().Unix(),
 	}
 	if preparer, ok := s.cfg.Ops.(interface {
 		PrepareNetworkEntry(context.Context, *VMEntry, AllocateNetworkReq) error

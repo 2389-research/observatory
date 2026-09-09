@@ -13,6 +13,7 @@ import (
 	"syscall"
 
 	"github.com/2389-research/observatory/internal/durable"
+	"github.com/2389-research/observatory/internal/network"
 	"golang.org/x/sys/unix"
 )
 
@@ -21,6 +22,7 @@ type VMEntry struct {
 	// StartAttempted distinguishes pre-exec debris from a launch requiring process-exit proof.
 	StartAttempted         bool   `json:"-"`
 	NetworkHostBootID      string `json:"network_host_boot_id,omitempty"`
+	NetworkHostNFLogGroup  uint16 `json:"network_host_nflog_group,omitempty"`
 	NetworkComplete        bool   `json:"network_complete,omitempty"`
 	NetworkOpID            string `json:"network_op_id,omitempty"`
 	NetworkGuestBootID     string `json:"network_guest_boot_id,omitempty"`
@@ -61,6 +63,53 @@ type ledger struct {
 
 func newLedger(dir string) *ledger {
 	return &ledger{dir: dir}
+}
+
+// nextHostNFLogGroup reserves no kernel state. The caller holds the server lock
+// and must persist the returned claim before installing rules. Claims survive
+// partial allocation and cannot be deleted until all group readers are gone.
+func (l *ledger) nextHostNFLogGroup() (uint16, error) {
+	entries, err := l.all()
+	if err != nil {
+		return 0, err
+	}
+	return nextHostNFLogGroup(entries)
+}
+
+func nextHostNFLogGroup(entries []VMEntry) (uint16, error) {
+	used := make(map[uint16]bool, len(entries))
+	for _, entry := range entries {
+		group := entry.NetworkHostNFLogGroup
+		if hasNetworkOwnership(entry) && group == 0 {
+			return 0, fmt.Errorf("network ownership for %s has no host NFLOG group", entry.VMID)
+		}
+		if group == 0 {
+			continue
+		}
+		if !network.IsHostNFLogGroup(group) {
+			return 0, fmt.Errorf("host NFLOG group ownership for %s is outside the owned range", entry.VMID)
+		}
+		if used[group] {
+			return 0, fmt.Errorf("duplicate host NFLOG group ownership")
+		}
+		used[group] = true
+	}
+	// Namespace-local group 100 and low externally managed groups are excluded.
+	for group := uint32(network.MinHostNFLogGroup); group <= uint32(^uint16(0)); group++ {
+		if !used[uint16(group)] {
+			return uint16(group), nil
+		}
+	}
+	return 0, fmt.Errorf("host NFLOG group capacity exhausted")
+}
+
+func hasNetworkOwnership(entry VMEntry) bool {
+	return entry.NetCIDR != "" || entry.NetworkComplete || entry.NetworkOpID != "" ||
+		entry.NetworkHostBootID != "" || entry.NetworkGuestBootID != "" ||
+		entry.NetworkProfile != "" || entry.NetworkPolicyID != "" ||
+		entry.NetworkPolicyDigest != "" || entry.NetworkPolicyVersion != 0 ||
+		entry.GatewayGeneration != "" || entry.NetworkNamespaceDevice != 0 ||
+		entry.NetworkNamespaceInode != 0 || entry.NetworkTopologyDigest != ""
 }
 
 func (l *ledger) path(vmID string) string {

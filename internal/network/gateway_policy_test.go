@@ -99,6 +99,32 @@ func TestBuildGatewayRulesTransportReady(t *testing.T) {
 	}
 }
 
+func TestBuildGatewayRulesUsesOwnedHostNFLogGroup(t *testing.T) {
+	input := gatewayInput(t, network.ProfileOffline, false)
+	input.HostNFLogGroup = 1024
+	first, err := network.BuildGatewayRules(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.HostNFLogGroup = 1025
+	second, err := network.BuildGatewayRules(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(first.HostScript, "log group 1024 ") || !strings.Contains(second.HostScript, "log group 1025 ") {
+		t.Fatal("host rules do not use each VM's owned NFLOG group")
+	}
+	if first.NamespaceScript != second.NamespaceScript || !strings.Contains(first.NamespaceScript, "log group 100 ") {
+		t.Fatal("namespace-local group changed with host allocation")
+	}
+	for _, group := range []uint16{0, network.NamespaceNFLogGroup} {
+		input.HostNFLogGroup = group
+		if _, err := network.BuildGatewayRules(input); err == nil {
+			t.Fatalf("unowned host NFLOG group %d accepted", group)
+		}
+	}
+}
+
 func TestBuildGatewayRulesReadinessAndProfilesStayClosed(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
@@ -202,6 +228,7 @@ func gatewayInput(t *testing.T, profile network.Profile, ready bool) network.Gat
 	}
 	return network.GatewayRuleConfig{
 		VMID:             "vm-alpha",
+		HostNFLogGroup:   1024,
 		Layout:           layout,
 		Policy:           policy,
 		HostDenyPrefixes: []netip.Prefix{netip.MustParsePrefix("100.64.0.0/10")},
@@ -235,5 +262,5 @@ func assertOrder(t *testing.T, text string, values ...string) {
 
 func assertDenyOrder(t *testing.T, script string) {
 	t.Helper()
-	assertOrder(t, script, `counter name denied`, `limit rate 10/second burst 20 packets log group 100`, `drop`)
+	assertOrder(t, script, `counter name denied`, `limit rate 10/second burst 20 packets log group `, `drop`)
 }

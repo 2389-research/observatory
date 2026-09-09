@@ -16,7 +16,7 @@ import (
 
 func TestStartVMRequiresCompletedNetwork(t *testing.T) {
 	ops, _ := stageOps(t, t.TempDir())
-	entry := VMEntry{VMID: "binding"}
+	entry := VMEntry{NetworkHostNFLogGroup: 1024, VMID: "binding"}
 	_, err := ops.StartVM(&entry, StartVMReq{VMID: entry.VMID})
 	if err == nil || !strings.Contains(err.Error(), "network allocation") {
 		t.Fatalf("missing completed network: %v", err)
@@ -27,7 +27,7 @@ func TestStartVMRequiresCompletedNetwork(t *testing.T) {
 }
 
 func TestCopiedFirecrackerBinding(t *testing.T) {
-	entry := VMEntry{VMID: "binding", NetCIDR: "10.99.0.0/30"}
+	entry := VMEntry{NetworkHostNFLogGroup: 1024, VMID: "binding", NetCIDR: "10.99.0.0/30"}
 	valid := bindingConfig(t, entry)
 	cases := map[string]string{"valid": valid, "tap": strings.Replace(valid, "tap0", "tap1", 1), "mac": strings.Replace(valid, bindingMAC(t, entry), "02:00:00:00:00:01", 1), "cid": strings.Replace(valid, `"guest_cid":3`, `"guest_cid":4`, 1), "vsock": strings.Replace(valid, "v.sock", "../v.sock", 1), "kernel": strings.Replace(valid, "vmlinux", "../vmlinux", 1), "drive": strings.Replace(valid, "rootfs.ext4", "../rootfs.ext4", 1), "extra-path": strings.Replace(valid, `"boot_args"`, `"initrd_path":"secret","boot_args"`, 1), "extra-nic": strings.Replace(valid, `"network-interfaces":[`, `"network-interfaces":[{"host_dev_name":"tap1"},`, 1), "trailing": valid + ` {}`, "oversized": strings.Repeat(" ", 1024*1024) + valid}
 	for name, body := range cases {
@@ -91,7 +91,7 @@ func TestStartVMClosedGatewayBinding(t *testing.T) {
 	if err := os.WriteFile(ops.cfg.PolicyDirectory+"/offline.json", []byte(`{"schema_version":1,"id":"offline","profile":"offline","dns_upstream":"","allowed_tcp_ports":[],"extra_deny_prefixes":[]}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	entry := VMEntry{VMID: "start-binding", NetCIDR: "10.99.0.40/30", UID: os.Getuid(), GID: os.Getgid()}
+	entry := VMEntry{NetworkHostNFLogGroup: 1024, VMID: "start-binding", NetCIDR: "10.99.0.40/30", UID: os.Getuid(), GID: os.Getgid()}
 	allocation := AllocateNetworkReq{VMID: entry.VMID, CIDR: entry.NetCIDR, Profile: "offline", PolicyID: "offline", GuestBootID: "b28581fb-7b8b-499a-8671-8bf54d159839"}
 	ctx := context.Background()
 	if err := ops.PrepareNetworkEntry(ctx, &entry, allocation); err != nil {
@@ -177,7 +177,7 @@ func TestStartVMClosedGatewayBinding(t *testing.T) {
 }
 
 func TestCopiedConfigDescriptorSurvivesPathReplacement(t *testing.T) {
-	entry := VMEntry{VMID: "binding", NetCIDR: "10.99.0.0/30"}
+	entry := VMEntry{NetworkHostNFLogGroup: 1024, VMID: "binding", NetCIDR: "10.99.0.0/30"}
 	for _, valid := range []bool{false, true} {
 		t.Run(fmt.Sprint(valid), func(t *testing.T) {
 			body := bindingConfig(t, entry)

@@ -945,3 +945,26 @@ loses nonleader arguments; dropping the start check lets reused TIDs borrow old
 arguments. Carry an opaque kernel exec-entry token across the transition, retain
 the process lifetime/generation checks, and never expose the task pointer used
 internally as the map key. Keep the actual nonleader `unix.Exec` guest regression.
+
+## NFLOG batches and durable group ownership
+
+Netdev ingress uses family 5 even for IPv4 packets. Preserve unsupported packet
+metadata without dropping supported records in the same batch. NFLOG's DONE
+payload is four opaque bytes; conntrack's DONE status has different semantics.
+An NFLOG bind can queue traffic before its ACK, so a failed acquisition must not
+claim an uninterrupted observation interval.
+
+Host NFLOG groups need durable per-VM claims. A valid ledger record with missing
+network ownership fields is uncertainty, not free capacity or successful restart
+recovery. Keep the claim until policy resources and every old group reader are
+gone; a successful bind-and-close probe is not a reservation for later traffic.
+
+## Credential-drop tests need their own executable
+
+Go builds test binaries under a private directory. A dropped-UID child needs an
+owned, traversable copy of the executable; do not chmod shared build ancestors.
+Run that regression with normal `go test`, since a manually staged executable
+hides the problem. The older privd recording-backend tests derive jail UID from
+the test user and fail as root on UID zero, including at baseline `c3e6f77`.
+The full suite runs as the gate's non-root user; privileged components run with
+their explicit opt-in flags and real kernel resources.

@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/2389-research/observatory/internal/netobserve"
 	"github.com/2389-research/observatory/internal/network"
 	"golang.org/x/sys/unix"
 	"net"
@@ -22,10 +23,19 @@ import (
 
 func TestGatewayRequiresTrustedExplicitPolicy(t *testing.T) {
 	ops := NewRealOps(RealOpsCfg{})
-	entry := VMEntry{VMID: "gateway-policy", NetCIDR: "10.99.0.0/30"}
+	entry := VMEntry{NetworkHostNFLogGroup: 1024, VMID: "gateway-policy", NetCIDR: "10.99.0.0/30"}
 	req := AllocateNetworkReq{VMID: entry.VMID, CIDR: entry.NetCIDR, Profile: "offline", PolicyID: "offline", GuestBootID: "b28581fb-7b8b-499a-8671-8bf54d159839"}
 	if err := ops.PrepareNetworkEntry(context.Background(), &entry, req); err == nil {
 		t.Fatal("missing trusted policy directory accepted")
+	}
+}
+
+func TestGatewayRejectsNamespaceLocalGroupAsHostOwnership(t *testing.T) {
+	ops := NewRealOps(RealOpsCfg{})
+	entry := VMEntry{NetworkHostNFLogGroup: network.NamespaceNFLogGroup, VMID: "gateway-group", NetCIDR: "10.99.0.0/30"}
+	req := AllocateNetworkReq{VMID: entry.VMID, CIDR: entry.NetCIDR, Profile: "offline", PolicyID: "offline", GuestBootID: "b28581fb-7b8b-499a-8671-8bf54d159839"}
+	if err := ops.PrepareNetworkEntry(context.Background(), &entry, req); err == nil || !strings.Contains(err.Error(), "NFLOG group") {
+		t.Fatalf("namespace-local group accepted as host ownership: %v", err)
 	}
 }
 
@@ -38,7 +48,7 @@ func TestGatewayClosedKernelLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	ops := NewRealOps(RealOpsCfg{PolicyDirectory: policyDir})
-	entry := VMEntry{VMID: "gateway-kernel", NetCIDR: "10.99.0.0/30"}
+	entry := VMEntry{NetworkHostNFLogGroup: 1024, VMID: "gateway-kernel", NetCIDR: "10.99.0.0/30"}
 	req := AllocateNetworkReq{VMID: entry.VMID, CIDR: entry.NetCIDR, Profile: "offline", PolicyID: "offline", GuestBootID: "b28581fb-7b8b-499a-8671-8bf54d159839"}
 	ctx := context.Background()
 	if err := ops.PrepareNetworkEntry(ctx, &entry, req); err != nil {
@@ -63,6 +73,11 @@ func TestGatewayClosedKernelLifecycle(t *testing.T) {
 	if err := ops.AllocateNetworkOwnedContext(ctx, &entry, req); err != nil {
 		t.Fatal("revalidate:", err)
 	}
+	wrongGroup := entry
+	wrongGroup.NetworkHostNFLogGroup++
+	if err := ops.ProbeNetworkContext(ctx, wrongGroup, req); err == nil {
+		t.Fatal("changed host NFLOG group accepted for existing gateway")
+	}
 	wrong := req
 	wrong.GuestBootID = "a28581fb-7b8b-499a-8671-8bf54d159839"
 	if err := ops.AllocateNetworkOwnedContext(ctx, &entry, wrong); err == nil {
@@ -77,6 +92,17 @@ func TestGatewayClosedKernelLifecycle(t *testing.T) {
 	exists, err := ops.netnsExists(ctx, entry.VMID)
 	if err != nil || !exists {
 		t.Fatal("failed probe destroyed existing namespace", err)
+	}
+	reader, _, err := netobserve.OpenNFLog(ctx, entry.NetworkHostNFLogGroup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	if err := ops.ReleaseNetwork(entry); err == nil {
+		t.Fatal("host NFLOG group released while an old reader can still consume it")
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
 	}
 	if err := ops.ReleaseNetwork(entry); err != nil {
 		t.Fatal(err)
@@ -95,7 +121,7 @@ func TestGatewayTransportUnavailableBeforeMutation(t *testing.T) {
 		t.Fatal(err)
 	}
 	ops := NewRealOps(RealOpsCfg{PolicyDirectory: directory})
-	entry := VMEntry{VMID: "transport-unavailable", NetCIDR: "10.99.0.4/30"}
+	entry := VMEntry{NetworkHostNFLogGroup: 1024, VMID: "transport-unavailable", NetCIDR: "10.99.0.4/30"}
 	req := AllocateNetworkReq{VMID: entry.VMID, CIDR: entry.NetCIDR, Profile: "transport", PolicyID: "transport-public-web", GuestBootID: "b28581fb-7b8b-499a-8671-8bf54d159839"}
 	if err := ops.PrepareNetworkEntry(context.Background(), &entry, req); err == nil {
 		t.Fatal("transport accepted without resolver/acquisition")
@@ -114,7 +140,7 @@ func TestGatewayKernelOwnershipRefusesForeignResources(t *testing.T) {
 		t.Fatal(err)
 	}
 	ops := NewRealOps(RealOpsCfg{PolicyDirectory: directory})
-	entry := VMEntry{VMID: "gateway-ownership", NetCIDR: "10.99.0.8/30"}
+	entry := VMEntry{NetworkHostNFLogGroup: 1024, VMID: "gateway-ownership", NetCIDR: "10.99.0.8/30"}
 	req := AllocateNetworkReq{VMID: entry.VMID, CIDR: entry.NetCIDR, Profile: "offline", PolicyID: "offline", GuestBootID: "b28581fb-7b8b-499a-8671-8bf54d159839"}
 	ctx := context.Background()
 	if err := ops.PrepareNetworkEntry(ctx, &entry, req); err != nil {
@@ -220,7 +246,7 @@ func (b *gatewayRepeatBackend) AllocateNetwork(VMEntry, AllocateNetworkReq) erro
 func TestGatewayRepeatedIncompleteIntentCannotMutate(t *testing.T) {
 	backend := &gatewayRepeatBackend{}
 	server := NewServer(ServerCfg{LedgerDir: t.TempDir(), Ops: backend})
-	entry := VMEntry{VMID: "gateway-incomplete", NetCIDR: "10.99.0.16/30"}
+	entry := VMEntry{NetworkHostNFLogGroup: 1024, VMID: "gateway-incomplete", NetCIDR: "10.99.0.16/30"}
 	if err := server.ledger.put(entry); err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +272,7 @@ func TestGatewayKernelNamespaceWithoutGenerationIsNotOwned(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	entry := VMEntry{VMID: "gateway-unmarked", NetCIDR: "10.99.0.20/30", GatewayGeneration: "0123456789abcdef0123456789abcdef", NetworkHostBootID: boot}
+	entry := VMEntry{NetworkHostNFLogGroup: 1024, VMID: "gateway-unmarked", NetCIDR: "10.99.0.20/30", GatewayGeneration: "0123456789abcdef0123456789abcdef", NetworkHostBootID: boot}
 	ctx := context.Background()
 	if err := ops.runCmd(ctx, []string{"ip", "netns", "add", network.NamespaceName(entry.VMID)}); err != nil {
 		t.Fatal(err)
@@ -275,7 +301,7 @@ func (b *gatewayProbeBackend) ProbeNetworkContext(context.Context, VMEntry, Allo
 func TestGatewayRepeatedCompleteClaimUsesReadOnlyProbe(t *testing.T) {
 	backend := &gatewayProbeBackend{}
 	server := NewServer(ServerCfg{LedgerDir: t.TempDir(), Ops: backend})
-	entry := VMEntry{VMID: "gateway-probe", NetCIDR: "10.99.0.24/30", NetworkComplete: true}
+	entry := VMEntry{NetworkHostNFLogGroup: 1024, VMID: "gateway-probe", NetCIDR: "10.99.0.24/30", NetworkComplete: true}
 	if err := server.ledger.put(entry); err != nil {
 		t.Fatal(err)
 	}
@@ -323,7 +349,7 @@ func TestGatewayHostOverlapRefusesBeforeKernelMutation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			entry := VMEntry{VMID: "gateway-overlap", NetCIDR: "10.77.0.4/30"}
+			entry := VMEntry{NetworkHostNFLogGroup: 1024, VMID: "gateway-overlap", NetCIDR: "10.77.0.4/30"}
 			req := AllocateNetworkReq{VMID: entry.VMID, CIDR: entry.NetCIDR, Profile: "offline", PolicyID: "offline", GuestBootID: "b28581fb-7b8b-499a-8671-8bf54d159839"}
 			if tc.late {
 				if err := ops.PrepareNetworkEntry(ctx, &entry, req); err != nil {
@@ -372,7 +398,7 @@ func TestGatewayHostOverlapRefusesBeforeKernelMutation(t *testing.T) {
 		if err := ops.runCmd(ctx, []string{"ip", "address", "add", "10.77.0.1/24", "dev", name, "noprefixroute"}); err != nil {
 			t.Fatal(err)
 		}
-		entry := VMEntry{VMID: "gateway-overlap", NetCIDR: "10.77.0.4/30"}
+		entry := VMEntry{NetworkHostNFLogGroup: 1024, VMID: "gateway-overlap", NetCIDR: "10.77.0.4/30"}
 		req := AllocateNetworkReq{VMID: entry.VMID, CIDR: entry.NetCIDR, Profile: "offline", PolicyID: "offline", GuestBootID: "b28581fb-7b8b-499a-8671-8bf54d159839"}
 		before := snapshot()
 		if err := ops.PrepareNetworkEntry(ctx, &entry, req); err == nil {

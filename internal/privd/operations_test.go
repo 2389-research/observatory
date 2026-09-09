@@ -164,6 +164,22 @@ func TestRestartRecoversNetworkLedgerCommit(t *testing.T) {
 	}
 }
 
+func TestRestartDoesNotRecoverNetworkCommitWithoutHostGroup(t *testing.T) {
+	dir := t.TempDir()
+	s := NewServer(ServerCfg{LedgerDir: dir})
+	req := Request{V: ProtoVersion, Verb: "allocate_network", OpID: "missing-group", Payload: json.RawMessage(`{"vm_id":"vm-net","cidr":"10.0.0.0/30"}`)}
+	if err := s.ledger.put(VMEntry{VMID: "vm-net", NetCIDR: "10.0.0.0/30", NetworkOpID: req.OpID, NetworkComplete: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.saveOperation(operationRecord{Request: req, State: "pending"}); err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewServer(ServerCfg{LedgerDir: dir})
+	if got := restarted.queryOperation(req.OpID); got.State != "unknown" || got.Response != nil {
+		t.Fatalf("missing group became a commit witness: %+v", got)
+	}
+}
+
 type blockedFailureOps struct {
 	*stubOps
 	entered, finish chan struct{}

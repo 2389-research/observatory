@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/2389-research/observatory/internal/durable"
+	"github.com/2389-research/observatory/internal/network"
 )
 
 // OperationOutcome is a durable mutation result. Unknown and pending never authorize cleanup.
@@ -276,7 +277,7 @@ func (s *Server) recoverCommittedOperation(record operationRecord) operationReco
 		payload, _ := json.Marshal(StartVMResp{PID: vm.PID, StartTime: vm.StartTime})
 		response = okResp(payload)
 	case "allocate_network":
-		if vm.NetworkOpID != record.Request.OpID || vm.NetCIDR == "" || !vm.NetworkComplete {
+		if vm.NetworkOpID != record.Request.OpID || vm.NetCIDR == "" || !vm.NetworkComplete || !network.IsHostNFLogGroup(vm.NetworkHostNFLogGroup) {
 			return record
 		}
 		response = okResp(nil)

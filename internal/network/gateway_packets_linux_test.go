@@ -55,6 +55,7 @@ func TestGatewayRulesForwardRealPacketsThroughTwoNATBoundaries(t *testing.T) {
 	transport := packetPolicy(t, network.ProfileTransport)
 	offline := packetPolicy(t, network.ProfileOffline)
 	base := network.GatewayRuleConfig{
+		HostNFLogGroup:   1024,
 		VMID:             packetVMID,
 		Layout:           layout,
 		Policy:           transport,

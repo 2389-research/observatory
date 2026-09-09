@@ -1,16 +1,23 @@
 This package decodes IPv4 Linux conntrack and NFLOG datagrams and bounds one
 collector's flow/sequence history. On Linux, `OpenConntrack` opens and subscribes
-a current-namespace socket and requests the initial snapshot with NET_ADMIN.
-It does not configure policy, resolve DNS, write events or provide an integrated
-live collector.
+a current-namespace socket and requests the initial snapshot with NET_ADMIN;
+`OpenNFLog` binds an explicit nonzero current-namespace group, limits packet copies
+to 128 bytes and enables local sequence reporting. It does not configure policy,
+resolve DNS, write events or provide an integrated live collector.
 
-The acquisition layer must validate kernel sender identity and `MSG_TRUNC`,
-bind each socket to the ledger-owned namespace/allocation, and correlate dump
-replies with its request sequence before passing `snapshot=true`. Feed one
-complete datagram to `ParseConntrack` or `ParseNFLog`. Empty ACK/NOOP/DONE replies
-produce no observation; malformed data, kernel errors, overrun and interrupted
-dumps return explicit errors. Parsers reject datagrams above 1 MiB. Call
-`Tracker.ReadError` for receive or decode failures.
+`OpenNFLog` caps setup at two seconds, validates the kernel ACK for group binding
+and configuration, refuses an owned group, and closes the socket after any setup
+failure. Closing the caller-owned descriptor releases its group. Namespace and
+group allocation still belong to privd. Live readers must validate kernel sender
+identity and `MSG_TRUNC`, match each NFLOG record to the immutable returned group,
+and correlate conntrack dump replies with their request sequence before passing
+`snapshot=true`. Feed one complete datagram to `ParseConntrack` or `ParseNFLog`.
+If traffic queues a packet before the NFLOG setup ACK, acquisition fails and
+closes the socket; recovery must report unknown loss or quiesce the source before
+retrying rather than claim a healthy handoff.
+Empty ACK/NOOP/DONE replies produce no observation; malformed data, kernel errors,
+overrun and interrupted dumps return explicit errors. Parsers reject datagrams
+above 1 MiB. Call `Tracker.ReadError` for receive or decode failures.
 
 Create one `Tracker` per immutable `Scope`; serialize access. `Generation` names
 the owned network allocation/acquisition, `BootID` is the guest boot, and
@@ -43,6 +50,7 @@ acceptance evidence. Definitions:
 
 - https://github.com/torvalds/linux/blob/v6.12/include/uapi/linux/netfilter/nfnetlink_conntrack.h
 - https://github.com/torvalds/linux/blob/v6.12/include/uapi/linux/netfilter/nfnetlink_log.h
+- https://github.com/torvalds/linux/blob/v6.12/include/uapi/linux/netfilter/nfnetlink.h
 - https://docs.kernel.org/netlink/specs/conntrack.html
 
 Run `go test -race ./internal/netobserve`, `go vet ./internal/netobserve` and

@@ -147,6 +147,11 @@ func TestStartVMAllowsIdentitiesAReleasedVMGaveUp(t *testing.T) {
 	boot, ns := recoveryHost(t)
 	entry := recoveryEntry(t, child.pid, boot, ns)
 	entry.VMID = "vm-first"
+	allocated, err := s.ledger.get(entry.VMID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry.NetworkHostNFLogGroup = allocated.NetworkHostNFLogGroup
 	if err := s.ledger.put(entry); err != nil {
 		t.Fatal(err)
 	}

@@ -21,17 +21,28 @@ func attr(kind uint16, payload ...[]byte) []byte {
 	copy(b[4:], p)
 	return b
 }
-func be16(n uint16) []byte { return binary.BigEndian.AppendUint16(nil, n) }
-func be32(n uint32) []byte { return binary.BigEndian.AppendUint32(nil, n) }
-func be64(n uint64) []byte { return binary.BigEndian.AppendUint64(nil, n) }
+func be16(n uint16) []byte      { return binary.BigEndian.AppendUint16(nil, n) }
+func be32(n uint32) []byte      { return binary.BigEndian.AppendUint32(nil, n) }
+func be64(n uint64) []byte      { return binary.BigEndian.AppendUint64(nil, n) }
+func testPtr[T any](value T) *T { return &value }
 func msg(kind, flags uint16, attrs ...[]byte) []byte {
+	return msgFamily(kind, flags, 2, attrs...)
+}
+func msgFamily(kind, flags uint16, family uint8, attrs ...[]byte) []byte {
 	p := bytes.Join(attrs, nil)
 	b := make([]byte, 20+len(p))
 	binary.NativeEndian.PutUint32(b, uint32(len(b)))
 	binary.NativeEndian.PutUint16(b[4:], kind)
 	binary.NativeEndian.PutUint16(b[6:], flags)
-	b[16] = 2 // AF_INET; nfgenmsg version 0, group 0.
+	b[16] = family // nfgenmsg version 0, group 0.
 	copy(b[20:], p)
+	return b
+}
+func nflogDone(payload [4]byte) []byte {
+	b := make([]byte, 20)
+	binary.NativeEndian.PutUint32(b, uint32(len(b)))
+	binary.NativeEndian.PutUint16(b[4:], 3)
+	copy(b[16:], payload[:])
 	return b
 }
 func tupleAttr(kind uint16, src, dst [4]byte, sport, dport uint16) []byte {
@@ -154,6 +165,9 @@ func packet() []byte {
 	copy(b[24:], []byte("PRIVATE BODY CONTENT"))
 	return b
 }
+func packetHeader(protocol uint16) []byte {
+	return attr(1, be16(protocol), []byte{0, 0})
+}
 func TestNFLogHeaderAndNoPayloadRetention(t *testing.T) {
 	b := msg(0x400, 0, attr(1, []byte{8, 0, 2, 0}), attr(4, be32(3)), attr(5, be32(4)), attr(6, be32(5)), attr(7, be32(6)),
 		attr(2, be32(9)), attr(12, be32(99)), attr(13, be32(123)), attr(10, []byte("deny-public\x00")),
@@ -186,7 +200,7 @@ func TestNFLogFragmentAndShortHeaders(t *testing.T) {
 		{"fragment", func() []byte { p := packet(); binary.BigEndian.PutUint16(p[6:], 1); return p }(), false, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ds, err := ParseNFLog(msg(0x400, 0, attr(9, tc.p)))
+			ds, err := ParseNFLog(msg(0x400, 0, packetHeader(0x0800), attr(9, tc.p)))
 			if err != nil || len(ds) != 1 {
 				t.Fatalf("%v %v", ds, err)
 			}
@@ -211,7 +225,6 @@ func TestNFLogRejectsMalformedMetadata(t *testing.T) {
 		"short_header":        msg(0x400, 0, attr(1, []byte{8, 0})),
 		"microseconds":        msg(0x400, 0, attr(3, be64(1), be64(1000000))),
 		"scalar_nested":       msg(0x400, 0, attr(12|0x8000, be32(1))),
-		"unsupported_family":  func() []byte { b := msg(0x400, 0); b[16] = 10; return b }(),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := ParseNFLog(b); err == nil {
@@ -240,15 +253,79 @@ func TestDatagramBoundsAndMultipleMessages(t *testing.T) {
 func TestNFLogMalformedPacketIsEvidence(t *testing.T) {
 	p := packet()
 	p[0] = 0x41
-	ds, err := ParseNFLog(msg(0x400, 0, attr(9, p)))
+	ds, err := ParseNFLog(msg(0x400, 0, packetHeader(0x0800), attr(9, p)))
 	if err != nil || len(ds) != 1 || !ds[0].PacketMalformed || ds[0].Tuple != nil {
 		t.Fatalf("malformed packet discarded or trusted: %+v %v", ds, err)
 	}
 	p = packet()
 	p[0] = 0x65
-	ds, err = ParseNFLog(msg(0x400, 0, attr(9, p)))
+	ds, err = ParseNFLog(msg(0x400, 0, packetHeader(0x0800), attr(9, p)))
 	if err != nil || len(ds) != 1 || !ds[0].PacketMalformed {
 		t.Fatalf("mismatched family trusted: %+v %v", ds, err)
+	}
+}
+
+func TestNFLogNetdevIPv4UsesPacketProtocolMetadata(t *testing.T) {
+	records, err := ParseNFLog(msgFamily(0x400, 0, 5,
+		packetHeader(0x0800), attr(4, be32(7)), attr(10, []byte("deny-spoof\x00")), attr(9, packet())))
+	if err != nil || len(records) != 1 {
+		t.Fatalf("records=%+v err=%v", records, err)
+	}
+	record := records[0]
+	if record.Family != 5 || record.HardwareProtocol == nil || *record.HardwareProtocol != 0x0800 ||
+		record.Tuple == nil || record.Tuple.Source != netip.MustParseAddr("10.0.0.2") ||
+		record.ScopeLimitation != "" || record.InInterface == nil || *record.InInterface != 7 {
+		t.Fatalf("netdev IPv4 evidence: %+v", record)
+	}
+}
+
+func TestNFLogUnsupportedScopesRemainEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		family     uint8
+		protocol   *uint16
+		limitation string
+	}{
+		{name: "native IPv6", family: 10, protocol: testPtr(uint16(0x86dd)), limitation: "unsupported_nfgen_family"},
+		{name: "netdev ARP", family: 5, protocol: testPtr(uint16(0x0806)), limitation: "unsupported_hardware_protocol"},
+		{name: "netdev unknown EtherType", family: 5, protocol: testPtr(uint16(0x88b5)), limitation: "unsupported_hardware_protocol"},
+		{name: "netdev missing protocol", family: 5, limitation: "hardware_protocol_missing"},
+		{name: "native IPv6 missing protocol", family: 10, limitation: "unsupported_nfgen_family"},
+		{name: "native family conflict", family: 2, protocol: testPtr(uint16(0x86dd)), limitation: "family_hardware_protocol_conflict"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			attrs := [][]byte{attr(4, be32(9)), attr(10, []byte("deny-ingress\x00")), attr(12, be32(41)), attr(9, packet())}
+			if tc.protocol != nil {
+				attrs = append([][]byte{packetHeader(*tc.protocol)}, attrs...)
+			}
+			records, err := ParseNFLog(msgFamily(0x400, 0, tc.family, attrs...))
+			if err != nil || len(records) != 1 {
+				t.Fatalf("records=%+v err=%v", records, err)
+			}
+			record := records[0]
+			if record.Family != tc.family || record.Tuple != nil || record.PacketMalformed ||
+				record.ScopeLimitation != tc.limitation || record.Prefix != "deny-ingress" ||
+				record.Sequence == nil || *record.Sequence != 41 || record.CapturedLength != len(packet()) {
+				t.Fatalf("unsupported evidence: %+v", record)
+			}
+		})
+	}
+}
+
+func TestNFLogMixedUnsupportedAndSupportedRecords(t *testing.T) {
+	unsupported := msgFamily(0x400, 0, 5, packetHeader(0x0806), attr(10, []byte("deny-arp\x00")), attr(9, packet()))
+	supported := msgFamily(0x400, 0, 5, packetHeader(0x0800), attr(10, []byte("deny-ipv4\x00")), attr(9, packet()))
+	binary.BigEndian.PutUint16(unsupported[18:], 100)
+	binary.BigEndian.PutUint16(supported[18:], 100)
+	batch := append(unsupported, supported...)
+	batch = append(batch, nflogDone([4]byte{0xa5, 0x5a, 0xff, 0x01})...)
+	records, err := ParseNFLog(batch)
+	if err != nil || len(records) != 2 {
+		t.Fatalf("records=%+v err=%v", records, err)
+	}
+	if records[0].Tuple != nil || records[0].ScopeLimitation != "unsupported_hardware_protocol" ||
+		records[1].Tuple == nil || records[1].ScopeLimitation != "" {
+		t.Fatalf("mixed evidence lost or invented: %+v", records)
 	}
 }
 func FuzzParseDatagrams(f *testing.F) {
@@ -306,7 +383,7 @@ func TestNFLogDistinguishesImpossibleTransportFromCaptureTruncation(t *testing.T
 			short := append([]byte(nil), packet()[:24]...)
 			short[9] = proto
 			binary.BigEndian.PutUint16(short[2:], uint16(len(short)))
-			records, err := ParseNFLog(msg(0x400, 0, attr(9, short)))
+			records, err := ParseNFLog(msg(0x400, 0, packetHeader(0x0800), attr(9, short)))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -314,7 +391,7 @@ func TestNFLogDistinguishesImpossibleTransportFromCaptureTruncation(t *testing.T
 				t.Fatalf("impossible transport marked valid: %+v", records[0])
 			}
 			binary.BigEndian.PutUint16(short[2:], 100)
-			records, err = ParseNFLog(msg(0x400, 0, attr(9, short)))
+			records, err = ParseNFLog(msg(0x400, 0, packetHeader(0x0800), attr(9, short)))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -327,7 +404,7 @@ func TestNFLogDistinguishesImpossibleTransportFromCaptureTruncation(t *testing.T
 	fragment := append([]byte(nil), packet()[:28]...)
 	binary.BigEndian.PutUint16(fragment[2:], 28)
 	binary.BigEndian.PutUint16(fragment[6:], 0x2000)
-	records, err := ParseNFLog(msg(0x400, 0, attr(9, fragment)))
+	records, err := ParseNFLog(msg(0x400, 0, packetHeader(0x0800), attr(9, fragment)))
 	if err != nil || records[0].PacketMalformed {
 		t.Fatalf("first fragment marked malformed: %+v %v", records, err)
 	}

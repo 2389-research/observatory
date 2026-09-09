@@ -626,3 +626,16 @@ Host kernel drift: aibox03 runs host kernel 6.8 (observed 6.8.0-138 at L0 close)
 - 2026-09-07 (7p8m implementation, compactions: 1) — Doctor Biz delegated the decision and instructed us to proceed without further discussion. Chose durable root-owned ownership at `/srv/vmobs/privd` plus host PID identity, bound to the kernel boot and PID namespace; no new supervisor or host installer. Host process visibility expands; other container profiles/capabilities/devices remain unchanged. Unknown, incomplete or untrusted records fail closed. Old chroots whose trusted record was already lost are not auto-imported.
   **Measured:** final candidate image passed the real Compose restart/delete/reuse regression in 27.23s, including ledger persistence/protection, filesystem reclamation, baseline reservations and a live successor surviving predecessor DELETE retry. All ten local checks and the Linux Go suite passed. Older stand-in VMM test fixtures needed real boot/namespace fields; production refusal was preserved. Fresh-eyes review found and closed the incomplete-record case, then found no remaining blockers. No host reboot or independent live-privd restart was exercised; synthetic old-boot records were tested against real child processes.
   **Separate finding:** filed `n0vw` for stale startup disk-capacity accounting after restart and deletion. Ample disk was needed to complete successor admission without that separate failure. Disposable build cache and test images were reclaimed; no production volumes were deleted. The original empty appliance is healthy, and unrelated `people-present` remains running. Next: commit and publish this verified recovery change.
+
+- 2026-09-08 (s8e2 observer/DNS checkpoint, compactions: 6) — Continued from pushed
+  gateway checkpoint `c3e6f77` on `vm-introspection-s8e2`. Added bounded NFLOG
+  acquisition and netdev packet parsing, durable per-VM host log groups, managed
+  DNS protocol worker and authenticated observer descriptor handoff. Fixed
+  missing-group recovery uncertainty and the real credential-drop test fixture.
+  **Measured:** canonical `scripts/check` passed; docs validation passed 47/47;
+  root isolated Linux NFLOG and gateway/observer components passed. No new
+  shipped-confinement, KVM, browser or deployment acceptance is claimed.
+  **Next:** bounded runner collection/spool/coverage, namespace DNS adapters and
+  activation, then remaining full-epic acceptance. All ten children and s8e2 stay
+  open. The tracked introspection plan carries evidence and shipping limits;
+  resume in a fresh turn after this reviewed checkpoint.
