@@ -1,6 +1,8 @@
 This package decodes IPv4 Linux conntrack and NFLOG datagrams and bounds one
-collector's flow/sequence history. It does not open sockets, configure policy,
-resolve DNS, write events or prove live collection works.
+collector's flow/sequence history. On Linux, `OpenConntrack` opens and subscribes
+a current-namespace socket and requests the initial snapshot with NET_ADMIN.
+It does not configure policy, resolve DNS, write events or provide an integrated
+live collector.
 
 The acquisition layer must validate kernel sender identity and `MSG_TRUNC`,
 bind each socket to the ledger-owned namespace/allocation, and correlate dump

@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -68,7 +69,7 @@ func TestMain(m *testing.M) {
 // testRecordingBackend implements privd.OpsBackend for tests.
 // StartVM spawns a real "sleep 300" as the fake VMM and records its kernel identity.
 type testRecordingBackend struct {
-	allocateCalls  []string
+	allocateCalls  []privd.AllocateNetworkReq
 	releaseCalls   []string
 	startCalls     []string
 	abortCalls     []string
@@ -101,7 +102,7 @@ type sleepProc struct {
 }
 
 func (b *testRecordingBackend) AllocateNetwork(entry privd.VMEntry, req privd.AllocateNetworkReq) error {
-	b.allocateCalls = append(b.allocateCalls, req.VMID)
+	b.allocateCalls = append(b.allocateCalls, req)
 	return nil
 }
 
@@ -502,6 +503,8 @@ func TestLaunchTransactionAgainstFakePrivd(t *testing.T) {
 		VCPUCount:        1,
 		MemoryMiB:        512,
 		WorkspaceDiskMiB: 64,
+		NetworkProfile:   "transport-public-web",
+		NetworkPolicyID:  "policy-public",
 	}
 
 	// Pre-create the vsock UDS dir so we know its path before the adapter runs.
@@ -566,6 +569,38 @@ func TestLaunchTransactionAgainstFakePrivd(t *testing.T) {
 		t.Fatalf("Launch: %v", err)
 	}
 
+	// The allocated transit lease must mint both boot artifacts from one layout.
+	// Read the real ext4 payload rather than a pre-mkfs staging copy.
+	contextDir := t.TempDir()
+	contextPath := filepath.Join(contextDir, "context.json")
+	dump := exec.Command("debugfs", "-R", "dump /context.json "+contextPath, filepath.Join(stageRoot, vmID, "config.ext4"))
+	if out, err := dump.CombinedOutput(); err != nil {
+		t.Fatalf("debugfs context.json: %v\n%s", err, out)
+	}
+	bootCfg, err := guest.LoadBootConfigDir(contextDir)
+	if err != nil {
+		t.Fatalf("load staged config disk: %v", err)
+	}
+	if bootCfg.Network.TransitPrefix != "10.88.0.0/30" {
+		t.Fatalf("staged transit prefix = %q, want 10.88.0.0/30", bootCfg.Network.TransitPrefix)
+	}
+
+	var fc struct {
+		NetworkInterfaces []struct {
+			GuestMAC string `json:"guest_mac"`
+		} `json:"network-interfaces"`
+	}
+	fcBytes, err := os.ReadFile(filepath.Join(stageRoot, vmID, "fc-config.json"))
+	if err != nil {
+		t.Fatalf("read fc-config.json: %v", err)
+	}
+	if err := json.Unmarshal(fcBytes, &fc); err != nil {
+		t.Fatalf("parse fc-config.json: %v", err)
+	}
+	if len(fc.NetworkInterfaces) != 1 || fc.NetworkInterfaces[0].GuestMAC != bootCfg.Network.MAC {
+		t.Fatalf("Firecracker guest_mac = %+v, want boot MAC %q", fc.NetworkInterfaces, bootCfg.Network.MAC)
+	}
+
 	// The launch reports the images it staged, and this is the only report of
 	// them: doStage reads runtime.lock.json itself, on every launch, while the
 	// daemon serves the copy it loaded at startup. Compare against a fresh read
@@ -620,6 +655,11 @@ func TestLaunchTransactionAgainstFakePrivd(t *testing.T) {
 	// Assert network was allocated.
 	if len(backend.allocateCalls) == 0 {
 		t.Error("allocate_network was never called")
+	} else {
+		got := backend.allocateCalls[0]
+		if got.Profile != spec.NetworkProfile || got.PolicyID != spec.NetworkPolicyID || got.GuestBootID != bootID {
+			t.Errorf("allocate_network identity = %+v, want profile=%q policy=%q guest_boot_id=%q", got, spec.NetworkProfile, spec.NetworkPolicyID, bootID)
+		}
 	}
 
 	// Assert spool contains guest.channel_established.

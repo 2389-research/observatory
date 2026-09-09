@@ -43,10 +43,10 @@ func assertBoundedAndSilent(t *testing.T, what, msg string) {
 	}
 }
 
-// TestStartVMDoesNotEchoAPidFileItCannotParse covers the return path. The error
+// TestStagedVMDoesNotEchoAPidFileItCannotParse covers the return path. The error
 // travels back over the privd socket to a caller that is not root, so whatever
 // it carries has crossed the privilege boundary.
-func TestStartVMDoesNotEchoAPidFileItCannotParse(t *testing.T) {
+func TestStagedVMDoesNotEchoAPidFileItCannotParse(t *testing.T) {
 	ops, jailBase, _ := guardOps(t)
 	const vmID = "vm-pidfile-start"
 
@@ -58,7 +58,7 @@ func TestStartVMDoesNotEchoAPidFileItCannotParse(t *testing.T) {
 	}
 
 	entry := VMEntry{VMID: vmID, UID: os.Getuid(), GID: os.Getgid()}
-	_, err := ops.StartVM(&entry, StartVMReq{VMID: vmID, UID: os.Getuid(), GID: os.Getgid()})
+	_, err := startStagedForTest(t, ops, &entry, StartVMReq{VMID: vmID, UID: os.Getuid(), GID: os.Getgid()})
 	if err == nil {
 		t.Fatal("StartVM accepted a firecracker.pid holding no pid")
 	}

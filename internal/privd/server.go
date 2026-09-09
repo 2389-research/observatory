@@ -203,7 +203,21 @@ func (s *Server) handleAllocateNetwork(ctx context.Context, raw json.RawMessage)
 	if err == nil {
 		// Already in ledger.
 		if existing.NetCIDR == r.CIDR {
-			// Idempotent: same CIDR, return OK without calling backend again.
+			if !existing.NetworkComplete {
+				return errResp("invalid_state", "incomplete network allocation requires explicit release")
+			}
+			// A lease match cannot prove policy, guest boot or kernel topology.
+			var probeErr error
+			if prober, ok := s.cfg.Ops.(interface {
+				ProbeNetworkContext(context.Context, VMEntry, AllocateNetworkReq) error
+			}); ok {
+				probeErr = prober.ProbeNetworkContext(ctx, existing, r)
+			} else {
+				probeErr = s.allocateNetwork(ctx, &existing, r)
+			}
+			if probeErr != nil {
+				return backendErrResp(probeErr)
+			}
 			return okResp(nil)
 		}
 		return errResp("invalid_state", "vm already has a different network allocation")
@@ -225,29 +239,66 @@ func (s *Server) handleAllocateNetwork(ctx context.Context, raw json.RawMessage)
 		NetCIDR:       r.CIDR,
 		CreatedAtUnix: time.Now().Unix(),
 	}
-	var allocationErr error
+	if preparer, ok := s.cfg.Ops.(interface {
+		PrepareNetworkEntry(context.Context, *VMEntry, AllocateNetworkReq) error
+	}); ok {
+		if err := preparer.PrepareNetworkEntry(ctx, &entry, r); err != nil {
+			return backendErrResp(err)
+		}
+	}
+	// Persist the lease and generation before the first kernel mutation. A crash
+	// cannot leave newly created resources with no durable ownership claim.
+	if err := s.ledger.put(entry); err != nil {
+		return errResp("internal", "network intent write failed")
+	}
+	allocationErr := s.allocateNetwork(ctx, &entry, r)
+	entry.NetworkComplete = allocationErr == nil
+	// Preserve observed kernel identities even on partial failure, so cleanup
+	// can distinguish this generation from a same-name namespace replacement.
+	if err := s.ledger.put(entry); err != nil {
+		return errResp("outcome_unknown", "network ownership write failed")
+	}
+	if allocationErr != nil {
+		// Allocation may already have spent its deadline. Cleanup gets one fresh,
+		// bounded budget, and uncertainty continues to retain the durable lease.
+		budget := s.cfg.ExecutionTimeout
+		if budget <= 0 {
+			budget = 5 * time.Minute
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), budget)
+		var rollbackErr error
+		if contextual, ok := s.cfg.Ops.(interface {
+			ReleaseNetworkContext(context.Context, VMEntry) error
+		}); ok {
+			rollbackErr = contextual.ReleaseNetworkContext(cleanupCtx, entry)
+		} else {
+			rollbackErr = s.cfg.Ops.ReleaseNetwork(entry)
+		}
+		cancel()
+		if rollbackErr != nil {
+			return errResp("outcome_unknown", allocationErr.Error()+"; network rollback incomplete: "+rollbackErr.Error())
+		}
+		if err := s.ledger.delete(entry.VMID); err != nil {
+			return errResp("outcome_unknown", "network rollback ownership removal failed")
+		}
+		return backendErrResp(allocationErr)
+	}
+	return okResp(nil)
+}
+
+// allocateNetwork gives the production backend a place to report kernel identity.
+func (s *Server) allocateNetwork(ctx context.Context, entry *VMEntry, req AllocateNetworkReq) error {
+	if owned, ok := s.cfg.Ops.(interface {
+		AllocateNetworkOwnedContext(context.Context, *VMEntry, AllocateNetworkReq) error
+	}); ok {
+		return owned.AllocateNetworkOwnedContext(ctx, entry, req)
+	}
 	if contextual, ok := s.cfg.Ops.(interface {
 		AllocateNetworkContext(context.Context, VMEntry, AllocateNetworkReq) error
 	}); ok {
-		allocationErr = contextual.AllocateNetworkContext(ctx, entry, r)
-	} else {
-		allocationErr = s.cfg.Ops.AllocateNetwork(entry, r)
+		return contextual.AllocateNetworkContext(ctx, *entry, req)
 	}
-	if err := allocationErr; err != nil {
-		// Setup can fail partway through (e.g. the veth step), leaving a netns
-		// or tap on the host with no ledger entry to track it — an orphan that
-		// release_network could never find. Roll back best-effort (mirrors the
-		// jailer's launch-rollback discipline) and surface the original cause
-		// unchanged; the ledger write below never runs, so no entry is recorded.
-		if rollbackErr := s.cfg.Ops.ReleaseNetwork(entry); rollbackErr != nil {
-			return errResp("outcome_unknown", err.Error()+"; network rollback incomplete: "+rollbackErr.Error())
-		}
-		return errResp("exec_failed", err.Error())
-	}
-	if err := s.ledger.put(entry); err != nil {
-		return errResp("internal", "ledger write failed")
-	}
-	return okResp(nil)
+	return s.cfg.Ops.AllocateNetwork(*entry, req)
 }
 
 func (s *Server) handleReleaseNetwork(ctx context.Context, raw json.RawMessage) Response {
@@ -279,6 +330,7 @@ func (s *Server) handleReleaseNetwork(ctx context.Context, raw json.RawMessage) 
 	}
 	// Clear the network half. Whichever release empties the last half deletes the file.
 	entry.NetCIDR = ""
+	entry.NetworkComplete = false
 	if entry.PID == 0 {
 		// VM half is also gone — delete the entry file.
 		if err := s.ledger.delete(r.VMID); err != nil {

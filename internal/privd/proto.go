@@ -85,8 +85,11 @@ type Response struct {
 
 // AllocateNetworkReq requests a per-VM network namespace and TAP device.
 type AllocateNetworkReq struct {
-	VMID string `json:"vm_id"`
-	CIDR string `json:"cidr"` // /30, host side .1, guest side .2
+	VMID        string `json:"vm_id"`
+	CIDR        string `json:"cidr"` // /30, host side .1, guest side .2
+	Profile     string `json:"profile"`
+	PolicyID    string `json:"policy_id"`
+	GuestBootID string `json:"guest_boot_id"`
 }
 
 // ReleaseNetworkReq tears down the network resources for a VM.

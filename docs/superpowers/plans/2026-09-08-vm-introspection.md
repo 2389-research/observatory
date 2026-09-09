@@ -41,7 +41,7 @@ Read every numbered acceptance requirement back from Kata and match it to source
 
 ## Session state
 
-2026-09-08: goal started on main `7739dec`; all ten children and epic remain open. Branch: `vm-introspection-s8e2`. Filesystem checkpoint `c663d0e` is pushed. A second checkpoint adds guest process capture and network prerequisites; details and remaining work follow. No deployment or child completion claimed. Compaction count: 3; save this checkpoint before a fresh goal turn.
+2026-09-08: goal started on main `7739dec`; all ten children and epic remain open. Branch: `vm-introspection-s8e2`. Filesystem checkpoint `c663d0e` and process/network prerequisite checkpoint `fcc5818` are pushed. Gateway and guest network boot checkpoint evidence follows; save its reviewed source before continuing NFLOG acquisition. No deployment or child completion claimed. Compaction count: 5; resume in a fresh goal turn after this checkpoint.
 
 ## Filesystem checkpoint evidence — 2026-09-08
 
@@ -77,3 +77,74 @@ Implement the approved per-VM routed boundary and acquire host-owned conntrack/N
 ### Remaining shipping work
 
 All ten Kata contracts remain open. Process capture still lacks UID/GID, executable/cwd/cgroup fields, supported file associations, stable socket identity and exact host-flow links. Bounded argv is four arguments of at most 63 bytes each; raw connect results do not prove transport completion. The bounded pending-call scan has an unmeasured CPU concern to assess in the noisy-VM overhead gate. Complete the routed gateway and immutable boot/generation lifecycle, managed DNS/NFLOG/conntrack delivery, Network workspace, isolated final file inspection, opt-in request inspection, and published two-VM acceptance/deployment. Rebuild artifacts from the final shipping source and obtain interruption approval before any live user-VM restart.
+
+## Closed gateway integration checkpoint — 2026-09-08
+
+- Generated namespace and host nft policy passed real packets through two NAT
+  stages, managed UDP/TCP relay, direct-DNS/private/spoof denials, host-local DNAT
+  rejection, closed transport and offline behavior in disposable local Docker.
+  Root found and reproduced a calling-thread namespace restoration bug in the
+  test harness; the fix passed three repetitions
+  (`gateway-packet-thread-green.log`). Independent review requested stronger
+  upstream-negative/counter proof; the fixes passed three packet repetitions and
+  a race run, and root accepted their review. This is not a production resolver
+  or real Firecracker proof.
+- Guest boot configuration derives address, gateway, DNS and MAC from the shared
+  allocated layout. Guestd starts management paths before its one-shot network
+  worker and reports pending/degraded configuration independently of traffic
+  coverage. A real FIFO regression proves authenticated control remains usable
+  during blocked setup and late results cannot replace a deadline failure.
+  Real Linux guest/jailer/component checks passed. Final review found that link
+  lookup could accept failed or interrupted dumps. It now validates completion
+  status and interruption on every matching message; RED/GREEN tests, full Linux
+  guest/guestd tests and vet, and the real NET_ADMIN component passed. Root updated the integration fixture
+  and ran its real config builder against the pinned aibox03 artifacts, exit 0
+  (`fixture-network-green.log`). The guest image has not been rebuilt.
+- Final independent guest re-review approved the checkpoint with no remaining
+  finding (`guest-network-review.md`), including fresh Linux startup repetitions.
+  Root completed fresh-eyes review of all 42 checkpoint files. The fixed dump
+  handling was its final blocker; full shipping acceptance remains outstanding.
+- Closed offline gateway lifecycle now persists policy/boot/generation/namespace
+  ownership, installs closed rules before raising links, probes retries without
+  repair, and retains uncertain claims. Real component checks passed. Independent
+  review found two blockers: privileged host route overlap was unchecked, and
+  allocation rollback discarded the execution deadline. Both were reproduced,
+  fixed and accepted in independent re-review. The actual closed lifecycle passed
+  under the shipped AppArmor/seccomp profiles in an isolated aibox03 child
+  namespace, including boot-bound probes, verified release and unchanged parent
+  settings (`gateway-confinement-reviewed.log`, Docker exit 0). Transport remains explicitly unavailable until
+  resolver, observer acquisition and activation are integrated.
+- A real SCM_RIGHTS test proves that an unprivileged recipient can read the
+  privileged conntrack baseline but cannot issue a privileged conntrack deletion.
+  Its isolated Linux run passed (`descriptor-authority-verified.log`); independent
+  review found no blocker. This does not prove production collector handoff.
+- Copying now hashes actual destination bytes before ownership transfer. A real
+  same-inode mutation regression failed before the fix and passes for JSON,
+  config disk and root disk. The final ownership assertion and existing pinned
+  rename test passed (`copy-digest-ownership-green.log`, Docker exit 0).
+- Public StartVM now probes the completed persisted gateway before staging and
+  immediately before jailer execution. It validates copied Firecracker JSON on
+  the destination descriptor before ownership transfer: exact TAP/MAC/CID and
+  the allowed kernel, disk and socket paths. Real closed-gateway refusal cases
+  and a valid marker-executable case passed; independent review found no blocker
+  (`start-network-binding-review.md`). Existing symlink/PID tests now exercise
+  private staging/exec helpers directly without a production bypass. A distinct
+  mutation-during-staging regression for the second probe remains a low-priority
+  test gap; full KVM launch proof remains outstanding.
+- Canonical `scripts/check` passed all gates after the final guest fixes
+  (`introspection-gateway-check-release-retry.log`, exit 0). The preceding attempt
+  collided with another golangci-lint process; its failed log is retained as
+  `introspection-gateway-check-release.log`. Native/Linux lint, vet, Go tests,
+  web typecheck/tests/assets and docs checks passed on retry. No artifact
+  publication or deployment is claimed.
+- Scope correction: prior scratch reports called immutable guest config sealing
+  a launch blocker. SPEC requires host resource/policy/boot binding and enforcement
+  independent of guest settings. Implement the actual StartVM topology and
+  Firecracker resource checks; do not introduce privileged guest-disk parsing or
+  new mount permissions for an unsupported byte-sealing requirement.
+- NFLOG acquisition is the next unit. Its incomplete test initially made Linux
+  lint fail with undefined implementation symbols. The exact untracked test is
+  preserved in `.superpowers/sdd/nflog-pending-test.go` while this separate gateway
+  checkpoint is checked and committed. It is not part of the checkpoint or a
+  capture-completeness claim. Restore it and resume its recorded RED after the
+  commit; no implemented collector test has been removed.

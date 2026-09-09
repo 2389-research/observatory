@@ -37,7 +37,7 @@ func startFrom(t *testing.T, ops *RealOps, jailBase, vmID, sendStageDir string, 
 		return os.WriteFile(filepath.Join(root, "firecracker.pid"), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600)
 	}
 	entry := VMEntry{VMID: vmID, UID: os.Getuid(), GID: os.Getgid()}
-	_, err := ops.StartVM(&entry, StartVMReq{
+	_, err := startStagedForTest(t, ops, &entry, StartVMReq{
 		VMID:     vmID,
 		UID:      os.Getuid(),
 		GID:      os.Getgid(),
@@ -47,7 +47,7 @@ func startFrom(t *testing.T, ops *RealOps, jailBase, vmID, sendStageDir string, 
 	return root, err
 }
 
-// TestStartVMReadsTheStageDirItDerives is the finding. stage_dir arrived in the
+// TestStagedVMReadsTheStageDirItDerives is the finding. stage_dir arrived in the
 // request, so the caller chose which directory root read gigabytes out of. It
 // is derivable -- vm_id is one validated path component and the adapter joins
 // it onto the same stage root -- so privd derives it and the field stops being
@@ -55,7 +55,7 @@ func startFrom(t *testing.T, ops *RealOps, jailBase, vmID, sendStageDir string, 
 //
 // The decoy holds the same five names with different bytes. Reading the field
 // gets the decoy and a digest mismatch; deriving gets the real directory.
-func TestStartVMReadsTheStageDirItDerives(t *testing.T) {
+func TestStagedVMReadsTheStageDirItDerives(t *testing.T) {
 	stageRoot := t.TempDir()
 	ops, jailBase := stageOps(t, stageRoot)
 	const vmID = "vm-stage-derive"
@@ -77,11 +77,11 @@ func TestStartVMReadsTheStageDirItDerives(t *testing.T) {
 	}
 }
 
-// TestStartVMWillNotFollowASymlinkedStageDir: deriving the path is not enough on
+// TestStagedVMWillNotFollowASymlinkedStageDir: deriving the path is not enough on
 // its own, because the caller owns the stage root and can leave a symlink at the
 // name privd derives. The open of that one component is O_NOFOLLOW, so the
 // symlink is refused rather than resolved.
-func TestStartVMWillNotFollowASymlinkedStageDir(t *testing.T) {
+func TestStagedVMWillNotFollowASymlinkedStageDir(t *testing.T) {
 	stageRoot := t.TempDir()
 	ops, jailBase := stageOps(t, stageRoot)
 	const vmID = "vm-stage-symdir"
@@ -101,12 +101,12 @@ func TestStartVMWillNotFollowASymlinkedStageDir(t *testing.T) {
 	}
 }
 
-// TestStartVMWillNotFollowASymlinkedStagedFile is the trap. os.Root resolves a
+// TestStagedVMWillNotFollowASymlinkedStagedFile is the trap. os.Root resolves a
 // symlink that stays inside the root and ignores a caller's O_NOFOLLOW while
 // doing it, so porting this read to Root.OpenFile would quietly turn today's
 // refusal into a copy. The file open stays a bare openat against the stage
 // dir's descriptor, where O_NOFOLLOW means what it says.
-func TestStartVMWillNotFollowASymlinkedStagedFile(t *testing.T) {
+func TestStagedVMWillNotFollowASymlinkedStagedFile(t *testing.T) {
 	stageRoot := t.TempDir()
 	ops, jailBase := stageOps(t, stageRoot)
 	const vmID = "vm-stage-symfile"
@@ -131,12 +131,12 @@ func TestStartVMWillNotFollowASymlinkedStagedFile(t *testing.T) {
 	}
 }
 
-// TestStartVMReadsThroughASymlinkedStageRoot keeps the refusals above from
+// TestStagedVMReadsThroughASymlinkedStageRoot keeps the refusals above from
 // costing a supported install. StageRoot is privd's own config and is allowed
 // to be a symlink -- /var/vmobs/stage pointing at another filesystem is the
 // reason the containment check used to call EvalSymlinks at all. Only the
 // components below it are the caller's, and only those are O_NOFOLLOW.
-func TestStartVMReadsThroughASymlinkedStageRoot(t *testing.T) {
+func TestStagedVMReadsThroughASymlinkedStageRoot(t *testing.T) {
 	dir := t.TempDir()
 	realRoot := filepath.Join(dir, "real-stage")
 	if err := os.MkdirAll(realRoot, 0o750); err != nil {

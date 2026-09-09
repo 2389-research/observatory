@@ -13,14 +13,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/google/uuid"
 	"io"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/2389-research/observatory/internal/durable"
 	"github.com/2389-research/observatory/internal/guest"
@@ -135,7 +137,7 @@ func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (*lock.Images
 	// ── Step 3: Stage ─────────────────────────────────────────────────────────
 	currentStage = stageStaged
 	stageDir := filepath.Join(a.cfg.StageRoot, vmID)
-	staged, stageErr := a.doStage(ctx, vmID, bootID, cid, uid, gid, stageDir, spec)
+	staged, stageErr := a.doStage(ctx, vmID, bootID, cid, uid, gid, stageDir, prefix, spec)
 	if stageErr != nil {
 		// doRollback removes the state dir and whatever doStage left in the stage dir.
 		return nil, rollback(stageErr)
@@ -147,7 +149,13 @@ func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (*lock.Images
 
 	// ── Step 4: Network ───────────────────────────────────────────────────────
 	currentStage = stageNetwork
-	if err := a.pc.AllocateNetwork(ctx, privd.AllocateNetworkReq{VMID: vmID, CIDR: cidr}); err != nil {
+	if err := a.pc.AllocateNetwork(ctx, privd.AllocateNetworkReq{
+		VMID:        vmID,
+		CIDR:        cidr,
+		Profile:     spec.NetworkProfile,
+		PolicyID:    spec.NetworkPolicyID,
+		GuestBootID: bootID,
+	}); err != nil {
 		return nil, rollback(fmt.Errorf("allocate_network: %w", err))
 	}
 	m.Stages = append(m.Stages, stageNetwork)
@@ -278,7 +286,7 @@ func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (*lock.Images
 //  2. Generate a per-boot token, write to token file, and build config.ext4.
 //  3. Create workspace.ext4.
 //  4. Write fc-config.json.
-func (a *Adapter) doStage(ctx context.Context, vmID, bootID string, cid uint32, uid, gid int, stageDir string, spec runtime.VMSpec) (lock.Images, error) {
+func (a *Adapter) doStage(ctx context.Context, vmID, bootID string, cid uint32, uid, gid int, stageDir string, transit netip.Prefix, spec runtime.VMSpec) (lock.Images, error) {
 	// Load and verify lock artifacts.
 	lk, err := lock.Load(a.cfg.LockPath)
 	if err != nil {
@@ -337,12 +345,17 @@ func (a *Adapter) doStage(ctx context.Context, vmID, bootID string, cid uint32, 
 	}
 
 	// Build config.ext4 containing guest.BootConfig as context.json.
+	networkCfg, err := guest.NewNetworkConfig(vmID, transit)
+	if err != nil {
+		return lock.Images{}, fmt.Errorf("derive guest network config: %w", err)
+	}
 	bootCfg := guest.BootConfig{
 		Schema:          guest.GuestContextSchema,
 		VMID:            vmID,
 		BootID:          bootID,
 		CapabilityToken: token,
 		ProtocolVersion: proto.ProtocolVersion,
+		Network:         networkCfg,
 	}
 	contextJSON, err := json.Marshal(bootCfg)
 	if err != nil {
@@ -408,6 +421,7 @@ func (a *Adapter) doStage(ctx context.Context, vmID, bootID string, cid uint32, 
 	type fcNetIface struct {
 		IfaceID     string `json:"iface_id"`
 		HostDevName string `json:"host_dev_name"`
+		GuestMAC    string `json:"guest_mac"`
 	}
 	type fcConfig struct {
 		BootSource        fcBootSource    `json:"boot-source"`
@@ -439,7 +453,7 @@ func (a *Adapter) doStage(ctx context.Context, vmID, bootID string, cid uint32, 
 		MachineConfig: fcMachineConfig{VCPUCount: vcpu, MemSizeMiB: memMiB},
 		Vsock:         fcVsock{GuestCID: cid, UDSPath: "v.sock"},
 		NetworkInterfaces: []fcNetIface{
-			{IfaceID: "eth0", HostDevName: "tap0"},
+			{IfaceID: "eth0", HostDevName: "tap0", GuestMAC: networkCfg.MAC},
 		},
 	}
 	fcJSON, err := json.MarshalIndent(fc, "", "  ")

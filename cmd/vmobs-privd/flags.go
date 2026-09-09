@@ -9,14 +9,15 @@ import (
 
 // privdFlags holds the parsed command-line configuration for vmobs-privd.
 type privdFlags struct {
-	socket      string
-	ledgerDir   string
-	stageRoot   string
-	jailBase    string
-	firecracker string
-	jailer      string
-	allowedUID  int
-	allowedGID  int
+	socket          string
+	ledgerDir       string
+	stageRoot       string
+	jailBase        string
+	firecracker     string
+	jailer          string
+	policyDirectory string
+	allowedUID      int
+	allowedGID      int
 }
 
 // parseFlags parses argv (os.Args[1:]) and returns the resulting privdFlags.
@@ -30,6 +31,7 @@ func parseFlags(argv []string) (privdFlags, error) {
 	jailBase := fs.String("jail-base", "/srv/vmobs/jail", "root for jailer workdirs")
 	firecracker := fs.String("firecracker", "/usr/local/bin/firecracker", "path to firecracker binary")
 	jailer := fs.String("jailer", "/usr/local/bin/jailer", "path to jailer binary")
+	policyDirectory := fs.String("network-policy-dir", "/etc/vmobs/network-policies", "root-owned explicit network policy directory")
 	allowedUID := fs.Int("allowed-uid", 0, "required: UID whose connections are served (from $SUDO_UID)")
 	allowedGID := fs.Int("allowed-gid", 0, "required: GID that owns the socket (from $SUDO_GID)")
 
@@ -59,13 +61,14 @@ func parseFlags(argv []string) (privdFlags, error) {
 	}
 
 	return privdFlags{
-		socket:      *socket,
-		ledgerDir:   *ledgerDir,
-		stageRoot:   *stageRoot,
-		jailBase:    *jailBase,
-		firecracker: *firecracker,
-		jailer:      *jailer,
-		allowedUID:  *allowedUID,
-		allowedGID:  *allowedGID,
+		socket:          *socket,
+		ledgerDir:       *ledgerDir,
+		stageRoot:       *stageRoot,
+		jailBase:        *jailBase,
+		firecracker:     *firecracker,
+		jailer:          *jailer,
+		policyDirectory: *policyDirectory,
+		allowedUID:      *allowedUID,
+		allowedGID:      *allowedGID,
 	}, nil
 }

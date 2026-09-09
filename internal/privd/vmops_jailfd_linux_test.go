@@ -54,13 +54,13 @@ func wantInvalidState(t *testing.T, err error) {
 	}
 }
 
-// TestStartVMWillNotWriteThroughASymlinkInTheJailRoot is the escalation in its
+// TestStagedVMWillNotWriteThroughASymlinkInTheJailRoot is the escalation in its
 // plainest form. StartVM chowns the jail tree to the guest's uid in step 2, so
 // after one start the guest owns <jail>/root and can replace any name in it with
 // a symlink. privd then copies the next start's boot artifacts in as root. A
 // symlink named vmlinux pointing at a file the guest cannot write is a file
 // privd writes for it.
-func TestStartVMWillNotWriteThroughASymlinkInTheJailRoot(t *testing.T) {
+func TestStagedVMWillNotWriteThroughASymlinkInTheJailRoot(t *testing.T) {
 	ops, jailBase, _ := guardOps(t)
 	const vmID = "vm-jailfd-file"
 	_, root := mkJailRoot(t, jailBase, vmID)
@@ -84,7 +84,7 @@ func TestStartVMWillNotWriteThroughASymlinkInTheJailRoot(t *testing.T) {
 	file := stageOne(t, stageDir, "vmlinux", []byte("a kernel image"))
 
 	entry := VMEntry{VMID: vmID, UID: os.Getuid(), GID: os.Getgid()}
-	_, err := ops.StartVM(&entry, StartVMReq{
+	_, err := startStagedForTest(t, ops, &entry, StartVMReq{
 		VMID:     vmID,
 		UID:      os.Getuid(),
 		GID:      os.Getgid(),
@@ -101,10 +101,10 @@ func TestStartVMWillNotWriteThroughASymlinkInTheJailRoot(t *testing.T) {
 	wantInvalidState(t, err)
 }
 
-// TestStartVMWillNotFollowASymlinkedJailRoot moves the symlink one level up.
+// TestStagedVMWillNotFollowASymlinkedJailRoot moves the symlink one level up.
 // chownTree chowns <jail> itself, not just <jail>/root, so the guest can also
 // replace the root directory wholesale and redirect every copy at once.
-func TestStartVMWillNotFollowASymlinkedJailRoot(t *testing.T) {
+func TestStagedVMWillNotFollowASymlinkedJailRoot(t *testing.T) {
 	ops, jailBase, _ := guardOps(t)
 	const vmID = "vm-jailfd-dir"
 
@@ -128,7 +128,7 @@ func TestStartVMWillNotFollowASymlinkedJailRoot(t *testing.T) {
 	}
 
 	entry := VMEntry{VMID: vmID, UID: os.Getuid(), GID: os.Getgid()}
-	_, err := ops.StartVM(&entry, StartVMReq{
+	_, err := startStagedForTest(t, ops, &entry, StartVMReq{
 		VMID:     vmID,
 		UID:      os.Getuid(),
 		GID:      os.Getgid(),
@@ -147,13 +147,13 @@ func TestStartVMWillNotFollowASymlinkedJailRoot(t *testing.T) {
 	wantInvalidState(t, err)
 }
 
-// TestStartVMWillNotReadAPidFileThroughASymlink is the worst of the three,
+// TestStagedVMWillNotReadAPidFileThroughASymlink is the worst of the three,
 // because it needs no write at all. The pid privd reads out of the jail goes
 // straight into the ledger, and the only thing standing between that number and
 // a later SIGKILL is a starttime compare against the same /proc entry. A symlink
 // pointing at a file that holds "1" hands privd init's pid and init's starttime,
 // which agree with each other, and the next stop of this VM signals pid 1.
-func TestStartVMWillNotReadAPidFileThroughASymlink(t *testing.T) {
+func TestStagedVMWillNotReadAPidFileThroughASymlink(t *testing.T) {
 	ops, jailBase, _ := guardOps(t)
 	const vmID = "vm-jailfd-pid"
 	_, root := mkJailRoot(t, jailBase, vmID)
@@ -167,7 +167,7 @@ func TestStartVMWillNotReadAPidFileThroughASymlink(t *testing.T) {
 	}
 
 	entry := VMEntry{VMID: vmID, UID: os.Getuid(), GID: os.Getgid()}
-	resp, err := ops.StartVM(&entry, StartVMReq{VMID: vmID, UID: os.Getuid(), GID: os.Getgid()})
+	resp, err := startStagedForTest(t, ops, &entry, StartVMReq{VMID: vmID, UID: os.Getuid(), GID: os.Getgid()})
 	if err == nil {
 		t.Fatalf("StartVM read a pid through a symlink and returned pid %d", resp.PID)
 	}
@@ -217,7 +217,7 @@ func TestCopyFromPinnedFdRefusesANameTheJailerWouldNotStage(t *testing.T) {
 	}
 }
 
-// TestStartVMRefusesAJailRootThatAlreadyHoldsAStagedFile is the debris policy.
+// TestStagedVMRefusesAJailRootThatAlreadyHoldsAStagedFile is the debris policy.
 // ReleaseVM removes the tree on a clean stop and AbortStartVM removes it on
 // every StartVM that returns an error, so the only way a boot artifact is
 // already sitting in the root is that one of those did not finish -- privd
@@ -229,7 +229,7 @@ func TestCopyFromPinnedFdRefusesANameTheJailerWouldNotStage(t *testing.T) {
 // does not own, to keep the copy off an inode it was not given. O_NOFOLLOW says
 // nothing about a hardlink; O_EXCL refuses every name that is already there,
 // whatever kind of thing it is.
-func TestStartVMRefusesAJailRootThatAlreadyHoldsAStagedFile(t *testing.T) {
+func TestStagedVMRefusesAJailRootThatAlreadyHoldsAStagedFile(t *testing.T) {
 	ops, jailBase, _ := guardOps(t)
 	const vmID = "vm-jailfd-debris"
 	_, root := mkJailRoot(t, jailBase, vmID)
@@ -246,7 +246,7 @@ func TestStartVMRefusesAJailRootThatAlreadyHoldsAStagedFile(t *testing.T) {
 	}
 
 	entry := VMEntry{VMID: vmID, UID: os.Getuid(), GID: os.Getgid()}
-	_, err := ops.StartVM(&entry, StartVMReq{
+	_, err := startStagedForTest(t, ops, &entry, StartVMReq{
 		VMID:     vmID,
 		UID:      os.Getuid(),
 		GID:      os.Getgid(),
@@ -264,26 +264,31 @@ func TestStartVMRefusesAJailRootThatAlreadyHoldsAStagedFile(t *testing.T) {
 	wantInvalidState(t, err)
 }
 
-// TestStartVMStillCopiesIntoAJailRootItJustMade keeps the refusal from being
+// TestStagedVMStillCopiesIntoAJailRootItJustMade keeps the refusal from being
 // bought by refusing every start. The ordinary case -- an empty root privd
-// created a moment ago -- still takes all four artifacts.
-func TestStartVMStillCopiesIntoAJailRootItJustMade(t *testing.T) {
+// created a moment ago -- still takes all five artifacts.
+func TestStagedVMStillCopiesIntoAJailRootItJustMade(t *testing.T) {
 	ops, jailBase, _ := guardOps(t)
 	const vmID = "vm-jailfd-clean"
 
+	entry := VMEntry{VMID: vmID, UID: os.Getuid(), GID: os.Getgid(), NetCIDR: "10.99.0.0/30"}
 	stageDir := filepath.Join(ops.cfg.StageRoot, vmID)
 	var files []StagedFile
 	for _, name := range StagedFileNames {
-		files = append(files, stageOne(t, stageDir, name, []byte("bytes of "+name)))
+		body := "bytes of " + name
+		if name == "fc-config.json" {
+			body = bindingConfig(t, entry)
+		}
+		files = append(files, stageOne(t, stageDir, name, []byte(body)))
 	}
 	root := filepath.Join(jailBase, "firecracker", vmID, "root")
 	ops.hooks.RunCmd = func([]string) error {
 		return os.WriteFile(filepath.Join(root, "firecracker.pid"), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600)
 	}
 
-	entry := VMEntry{VMID: vmID, UID: os.Getuid(), GID: os.Getgid()}
-	resp, err := ops.StartVM(&entry, StartVMReq{
+	resp, err := startStagedForTest(t, ops, &entry, StartVMReq{
 		VMID:     vmID,
+		CID:      3,
 		UID:      os.Getuid(),
 		GID:      os.Getgid(),
 		StageDir: stageDir,
@@ -301,7 +306,11 @@ func TestStartVMStillCopiesIntoAJailRootItJustMade(t *testing.T) {
 			t.Errorf("read %s from the jail root: %v", name, readErr)
 			continue
 		}
-		if string(got) != "bytes of "+name {
+		want := "bytes of " + name
+		if name == "fc-config.json" {
+			want = bindingConfig(t, entry)
+		}
+		if string(got) != want {
 			t.Errorf("jail root holds %q for %s", got, name)
 		}
 	}

@@ -184,7 +184,7 @@ func TestSocketExecutionOutlivesFramingDeadline(t *testing.T) {
 	}
 }
 
-func TestStartExecFailurePreservesOnlyStartedProcessUncertainty(t *testing.T) {
+func TestStagedExecFailurePreservesOnlyStartedProcessUncertainty(t *testing.T) {
 	for _, started := range []bool{false, true} {
 		t.Run(map[bool]string{false: "executable-absent", true: "process-started"}[started], func(t *testing.T) {
 			dir := t.TempDir()
@@ -198,7 +198,7 @@ func TestStartExecFailurePreservesOnlyStartedProcessUncertainty(t *testing.T) {
 			}
 			ops := NewRealOps(RealOpsCfg{StageRoot: filepath.Dir(stage), JailBase: filepath.Join(dir, "jail"), JailerPath: executable})
 			entry := VMEntry{VMID: "vm-exec", UID: os.Getuid(), GID: os.Getgid(), CID: 3}
-			_, err := ops.StartVMContext(context.Background(), &entry, StartVMReq{VMID: entry.VMID, UID: entry.UID, GID: entry.GID, CID: entry.CID, StageDir: stage})
+			_, err := startStagedForTest(t, ops, &entry, StartVMReq{VMID: entry.VMID, UID: entry.UID, GID: entry.GID, CID: entry.CID, StageDir: stage})
 			if err == nil {
 				t.Fatal("exec unexpectedly succeeded")
 			}

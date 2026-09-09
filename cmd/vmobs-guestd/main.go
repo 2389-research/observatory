@@ -13,12 +13,14 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/mdlayher/vsock"
 
 	"github.com/2389-research/observatory/internal/guest"
 	"github.com/2389-research/observatory/internal/guest/fswatch"
 	"github.com/2389-research/observatory/internal/guest/procwatch"
+	"github.com/2389-research/observatory/internal/guest/telemetry"
 )
 
 func main() {
@@ -76,31 +78,105 @@ func main() {
 	fmt.Printf("vmobs-guestd: serving vsock control %d stream %d telemetry %d vm=%s boot=%s\n",
 		*controlPort, *streamPort, *telemetryPort, cfg.VMID, cfg.BootID)
 
+	done := serveGuest(ctx, agent, guestListeners{
+		control:   ln,
+		stream:    streamLn,
+		telemetry: telemetryLn,
+	}, func(networkCtx context.Context) error {
+		return guest.ConfigureNetwork(networkCtx, cfg.Network)
+	}, 5*time.Second)
+
 	// The heartbeat runs whether or not the port bound: what piles up in the
-	// ring while nobody reads is the evidence that nobody was reading.
+	// ring while nobody reads is the evidence that nobody was reading. serveGuest
+	// registers network configuration as pending before the first beat.
 	go agent.RunHeartbeat(ctx, guest.HeartbeatInterval)
 	go fswatch.Run(ctx, agent.Telemetry())
 	go procwatch.Run(ctx, agent.Telemetry(), cfg.BootID)
 
-	// Every listener closes on ctx, so whichever returns first, the others are
-	// on their way down too; the first non-nil error is the one worth reporting.
-	done := make(chan error, 3)
-	serve := func(name string, fn func(context.Context, net.Listener) error, l net.Listener) {
-		if err := fn(ctx, l); err != nil {
-			done <- fmt.Errorf("%s: %w", name, err)
-			return
-		}
-		done <- nil
-	}
-	go serve("ServeControl", agent.ServeControl, ln)
-	if streamErr == nil {
-		go serve("ServeStreams", agent.ServeStreams, streamLn)
-	}
-	if telemetryErr == nil {
-		go serve("ServeTelemetry", agent.ServeTelemetry, telemetryLn)
-	}
-
 	if err := <-done; err != nil {
 		log.Fatalf("%v", err)
 	}
+}
+
+type guestListeners struct {
+	control   net.Listener
+	stream    net.Listener
+	telemetry net.Listener
+}
+
+// serveGuest starts every available management path before the one-shot
+// network setup. A setup operation that fails to return cannot hold control or
+// spawn retries; its late result is ignored after the deadline health verdict.
+func serveGuest(
+	ctx context.Context,
+	agent *guest.Agent,
+	listeners guestListeners,
+	configure func(context.Context) error,
+	networkTimeout time.Duration,
+) <-chan error {
+	recordNetworkPending(agent)
+	done := make(chan error, 3)
+	serve := func(name string, fn func(context.Context, net.Listener) error, listener net.Listener) {
+		if listener == nil {
+			return
+		}
+		go func() {
+			if err := fn(ctx, listener); err != nil {
+				done <- fmt.Errorf("%s: %w", name, err)
+				return
+			}
+			done <- nil
+		}()
+	}
+	serve("ServeControl", agent.ServeControl, listeners.control)
+	serve("ServeStreams", agent.ServeStreams, listeners.stream)
+	serve("ServeTelemetry", agent.ServeTelemetry, listeners.telemetry)
+
+	networkCtx, cancelNetwork := context.WithTimeout(ctx, networkTimeout)
+	result := make(chan error, 1)
+	go func() {
+		result <- configure(networkCtx)
+	}()
+	go func() {
+		defer cancelNetwork()
+		select {
+		case err := <-result:
+			if networkCtx.Err() != nil {
+				err = networkCtx.Err()
+			}
+			recordNetworkHealth(agent, err)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "vmobs-guestd: guest network configuration failed: %v; management remains available\n", err)
+			}
+		case <-networkCtx.Done():
+			err := fmt.Errorf("deadline reached before network setup returned: %w", networkCtx.Err())
+			recordNetworkHealth(agent, err)
+			fmt.Fprintf(os.Stderr, "vmobs-guestd: guest network configuration failed: %v; management remains available\n", err)
+		}
+	}()
+	return done
+}
+
+func networkHealth(state, reason string) telemetry.Sensor {
+	return telemetry.Sensor{
+		ID:          "network_configuration",
+		State:       state,
+		Dropped:     "0",
+		Scope:       []string{"eth0 static address", "default route", "managed DNS"},
+		Limitations: []string{"configuration health does not report host flow or DNS query coverage"},
+		Reason:      reason,
+	}
+}
+
+func recordNetworkPending(agent *guest.Agent) {
+	agent.Telemetry().Sensors().Set(networkHealth(telemetry.SensorStarting, "guest network configuration pending"))
+}
+
+func recordNetworkHealth(agent *guest.Agent, err error) {
+	sensor := networkHealth(telemetry.SensorHealthy, "")
+	if err != nil {
+		sensor.State = telemetry.SensorDegraded
+		sensor.Reason = "guest network configuration failed: " + err.Error()
+	}
+	agent.Telemetry().Sensors().Set(sensor)
 }

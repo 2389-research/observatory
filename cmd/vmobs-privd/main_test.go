@@ -88,3 +88,13 @@ func TestParseFlagsExplicitValues(t *testing.T) {
 		t.Errorf("jail-base = %q; want /tmp/jail", flags.jailBase)
 	}
 }
+
+func TestParseExplicitNetworkPolicyDirectory(t *testing.T) {
+	flags, err := parseFlags([]string{"--allowed-uid", "1000", "--allowed-gid", "1000", "--network-policy-dir", "/etc/vmobs/network-policies"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flags.policyDirectory != "/etc/vmobs/network-policies" {
+		t.Fatal("policy directory not retained")
+	}
+}

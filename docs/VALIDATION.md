@@ -801,3 +801,17 @@ Added the active `s8e2` plan and recorded source-level progress plus the first
 real root/workspace mutation gate. `uv run docs/validation/check.py` passed
 **47/47** (exit 0). Coverage, sensor, browser and network work remain under
 validation; this documentation check does not close the epic or its children.
+
+## Revision — 2026-09-08, gateway integration checkpoint
+
+Recorded the gateway and guest network component evidence, copied-byte mutation
+fix, remaining review blockers and corrected staging scope in the introspection
+plan. `uv run docs/validation/check.py` passed **47/47** (exit 0). The gateway,
+guest image and published end-to-end acceptance remain incomplete.
+
+## Revision — 2026-09-08, gateway checkpoint review fixes
+
+Updated the plan with reviewed packet/lifecycle evidence and the guest netlink
+completion fix. The final canonical check passed all gates; the separate
+`uv run docs/validation/check.py` run passed **47/47** (exit 0). Live traffic
+collection, a rebuilt guest image and published acceptance remain outstanding.

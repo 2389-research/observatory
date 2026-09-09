@@ -517,15 +517,15 @@ func TestDuplicateAllocate(t *testing.T) {
 		t.Fatalf("first allocate: %+v", resp)
 	}
 
-	// Second allocate with same CIDR — idempotent OK, backend not called again.
+	// Second allocate with same CIDR revalidates the actual owned topology.
 	conn2 := dialPrivd(t, sockPath)
 	resp2 := sendRecv(t, conn2, makeReq(t, "allocate_network", privd.AllocateNetworkReq{VMID: vmID, CIDR: cidr}))
 	conn2.Close()
 	if !resp2.OK {
 		t.Fatalf("idempotent allocate: %+v", resp2)
 	}
-	if len(backend.allocateCalls) != 1 {
-		t.Errorf("allocateCalls after idempotent = %d, want 1", len(backend.allocateCalls))
+	if len(backend.allocateCalls) != 2 {
+		t.Errorf("allocateCalls after idempotent = %d, want 2", len(backend.allocateCalls))
 	}
 
 	// Third allocate with a different CIDR — invalid_state.

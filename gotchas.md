@@ -2,6 +2,27 @@
 
 Distilled working knowledge for agents and collaborators in this repo. Append entries; keep each a few lines.
 
+## Gateway integration review — 2026-09-08
+
+A pinned source descriptor prevents path replacement but not writes to the same
+inode. Hash the bytes actually copied before transferring artifact ownership.
+The real regression covers config JSON, config disk and root disk mutation.
+
+Namespace restoration must use the calling thread's namespace. In a multithreaded
+Go process, `/proc/self/ns/net` can name the leader's namespace. The packet test's
+nested namespace regression failed with that path and passed with
+`/proc/thread-self/ns/net`.
+
+The privileged allocator must reject host route/address overlap itself; the
+daemon's allocator is not authority for a root operation. Cleanup must retain an
+execution deadline and preserve the lease when removal cannot be proved.
+
+Keep guest configuration distinct from host enforcement. SPEC §§10–12 require
+actual host resource, policy and boot binding; they do not require sealing every
+guest configuration byte. Guest root can change its network settings anyway.
+Do not add host guest-disk parsing or mount privileges to satisfy an invented
+immutability requirement.
+
 - **No process ceremony with Harper.** Don't announce skill usage, workflow compliance, or plans-before-acting. He interrupted mid-task to stop it ("please stop"). Keep the discipline (verify, be honest about what ran), skip the narration — the first visible action should be real work.
 - **Canonical check is `uv run docs/validation/check.py`.** Run it after touching anything in `docs/`; append a dated revision to `docs/VALIDATION.md` with the real output. Never rewrite earlier revisions — they're the historical record.
 - **`gofmt -l` exits 0 even when it lists unformatted files.** Chaining `gofmt -l ... && git commit` commits unformatted code (burned two commits this way). The gate is `scripts/check`, which captures the output and fails on non-empty; use it, not ad-hoc chains.

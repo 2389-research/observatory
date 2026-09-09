@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"os/user"
@@ -117,7 +118,7 @@ func PrepareVM(t *testing.T, repoRoot, id string, n int, alloc *network.Allocato
 	}
 
 	// Build config disk and fc-config.json into buildDir.
-	bootCfg, configDisk, fcCfgJSON, err := BuildVMConfig(repoRoot, id, cid, vm.buildDir)
+	bootCfg, configDisk, fcCfgJSON, err := BuildVMConfig(repoRoot, id, cid, subnet, vm.buildDir)
 	if err != nil {
 		t.Fatalf("PrepareVM %s: build config: %v", id, err)
 	}
@@ -264,6 +265,7 @@ type FCVsock struct {
 type FCNetworkInterface struct {
 	IfaceID     string `json:"iface_id"`
 	HostDevName string `json:"host_dev_name"`
+	GuestMAC    string `json:"guest_mac"`
 }
 
 // BuildVMConfig constructs all per-VM configuration artifacts and writes
@@ -279,7 +281,7 @@ type FCNetworkInterface struct {
 //
 // lock.VerifyArtifacts is called with repoRoot; a mismatch is a hard error.
 // outDir must be a writable directory (e.g., t.TempDir()).
-func BuildVMConfig(repoRoot, id string, cid uint32, outDir string) (*guest.BootConfig, []byte, []byte, error) {
+func BuildVMConfig(repoRoot, id string, cid uint32, transit netip.Prefix, outDir string) (*guest.BootConfig, []byte, []byte, error) {
 	// 1. Verify lock artifacts. A hash mismatch means we won't boot unverified images.
 	lk, err := lock.Load(filepath.Join(repoRoot, "runtime.lock.json"))
 	if err != nil {
@@ -301,12 +303,17 @@ func BuildVMConfig(repoRoot, id string, cid uint32, outDir string) (*guest.BootC
 
 	// 3. Marshal context.json via guest.BootConfig — THE one source of truth.
 	//    Never hand-write this JSON; the struct owns the schema.
+	networkConfig, err := guest.NewNetworkConfig(id, transit)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("derive guest network: %w", err)
+	}
 	bootCfg := &guest.BootConfig{
 		Schema:          guest.GuestContextSchema,
 		VMID:            id,
 		BootID:          bootID,
 		CapabilityToken: token,
 		ProtocolVersion: proto.ProtocolVersion,
+		Network:         networkConfig,
 	}
 	contextJSON, err := json.Marshal(bootCfg)
 	if err != nil {
@@ -372,6 +379,7 @@ func BuildVMConfig(repoRoot, id string, cid uint32, outDir string) (*guest.BootC
 			{
 				IfaceID:     "eth0",
 				HostDevName: "tap0",
+				GuestMAC:    networkConfig.MAC,
 			},
 		},
 	}

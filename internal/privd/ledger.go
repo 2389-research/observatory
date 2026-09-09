@@ -19,19 +19,30 @@ import (
 // VMEntry holds the per-VM identity and resource record stored in the ledger.
 type VMEntry struct {
 	// StartAttempted distinguishes pre-exec debris from a launch requiring process-exit proof.
-	StartAttempted bool   `json:"-"`
-	NetworkOpID    string `json:"network_op_id,omitempty"`
-	StartOpID      string `json:"start_op_id,omitempty"`
-	VMID           string `json:"vm_id"`
-	UID            int    `json:"uid"`
-	GID            int    `json:"gid"`
-	CID            uint32 `json:"cid"`
-	PID            int    `json:"pid"`
-	StartTime      string `json:"start_time"` // decimal string: /proc/<pid>/stat field 22
-	BootID         string `json:"boot_id"`
-	PIDNamespace   string `json:"pid_namespace"`
-	NetCIDR        string `json:"net_cidr"`
-	CreatedAtUnix  int64  `json:"created_at_unix"`
+	StartAttempted         bool   `json:"-"`
+	NetworkHostBootID      string `json:"network_host_boot_id,omitempty"`
+	NetworkComplete        bool   `json:"network_complete,omitempty"`
+	NetworkOpID            string `json:"network_op_id,omitempty"`
+	NetworkGuestBootID     string `json:"network_guest_boot_id,omitempty"`
+	NetworkProfile         string `json:"network_profile,omitempty"`
+	NetworkPolicyID        string `json:"network_policy_id,omitempty"`
+	NetworkPolicyDigest    string `json:"network_policy_digest,omitempty"`
+	NetworkPolicyVersion   int    `json:"network_policy_version,omitempty"`
+	GatewayGeneration      string `json:"gateway_generation,omitempty"`
+	NetworkNamespaceDevice uint64 `json:"network_namespace_device,omitempty"`
+	NetworkNamespaceInode  uint64 `json:"network_namespace_inode,omitempty"`
+	NetworkTopologyDigest  string `json:"network_topology_digest,omitempty"`
+	StartOpID              string `json:"start_op_id,omitempty"`
+	VMID                   string `json:"vm_id"`
+	UID                    int    `json:"uid"`
+	GID                    int    `json:"gid"`
+	CID                    uint32 `json:"cid"`
+	PID                    int    `json:"pid"`
+	StartTime              string `json:"start_time"` // decimal string: /proc/<pid>/stat field 22
+	BootID                 string `json:"boot_id"`
+	PIDNamespace           string `json:"pid_namespace"`
+	NetCIDR                string `json:"net_cidr"`
+	CreatedAtUnix          int64  `json:"created_at_unix"`
 }
 
 // ledger manages per-VM JSON files in a directory.

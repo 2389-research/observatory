@@ -10,9 +10,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -206,7 +208,8 @@ func readPidFileAt(dir *os.File, name string) (string, error) {
 // On any error (including digest mismatch) the fd is closed and nil is returned.
 // Callers must close the returned *os.File. This is the TOCTOU-safe entry point:
 // the same fd is used for the subsequent copy (via CopyFromPinnedFd) so the path
-// is never reopened after verification.
+// is never reopened after verification. The copy also verifies the bytes it
+// writes, because a pinned source inode can still be modified by its owner.
 //
 // §15.3: error messages name the file, never dump its contents.
 func VerifyStagedFileAt(dir *os.File, f StagedFile) (*os.File, error) {
@@ -275,6 +278,11 @@ func CopyFromPinnedFd(src *os.File, dstDir *os.File, f StagedFile, uid, gid int)
 }
 
 func copyFromPinnedContext(ctx context.Context, src *os.File, dstDir *os.File, f StagedFile, uid, gid int) error {
+	return copyValidatedContext(ctx, src, dstDir, f, uid, gid, nil)
+}
+
+// copyValidatedContext validates the copied descriptor before ownership transfer.
+func copyValidatedContext(ctx context.Context, src *os.File, dstDir *os.File, f StagedFile, uid, gid int, validate func(*os.File) error) error {
 	// Seek the verified fd back to the start — same open, never a new path open.
 	if _, err := src.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("privd: seek staged file %q: %w", f.Name, err)
@@ -309,7 +317,7 @@ func copyFromPinnedContext(ctx context.Context, src *os.File, dstDir *os.File, f
 	// refuses a name that is already a hardlink, which O_NOFOLLOW says nothing
 	// about -- so the copy stays off an inode privd was not given without privd
 	// having to trust fs.protected_hardlinks, a sysctl it does not own.
-	fd, err := unix.Openat(int(dstDir.Fd()), f.Name, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, mode)
+	fd, err := unix.Openat(int(dstDir.Fd()), f.Name, unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, mode)
 	if err != nil {
 		if errors.Is(err, unix.EEXIST) {
 			return &BackendError{
@@ -325,8 +333,20 @@ func copyFromPinnedContext(ctx context.Context, src *os.File, dstDir *os.File, f
 	dst := os.NewFile(uintptr(fd), f.Name)
 	defer func() { _ = dst.Close() }()
 
-	if _, err := io.Copy(dst, contextReader{ctx: ctx, reader: src}); err != nil {
+	digest := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(dst, digest), contextReader{ctx: ctx, reader: src}); err != nil {
 		return fmt.Errorf("privd: copy %q: %w", f.Name, err)
+	}
+	if got := hex.EncodeToString(digest.Sum(nil)); got != f.SHA256 {
+		return &BackendError{
+			Cause:   "digest_mismatch",
+			Message: fmt.Sprintf("file %s: copied digest mismatch (got %s, want %s)", f.Name, got, f.SHA256),
+		}
+	}
+	if validate != nil {
+		if err := validate(dst); err != nil {
+			return err
+		}
 	}
 	// fchown, not a chown by name: the name is never consulted again, so nothing
 	// can be swapped in under it between the copy and the ownership change.
@@ -417,10 +437,11 @@ func CheckSignalIdentity(entry VMEntry) error {
 // StartVM implements OpsBackend.StartVM.
 //
 // Steps:
-//  1. Verify each StagedFile: O_NOFOLLOW open, fstat, SHA-256 from fd.
+//  1. Prove the completed network allocation, then verify each staged descriptor.
 //  2. Copy each verified fd into <JailBase>/firecracker/<id>/root/ (dirs 0750),
-//     chown uid:gid, mode 0644 (fc-config.json gets 0640).
-//  3. Exec jailer (via RunCmd hook if set, otherwise exec.CommandContext).
+//     validate copied Firecracker resource binding, then chown uid:gid.
+//     Artifact modes are 0644 (fc-config.json gets 0640).
+//  3. Revalidate the actual gateway, then exec jailer (RunCmd hook or command).
 //     Wait up to 10s for <root>/v.sock, then chmod root 0750.
 //  4. Read <root>/firecracker.pid, read /proc/<pid>/stat field 22, return both.
 func (r *RealOps) StartVM(entry *VMEntry, req StartVMReq) (StartVMResp, error) {
@@ -440,6 +461,35 @@ func (r *RealOps) StartVMContext(ctx context.Context, entry *VMEntry, req StartV
 	}
 	entry.BootID, entry.PIDNamespace = boot, namespace
 
+	if entry.VMID != req.VMID || !entry.NetworkComplete || entry.NetCIDR == "" {
+		return StartVMResp{}, &BackendError{Cause: "invalid_state", Message: "completed network allocation required for launch"}
+	}
+	allocation := AllocateNetworkReq{VMID: entry.VMID, CIDR: entry.NetCIDR, Profile: entry.NetworkProfile, PolicyID: entry.NetworkPolicyID, GuestBootID: entry.NetworkGuestBootID}
+	if err := r.ProbeNetworkContext(ctx, *entry, allocation); err != nil {
+		return StartVMResp{}, err
+	}
+	configFound := false
+	for _, file := range req.Files {
+		if file.Name == "fc-config.json" {
+			configFound = true
+		}
+	}
+	if !configFound {
+		return StartVMResp{}, &BackendError{Cause: "bad_request", Message: "missing Firecracker configuration"}
+	}
+	rootDir, err := r.stageVMContext(ctx, *entry, req)
+	if err != nil {
+		return StartVMResp{}, err
+	}
+	defer rootDir.Close()
+	if err := r.ProbeNetworkContext(ctx, *entry, allocation); err != nil {
+		return StartVMResp{}, err
+	}
+	return r.execStagedVMContext(ctx, entry, req, rootDir)
+}
+
+// stageVMContext stages fd-pinned artifacts; it does not authorize a launch.
+func (r *RealOps) stageVMContext(ctx context.Context, entry VMEntry, req StartVMReq) (*os.File, error) {
 	// Step 1: verify all staged files, keeping each fd open (single-open pipeline).
 	// All files are verified before any jail dir is touched; on any mismatch we
 	// close all open fds and abort.
@@ -449,7 +499,7 @@ func (r *RealOps) StartVMContext(ctx context.Context, entry *VMEntry, req StartV
 	// ones privd read out of the directory privd named.
 	stageDir, err := r.stageDir(req.VMID)
 	if err != nil {
-		return StartVMResp{}, err
+		return nil, err
 	}
 	defer func() { _ = stageDir.Close() }()
 
@@ -461,41 +511,57 @@ func (r *RealOps) StartVMContext(ctx context.Context, entry *VMEntry, req StartV
 			for _, open := range fds[:i] {
 				open.Close()
 			}
-			return StartVMResp{}, err
+			return nil, err
 		}
 		fds[i] = pinned
 	}
 
 	// Step 2: create jail dirs and copy each file from its pinned fd.
-	// The path is never reopened — CopyFromPinnedFd seeks to 0 and reads the
-	// same fd that was digest-verified above, closing the TOCTOU window entirely.
+	// The path is never reopened. The copy reads the pinned descriptor and
+	// checks the copied digest to detect writes to that inode after verification.
 	rootDir, err := r.jailRoot(req.VMID, true)
 	if err != nil {
 		for _, f := range fds {
 			f.Close()
 		}
-		return StartVMResp{}, err
+		return nil, err
 	}
-	defer func() { _ = rootDir.Close() }()
+	ok := false
+	defer func() {
+		if !ok {
+			_ = rootDir.Close()
+		}
+	}()
 
 	for i, f := range req.Files {
-		err := copyFromPinnedContext(ctx, fds[i], rootDir, f, req.UID, req.GID)
+		var err error
+		if f.Name == "fc-config.json" {
+			err = copyBoundConfigContext(ctx, fds[i], rootDir, f, req.UID, req.GID, entry, req)
+		} else {
+			err = copyFromPinnedContext(ctx, fds[i], rootDir, f, req.UID, req.GID)
+		}
 		fds[i].Close() // close immediately after copy, regardless of outcome
 		if err != nil {
 			// Close remaining open fds.
 			for _, open := range fds[i+1:] {
 				open.Close()
 			}
-			return StartVMResp{}, err
+			return nil, err
 		}
 	}
 
 	// chown the whole jail tree to uid:gid (matching the helper's `chown -R`).
 	jailDir := filepath.Join(r.cfg.JailBase, "firecracker", req.VMID)
 	if err := chownTree(jailDir, req.UID, req.GID); err != nil {
-		return StartVMResp{}, fmt.Errorf("privd: chown jail: %w", err)
+		return nil, fmt.Errorf("privd: chown jail: %w", err)
 	}
 
+	ok = true
+	return rootDir, nil
+}
+
+// execStagedVMContext executes only after StartVM has proved the allocated gateway.
+func (r *RealOps) execStagedVMContext(ctx context.Context, entry *VMEntry, req StartVMReq, rootDir *os.File) (StartVMResp, error) {
 	// Step 3: exec jailer.
 	entry.StartAttempted = true
 	argv := JailerArgv(r.cfg, *entry)
@@ -811,4 +877,81 @@ func chownTree(dir string, uid, gid int) error {
 		}
 		return nil
 	})
+}
+
+// copyBoundConfigContext checks the exact copied configuration before fchown.
+// Guest configuration is not host enforcement: the gateway remains authoritative.
+func copyBoundConfigContext(ctx context.Context, src, dst *os.File, file StagedFile, uid, gid int, entry VMEntry, req StartVMReq) error {
+	return copyValidatedContext(ctx, src, dst, file, uid, gid, func(copied *os.File) error {
+		return validateCopiedConfig(copied, entry, req)
+	})
+}
+
+// validateCopiedConfig accepts only the resource fields emitted by our staging adapter.
+// Errors never include JSON values, which may contain guest capability material.
+func validateCopiedConfig(file *os.File, entry VMEntry, req StartVMReq) error {
+	invalid := func() error {
+		return &BackendError{Cause: "bad_request", Message: "Firecracker configuration does not match allocated VM resources"}
+	}
+	const maxConfigBytes = 64 * 1024
+	st, err := file.Stat()
+	if err != nil || st.Size() > maxConfigBytes {
+		return invalid()
+	}
+	prefix, err := netip.ParsePrefix(entry.NetCIDR)
+	if err != nil {
+		return invalid()
+	}
+	layout, err := network.NewLayout(entry.VMID, prefix)
+	if err != nil {
+		return invalid()
+	}
+	var config struct {
+		Boot struct {
+			Kernel string `json:"kernel_image_path"`
+			Args   string `json:"boot_args"`
+		} `json:"boot-source"`
+		Drives []struct {
+			ID       string `json:"drive_id"`
+			Path     string `json:"path_on_host"`
+			Root     bool   `json:"is_root_device"`
+			ReadOnly bool   `json:"is_read_only"`
+		} `json:"drives"`
+		Machine struct {
+			CPUs   int `json:"vcpu_count"`
+			Memory int `json:"mem_size_mib"`
+		} `json:"machine-config"`
+		Vsock struct {
+			CID  uint32 `json:"guest_cid"`
+			Path string `json:"uds_path"`
+		} `json:"vsock"`
+		Interfaces []struct {
+			ID  string `json:"iface_id"`
+			TAP string `json:"host_dev_name"`
+			MAC string `json:"guest_mac"`
+		} `json:"network-interfaces"`
+	}
+	decoder := json.NewDecoder(io.NewSectionReader(file, 0, maxConfigBytes+1))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&config) != nil {
+		return invalid()
+	}
+	var extra any
+	if decoder.Decode(&extra) != io.EOF {
+		return invalid()
+	}
+	if config.Boot.Kernel != "vmlinux" || config.Vsock.CID != req.CID || req.CID < 3 || config.Vsock.Path != "v.sock" || len(config.Interfaces) != 1 || len(config.Drives) != 3 {
+		return invalid()
+	}
+	iface := config.Interfaces[0]
+	if iface.ID != "eth0" || iface.TAP != "tap0" || iface.MAC != layout.GuestMAC.String() {
+		return invalid()
+	}
+	for i, id := range []string{"rootfs", "config", "workspace"} {
+		drive := config.Drives[i]
+		if drive.ID != id || drive.Path != id+".ext4" || drive.Root != (i == 0) || drive.ReadOnly != (i == 1) {
+			return invalid()
+		}
+	}
+	return nil
 }

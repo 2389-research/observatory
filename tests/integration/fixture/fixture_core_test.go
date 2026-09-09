@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -303,9 +304,28 @@ func TestBuildVMConfig(t *testing.T) {
 	}
 
 	outDir := t.TempDir()
-	bootCfg, configDisk, fcJSON, err := BuildVMConfig(repoRoot, "test-vm", 3, outDir)
+	transit := netip.MustParsePrefix("10.201.0.0/30")
+	bootCfg, configDisk, fcJSON, err := BuildVMConfig(repoRoot, "test-vm", 3, transit, outDir)
 	if err != nil {
 		t.Fatalf("BuildVMConfig: %v", err)
+	}
+	wantNetwork, err := guest.NewNetworkConfig("test-vm", transit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bootCfg.Network != wantNetwork {
+		t.Fatalf("boot network=%+v; want shared layout %+v", bootCfg.Network, wantNetwork)
+	}
+	var networkFC FCConfig
+	if err := json.Unmarshal(fcJSON, &networkFC); err != nil {
+		t.Fatal(err)
+	}
+	if len(networkFC.NetworkInterfaces) != 1 || networkFC.NetworkInterfaces[0].GuestMAC != wantNetwork.MAC {
+		t.Fatalf("Firecracker identity disagrees with guest boot config: %+v", networkFC.NetworkInterfaces)
+	}
+	loaded, err := guest.LoadBootConfigDir(filepath.Join(outDir, "disk-stage"))
+	if err != nil || loaded.Network != wantNetwork {
+		t.Fatalf("staged boot config failed actual guest validation: %v", err)
 	}
 
 	// BootConfig must round-trip.
@@ -351,7 +371,7 @@ func TestBuildVMConfig(t *testing.T) {
 	}
 
 	// Uniqueness: two calls produce different tokens and boot IDs.
-	bootCfg2, _, _, err := BuildVMConfig(repoRoot, "test-vm-2", 4, t.TempDir())
+	bootCfg2, _, _, err := BuildVMConfig(repoRoot, "test-vm-2", 4, netip.MustParsePrefix("10.201.0.4/30"), t.TempDir())
 	if err != nil {
 		t.Fatalf("BuildVMConfig second call: %v", err)
 	}

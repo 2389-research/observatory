@@ -4,6 +4,7 @@ package guest_test
 
 import (
 	"encoding/json"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,12 +27,17 @@ func writeContextJSON(t *testing.T, dir string, v any) {
 
 func TestLoadBootConfigDirValid(t *testing.T) {
 	dir := t.TempDir()
+	network, err := guest.NewNetworkConfig("vm-abc", netip.MustParsePrefix("10.190.4.8/30"))
+	if err != nil {
+		t.Fatalf("NewNetworkConfig: %v", err)
+	}
 	writeContextJSON(t, dir, map[string]any{
 		"schema":           "vmobs.guest_context.v1",
 		"vm_id":            "vm-abc",
 		"boot_id":          "boot-xyz",
 		"capability_token": "tok-123",
 		"protocol_version": proto.ProtocolVersion,
+		"network":          network,
 	})
 
 	cfg, err := guest.LoadBootConfigDir(dir)
@@ -52,6 +58,65 @@ func TestLoadBootConfigDirValid(t *testing.T) {
 	}
 	if cfg.ProtocolVersion != proto.ProtocolVersion {
 		t.Errorf("ProtocolVersion: got %d, want %d", cfg.ProtocolVersion, proto.ProtocolVersion)
+	}
+	if cfg.Network.Address != "172.31.255.2/30" || cfg.Network.Gateway != "172.31.255.1" || cfg.Network.DNS != "172.31.255.1" {
+		t.Errorf("Network: got %+v", cfg.Network)
+	}
+}
+
+func TestNewNetworkConfigUsesAuthoritativeLayout(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := guest.NewNetworkConfig("vm-test", netip.MustParsePrefix("10.190.4.8/30"))
+	if err != nil {
+		t.Fatalf("NewNetworkConfig: %v", err)
+	}
+	want := guest.NetworkConfig{
+		TransitPrefix: "10.190.4.8/30",
+		Address:       "172.31.255.2/30",
+		Gateway:       "172.31.255.1",
+		DNS:           "172.31.255.1",
+		MAC:           "ce:98:38:32:8c:60",
+	}
+	if cfg != want {
+		t.Fatalf("NetworkConfig = %+v, want %+v", cfg, want)
+	}
+}
+
+func TestLoadBootConfigDirRequiresNetwork(t *testing.T) {
+	dir := t.TempDir()
+	writeContextJSON(t, dir, map[string]any{
+		"schema":           guest.GuestContextSchema,
+		"vm_id":            "vm-abc",
+		"boot_id":          "boot-xyz",
+		"capability_token": "tok-123",
+		"protocol_version": proto.ProtocolVersion,
+	})
+
+	_, err := guest.LoadBootConfigDir(dir)
+	if err == nil || !strings.Contains(err.Error(), "network.transit_prefix") {
+		t.Fatalf("missing network error = %v", err)
+	}
+}
+
+func TestLoadBootConfigDirRejectsNetworkNotDerivedForVM(t *testing.T) {
+	dir := t.TempDir()
+	network, err := guest.NewNetworkConfig("another-vm", netip.MustParsePrefix("10.190.4.8/30"))
+	if err != nil {
+		t.Fatalf("NewNetworkConfig: %v", err)
+	}
+	writeContextJSON(t, dir, map[string]any{
+		"schema":           guest.GuestContextSchema,
+		"vm_id":            "vm-abc",
+		"boot_id":          "boot-xyz",
+		"capability_token": "tok-123",
+		"protocol_version": proto.ProtocolVersion,
+		"network":          network,
+	})
+
+	_, err = guest.LoadBootConfigDir(dir)
+	if err == nil || !strings.Contains(err.Error(), "network.mac") {
+		t.Fatalf("mismatched network error = %v", err)
 	}
 }
 

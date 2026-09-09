@@ -208,3 +208,32 @@ func writePolicy(t *testing.T, dir, id, body string) {
 		t.Fatal(err)
 	}
 }
+
+func TestLoadEffectivePolicyFileUsesPinnedBytesFromStart(t *testing.T) {
+	directory := t.TempDir()
+	writePolicy(t, directory, "offline", `{"schema_version":1,"id":"offline","profile":"offline","dns_upstream":"","allowed_tcp_ports":[],"extra_deny_prefixes":[]}`)
+	path := filepath.Join(directory, "offline.json")
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if _, err := file.Seek(8, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(path, path+".pinned"); err != nil {
+		t.Fatal(err)
+	}
+	writePolicy(t, directory, "offline", `{"schema_version":999}`)
+	policy, err := network.LoadEffectivePolicyFile(file, "offline")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.Profile() != network.ProfileOffline {
+		t.Fatal("pinned policy identity changed")
+	}
+	offset, err := file.Seek(0, 1)
+	if err != nil || offset != 8 {
+		t.Fatal("loader changed caller file position", offset, err)
+	}
+}

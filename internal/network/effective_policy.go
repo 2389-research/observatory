@@ -103,6 +103,19 @@ func LoadEffectivePolicy(directory, id string) (EffectivePolicy, error) {
 		return EffectivePolicy{}, fmt.Errorf("network: open policy %q: invalid file descriptor", id)
 	}
 	defer file.Close()
+	return LoadEffectivePolicyFile(file, id)
+}
+
+// LoadEffectivePolicyFile decodes one already-open regular file from offset zero.
+// It neither closes the descriptor nor changes its position. Privileged callers
+// can verify ownership on this same descriptor before any policy bytes are read.
+func LoadEffectivePolicyFile(file *os.File, id string) (EffectivePolicy, error) {
+	if !validPolicyID(id) {
+		return EffectivePolicy{}, fmt.Errorf("%w: %q", ErrInvalidPolicyID, id)
+	}
+	if file == nil {
+		return EffectivePolicy{}, fmt.Errorf("%w: missing policy descriptor", ErrInvalidPolicy)
+	}
 	info, err := file.Stat()
 	if err != nil {
 		return EffectivePolicy{}, fmt.Errorf("network: stat policy %q: %w", id, err)
@@ -113,7 +126,7 @@ func LoadEffectivePolicy(directory, id string) (EffectivePolicy, error) {
 	if info.Size() > MaxPolicyFileBytes {
 		return EffectivePolicy{}, fmt.Errorf("%w: policy %q has %d bytes, maximum is %d", ErrPolicyTooLarge, id, info.Size(), MaxPolicyFileBytes)
 	}
-	body, err := io.ReadAll(io.LimitReader(file, MaxPolicyFileBytes+1))
+	body, err := io.ReadAll(io.NewSectionReader(file, 0, MaxPolicyFileBytes+1))
 	if err != nil {
 		return EffectivePolicy{}, fmt.Errorf("network: read policy %q: %w", id, err)
 	}

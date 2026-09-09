@@ -103,6 +103,7 @@ func main() {
 		StageRoot:       flags.stageRoot,
 		FirecrackerPath: flags.firecracker,
 		JailerPath:      flags.jailer,
+		PolicyDirectory: flags.policyDirectory,
 	})
 
 	srv := privd.NewServer(privd.ServerCfg{

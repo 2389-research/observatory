@@ -276,7 +276,7 @@ func (s *Server) recoverCommittedOperation(record operationRecord) operationReco
 		payload, _ := json.Marshal(StartVMResp{PID: vm.PID, StartTime: vm.StartTime})
 		response = okResp(payload)
 	case "allocate_network":
-		if vm.NetworkOpID != record.Request.OpID || vm.NetCIDR == "" {
+		if vm.NetworkOpID != record.Request.OpID || vm.NetCIDR == "" || !vm.NetworkComplete {
 			return record
 		}
 		response = okResp(nil)
