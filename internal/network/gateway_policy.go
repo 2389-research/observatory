@@ -18,6 +18,11 @@ const (
 	NamespaceNFLogGroup uint16 = 100
 	// MinHostNFLogGroup separates durable host ownership from low externally managed groups.
 	MinHostNFLogGroup uint16 = 1024
+	// The NFLOG prefix each denial chain writes. A reader binds to these exact
+	// strings, so the rendered policy and the reader share one definition.
+	NamespaceDenialPrefix        = "vmobs namespace denied "
+	NamespaceIngressDenialPrefix = "vmobs namespace ingress denied "
+	HostDenialPrefix             = "vmobs host denied "
 )
 
 func IsHostNFLogGroup(group uint16) bool { return group >= MinHostNFLogGroup }
@@ -180,7 +185,7 @@ func buildNamespaceRules(config GatewayRuleConfig, denied []netip.Prefix) string
   counter denied { }
   chain deny {
     counter name denied
-    limit rate 10/second burst 20 packets log group %d prefix "vmobs namespace ingress denied "
+    limit rate 10/second burst 20 packets log group %d prefix "%s"
     drop
   }
   chain ingress {
@@ -194,7 +199,7 @@ func buildNamespaceRules(config GatewayRuleConfig, denied []netip.Prefix) string
     jump deny
   }
 }
-`, namespaceIngressTable, NamespaceNFLogGroup, mac, layout.GuestAddress, mac, layout.GuestAddress, layout.GuestGateway)
+`, namespaceIngressTable, NamespaceNFLogGroup, NamespaceIngressDenialPrefix, mac, layout.GuestAddress, mac, layout.GuestAddress, layout.GuestGateway)
 
 	fmt.Fprintf(&script, `table inet %s {
   set denied_destinations {
@@ -207,12 +212,12 @@ func buildNamespaceRules(config GatewayRuleConfig, denied []netip.Prefix) string
   counter observed { }
   chain deny {
     counter name denied
-    limit rate 10/second burst 20 packets log group %d prefix "vmobs namespace denied "
+    limit rate 10/second burst 20 packets log group %d prefix "%s"
     drop
   }
   chain input {
     type filter hook input priority filter; policy drop;
-`, namespaceGatewayTable, nftPrefixSet(denied), NamespaceNFLogGroup)
+`, namespaceGatewayTable, nftPrefixSet(denied), NamespaceNFLogGroup, NamespaceDenialPrefix)
 	if config.Ready && config.Policy.Profile() == ProfileTransport {
 		fmt.Fprintf(&script, "    iifname \"tap0\" ip saddr %s udp dport 53 counter name accepted accept\n", layout.GuestAddress)
 		fmt.Fprintf(&script, "    iifname \"tap0\" ip saddr %s tcp dport 53 counter name accepted accept\n", layout.GuestAddress)
@@ -256,7 +261,7 @@ func buildHostRules(config GatewayRuleConfig, denied []netip.Prefix, table, natT
   counter accepted { }
   chain deny {
     counter name denied
-    limit rate 10/second burst 20 packets log group %d prefix "vmobs host denied "
+    limit rate 10/second burst 20 packets log group %d prefix "%s"
     drop
   }
   chain forward {
@@ -266,7 +271,7 @@ func buildHostRules(config GatewayRuleConfig, denied []netip.Prefix, table, natT
     iifname "%s" ip daddr @denied_destinations jump deny
     iifname "%s" fib daddr type { local, broadcast, multicast } jump deny
     iifname "%s" oifname "veth-*" jump deny
-`, table, nftPrefixSet(denied), config.HostNFLogGroup, veth, veth, layout.TransitNamespace, veth, veth, veth)
+`, table, nftPrefixSet(denied), config.HostNFLogGroup, HostDenialPrefix, veth, veth, layout.TransitNamespace, veth, veth, veth)
 	if config.Ready && config.Policy.Profile() == ProfileTransport {
 		fmt.Fprintf(&script, "    iifname \"%s\" ip daddr %s meta l4proto { tcp, udp } th dport 53 ct state new,established counter name accepted accept\n", veth, config.Policy.DNSUpstream())
 		fmt.Fprintf(&script, "    iifname \"%s\" tcp dport { %s } ct state new,established counter name accepted accept\n", veth, nftPorts(config.Policy.TCPPorts()))

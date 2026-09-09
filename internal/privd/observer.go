@@ -66,6 +66,49 @@ func (b *NetworkObserverBundle) Close() error {
 	b.Files = nil
 	return err
 }
+
+// EncodeObserverBinding renders a bundle's metadata for a process that will
+// receive the descriptors by inheritance. Files never appear: they travel as
+// descriptors, and the metadata alone is what the receiver re-checks them against.
+func EncodeObserverBinding(b *NetworkObserverBundle) ([]byte, error) {
+	if b == nil {
+		return nil, fmt.Errorf("missing observer bundle")
+	}
+	raw, err := json.Marshal(b)
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > MaxMsgBytes {
+		return nil, fmt.Errorf("observer metadata exceeds %d bytes", MaxMsgBytes)
+	}
+	return raw, nil
+}
+
+// DecodeObserverBinding decodes inherited observer metadata under the same
+// strict framing rules the acquisition reply uses, then checks the binding it
+// carries. The descriptors are validated separately, where the platform allows it.
+func DecodeObserverBinding(raw []byte) (*NetworkObserverBundle, error) {
+	var out NetworkObserverBundle
+	if err := decodeObserverJSON(raw, &out); err != nil {
+		return nil, err
+	}
+	if err := ValidateObserverBinding(&out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ValidateObserverBinding checks a bundle's metadata against itself: canonical
+// identity, a known policy and profile, and the exact three-socket order privd
+// guarantees. A process that did not perform the acquisition uses it to refuse
+// metadata no acquisition could have produced.
+func ValidateObserverBinding(b *NetworkObserverBundle) error {
+	if b == nil {
+		return fmt.Errorf("missing observer bundle")
+	}
+	return validateObserverMetadata(AcquireNetworkObserversReq{VMID: b.Binding.VMID, GuestBootID: b.Binding.GuestBootID}, b)
+}
+
 func observerUUID(value string) bool {
 	id, err := uuid.Parse(value)
 	return err == nil && id != uuid.Nil && id.String() == value

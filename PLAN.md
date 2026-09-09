@@ -639,3 +639,35 @@ Host kernel drift: aibox03 runs host kernel 6.8 (observed 6.8.0-138 at L0 close)
   activation, then remaining full-epic acceptance. All ten children and s8e2 stay
   open. The tracked introspection plan carries evidence and shipping limits;
   resume in a fresh turn after this reviewed checkpoint.
+
+- 2026-09-09 (s8e2 runner network collection checkpoint, compactions: 7) — Continued
+  from pushed observer/DNS checkpoint `9260ae8` on `vm-introspection-s8e2`.
+  Connected the acquired observer descriptors to bounded runner readers, the
+  spool and live coverage: the jailer adapter acquires observers from privd on
+  every launch and respawn and hands them to the runner over `ExtraFiles` with
+  either the binding or a bounded unavailable reason, never neither; the runner
+  adopts them, dups a set per reader generation, re-baselines with backoff and
+  never dials privd; status, health/loss events and the ctl reply feed
+  `/vms/{id}/coverage`. A refused acquisition reaches the API as unavailable
+  coverage carrying privd's reason. Independent review found one Critical and
+  four Important (the acquisition boundary counted as loss behind a hand-written
+  fixture; an exit-on-loss path that faked finalization on a live VMM); five fix
+  rounds and four scoped re-reviews closed them; the last approved the unit and
+  left two Minor test-coverage gaps parked under rulings, carried into the next
+  unit.
+  **Measured:** canonical `scripts/check` with a fresh lint cache passed every
+  round; aibox03 non-root runner, jailer, situation, cmd/vmobsd and events suites
+  ok; confined root runs passed 50 netobserve reader checks, seven privd observer
+  checks, both integration gates and the credential-dropped kernel pipeline (real
+  privd server, a uid-65534 runner receiving the descriptors, real denied
+  observations imported into SQLite by protocol, docker exit 0 each round). No
+  conntrack-confirmed flow exists yet because privd installs only the offline
+  profile. No live restart, deployment, browser or child acceptance is claimed.
+  `TestReconcileAdoptsHealthyVM` flaked once at TempDir cleanup; filed as `kvcn`.
+  **Next:** egress activation and namespace-bound managed DNS per
+  `.superpowers/sdd/egress-dns-unit-brief.md`: privd DNS socket acquisition and
+  activate/deactivate verbs, the runner's `dns` collector with fail-closed
+  listeners, the jailer activation supervisor, `policy.egress_*` events and a
+  two-guest KVM gate. The shipped `transport-public-web` policy file needs a real
+  public upstream, Doctor Biz's call, under `6wf7`. All ten children and s8e2
+  stay open; resume in a fresh turn after this checkpoint.

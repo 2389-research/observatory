@@ -60,6 +60,10 @@ type ledgerPrivd struct {
 	releases int
 }
 
+func (p *ledgerPrivd) AcquireNetworkObservers(context.Context, privd.AcquireNetworkObserversReq) (*privd.NetworkObserverBundle, error) {
+	return nil, errUnreachablePrivd
+}
+
 func (p *ledgerPrivd) AllocateNetwork(context.Context, privd.AllocateNetworkReq) error {
 	return errUnreachablePrivd
 }
@@ -422,6 +426,10 @@ func TestAFailedNetworkReleaseKeepsTheSlotLease(t *testing.T) {
 // netFailingPrivd releases the VM half and refuses the network half — the shape
 // of a netns teardown privd accepted responsibility for and could not finish.
 type netFailingPrivd struct{}
+
+func (*netFailingPrivd) AcquireNetworkObservers(context.Context, privd.AcquireNetworkObserversReq) (*privd.NetworkObserverBundle, error) {
+	return nil, errUnreachablePrivd
+}
 
 func (*netFailingPrivd) AllocateNetwork(context.Context, privd.AllocateNetworkReq) error {
 	return errUnreachablePrivd

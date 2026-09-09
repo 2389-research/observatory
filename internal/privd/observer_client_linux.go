@@ -90,6 +90,17 @@ func (c *Client) AcquireNetworkObservers(parent context.Context, req AcquireNetw
 	failed = false
 	return bundle, nil
 }
+
+// ValidateObserverDescriptors re-checks that the bundle's files are the exact
+// netlink sockets its metadata names. A process that received the descriptors by
+// inheritance rather than by acquisition proves the pairing with it.
+func ValidateObserverDescriptors(bundle *NetworkObserverBundle) error {
+	if err := ValidateObserverBinding(bundle); err != nil {
+		return err
+	}
+	return validateObserverFiles(bundle)
+}
+
 func validateObserverFiles(bundle *NetworkObserverBundle) error {
 	if len(bundle.Files) != 3 || len(bundle.Sockets) != 3 {
 		return fmt.Errorf("observer reply requires exactly three files")

@@ -87,6 +87,21 @@ func gatewayLifecycleChild(t *testing.T) {
 	if err := ops.ProbeNetworkContext(t.Context(), entry, req); err != nil {
 		t.Fatal("refused probe changed the live allocation:", err)
 	}
+	entry.NetworkComplete = true
+	observers, err := ops.AcquireNetworkObservers(t.Context(), entry, privd.AcquireNetworkObserversReq{VMID: entry.VMID, GuestBootID: req.GuestBootID})
+	if err != nil {
+		t.Fatal("acquire actual observers under shipped confinement:", err)
+	}
+	t.Cleanup(func() { _ = observers.Close() })
+	if observers.Binding.VMID != entry.VMID || observers.Binding.GuestBootID != req.GuestBootID || observers.Binding.GatewayGeneration != entry.GatewayGeneration || len(observers.Files) != 3 {
+		t.Fatalf("observer ownership differs from the confined gateway: %+v", observers.Binding)
+	}
+	if err := ops.ReleaseNetworkContext(t.Context(), entry); err == nil {
+		t.Fatal("released a confined gateway's group while its observer still owns it")
+	}
+	if err := observers.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if err := ops.ReleaseNetworkContext(t.Context(), entry); err != nil {
 		t.Fatal(err)
 	}
@@ -96,5 +111,5 @@ func gatewayLifecycleChild(t *testing.T) {
 	if _, err := net.InterfaceByName(network.VethName(entry.VMID)); err == nil {
 		t.Fatal("host veth remains after release")
 	}
-	t.Log("actual closed gateway allocation, boot-bound probe and verified teardown passed")
+	t.Log("actual closed gateway allocation, boot-bound observer acquisition and retained-reader teardown checks passed")
 }

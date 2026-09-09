@@ -137,6 +137,10 @@ type reclaimingPrivd struct {
 	releases int
 }
 
+func (p *reclaimingPrivd) AcquireNetworkObservers(context.Context, privd.AcquireNetworkObserversReq) (*privd.NetworkObserverBundle, error) {
+	return nil, errUnreachablePrivd
+}
+
 func (p *reclaimingPrivd) AllocateNetwork(context.Context, privd.AllocateNetworkReq) error {
 	return errUnreachablePrivd
 }
@@ -194,6 +198,10 @@ type deadlineRecordingPrivd struct {
 	signalCalled      bool
 	signalHadDeadline bool
 	signalBudget      time.Duration
+}
+
+func (p *deadlineRecordingPrivd) AcquireNetworkObservers(context.Context, privd.AcquireNetworkObserversReq) (*privd.NetworkObserverBundle, error) {
+	return nil, errUnreachablePrivd
 }
 
 func (p *deadlineRecordingPrivd) AllocateNetwork(context.Context, privd.AllocateNetworkReq) error {

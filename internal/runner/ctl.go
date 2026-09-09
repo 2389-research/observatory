@@ -30,6 +30,7 @@ type CtlRequest struct {
 
 // CtlReply is the answer to one CtlRequest.
 type CtlReply struct {
+	Network  *NetworkStatus    `json:"network,omitempty"`
 	OK       bool              `json:"ok"`
 	Error    string            `json:"error,omitempty"`
 	Terminal *TerminalCtlReply `json:"terminal,omitempty"`
@@ -38,8 +39,9 @@ type CtlReply struct {
 // CtlHandlers are the commands a ctl server can serve. A nil handler answers
 // "not available" rather than failing the connection.
 type CtlHandlers struct {
-	Shutdown func(graceS int) error
-	Finalize func() error
+	NetworkStatus func() NetworkStatus
+	Shutdown      func(graceS int) error
+	Finalize      func() error
 
 	TerminalCreate func(context.Context, TerminalCtlRequest) (TerminalCtlReply, error)
 	TerminalClose  func(context.Context, TerminalCtlRequest) (TerminalCtlReply, error)
@@ -117,6 +119,13 @@ func (s *CtlServer) handle(ctx context.Context, conn net.Conn) {
 
 	var reply CtlReply
 	switch req.Cmd {
+	case "network-status":
+		if s.h.NetworkStatus == nil {
+			reply = CtlReply{Error: "network-status not available"}
+		} else {
+			status := s.h.NetworkStatus()
+			reply = CtlReply{OK: true, Network: &status}
+		}
 	case "shutdown_guest":
 		if s.h.Shutdown == nil {
 			reply = CtlReply{OK: false, Error: "shutdown not available"}
@@ -290,7 +299,11 @@ func (c *CtlClient) send(ctx context.Context, req CtlRequest) (CtlReply, *json.D
 	if err := json.NewEncoder(c.conn).Encode(req); err != nil {
 		return CtlReply{}, nil, fmt.Errorf("encode %s: %w", req.Cmd, err)
 	}
-	dec := json.NewDecoder(c.conn)
+	var response io.Reader = c.conn
+	if req.Cmd == "network-status" {
+		response = io.LimitReader(c.conn, 32*1024)
+	}
+	dec := json.NewDecoder(response)
 	var reply CtlReply
 	if err := dec.Decode(&reply); err != nil {
 		return CtlReply{}, nil, fmt.Errorf("decode %s reply: %w", req.Cmd, err)

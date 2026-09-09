@@ -222,6 +222,28 @@ func managerConfig(cfg *config.Config, tpls map[string]runtime.Template, host ru
 	}
 }
 
+func wireHostCoverage(engine *situation.Engine, source situation.HostCoverageSource) {
+	engine.SetHostCoverageSource(source)
+}
+
+// installFirecrackerRuntime puts a built jailer adapter into service. Installing
+// it as the engine's host coverage source is part of installation, not a step a
+// caller can forget: a served host must never answer host coverage from anything
+// but the adapter that owns the VMs. Reconciliation runs here too, because its
+// findings have to be in hand before the manager is built.
+func installFirecrackerRuntime(ctx context.Context, eng *situation.Engine, adapter runtime.Runtime) (runtime.Runtime, []jailer.Finding, error) {
+	jAdapter, ok := adapter.(*jailer.Adapter)
+	if !ok {
+		return adapter, nil, nil
+	}
+	wireHostCoverage(eng, jAdapter)
+	findings, err := jAdapter.Reconcile(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("adapter reconcile at startup: %w", err)
+	}
+	return adapter, findings, nil
+}
+
 // preflightConfig builds the doctor's config from the daemon config. PrivdSocket
 // and StageRoot must come from the same fields the jailer adapter launches with,
 // or the doctor reports a host it never looked at. LockPath is that same rule
@@ -381,14 +403,11 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger, ready f
 		// Reconcile adapter at startup: classify all known VM jail dirs.
 		// Must happen before the manager is created so findings are available
 		// when we call mgr.NotifyVMMExit after manager construction.
-		if jAdapter, ok := adapter.(*jailer.Adapter); ok {
-			adapterFindings, err = jAdapter.Reconcile(ctx)
-			if err != nil {
-				return fmt.Errorf("adapter reconcile at startup: %w", err)
-			}
-			logger.Info("adapter reconcile complete", "findings", len(adapterFindings))
+		rt, adapterFindings, err = installFirecrackerRuntime(ctx, eng, adapter)
+		if err != nil {
+			return err
 		}
-		rt = adapter
+		logger.Info("adapter reconcile complete", "findings", len(adapterFindings))
 	default:
 		// "unavailable": keep the existing ForHost path unchanged.
 		rt = runtime.ForHost(func() string {

@@ -968,3 +968,26 @@ hides the problem. The older privd recording-backend tests derive jail UID from
 the test user and fail as root on UID zero, including at baseline `c3e6f77`.
 The full suite runs as the gate's non-root user; privileged components run with
 their explicit opt-in flags and real kernel resources.
+
+## A skipped privileged test exits 0
+
+The confined kernel tests each gate on their own opt-in variable:
+`TestNetworkRunnerKernelPipeline` on `VMOBS_RUNNER_NETWORK_TEST=1`, the
+netlink reader checks on `VMOBS_NETLINK_READER_TEST=1`. A docker run that sets
+only one of them prints `--- SKIP` for the other and the container still exits
+0, which reads exactly like a pass at the summary line. Accept a confined run
+only on its `--- PASS: <test name>` line, never on the exit status.
+
+## A fixture that stamps a timestamp, then waits, tests the clock
+
+The jailer coverage gate refuses a runner status older than 3 s. The Linux
+coverage fixture used to stamp `UpdatedAt` before spawning a helper that
+rebuilds `vmobs-runner` and waits up to 30 s for the ctl socket, so a cold
+build cache failed the tests with "timestamp is stale", which reads exactly like
+a regression. Stamp at serve time, the way the runner itself re-stamps.
+
+The same fixture taught a second lesson. Two tests there accepted any error at
+all. Staleness never reached them -- the peer and instance refusals are raised
+before the freshness gate -- but killing the helper made them pass on a dial
+failure, green without ever running the check they name. Assert the refusal
+text, never just `err != nil`.

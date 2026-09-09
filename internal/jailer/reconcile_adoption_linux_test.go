@@ -132,7 +132,6 @@ func adoptionFixture(t *testing.T, vmID string, m jailer.Manifest, s runner.Stat
 		RunnerBin:   filepath.Join(dir, "no-such-runner"),
 		RepoRoot:    filepath.Join(dir, "images"),
 		LockPath:    filepath.Join(dir, "lock.json"),
-		PrivdSocket: filepath.Join(dir, "privd.sock"),
 		JailUIDBase: os.Getuid(),
 		JailGID:     os.Getgid(),
 		MaxSlots:    8,
@@ -142,7 +141,7 @@ func adoptionFixture(t *testing.T, vmID string, m jailer.Manifest, s runner.Stat
 			return preflight.Report{Overall: preflight.StatusPass}
 		},
 	}
-	a, err := jailer.New(cfg, &privd.Client{SocketPath: cfg.PrivdSocket})
+	a, err := jailer.New(cfg, &privd.Client{SocketPath: filepath.Join(dir, "privd.sock")})
 	if err != nil {
 		t.Fatalf("jailer.New: %v", err)
 	}

@@ -41,7 +41,7 @@ Read every numbered acceptance requirement back from Kata and match it to source
 
 ## Session state
 
-2026-09-08: goal started on main `7739dec`; all ten children and epic remain open. Branch: `vm-introspection-s8e2`. Filesystem checkpoint `c663d0e`, process/network prerequisite checkpoint `fcc5818` and gateway checkpoint `c3e6f77` are pushed. Observer acquisition and managed DNS checkpoint evidence follows. No deployment or child completion claimed. Compaction count: 6; resume in a fresh turn after saving this checkpoint.
+2026-09-08: goal started on main `7739dec`; all ten children and epic remain open. Branch: `vm-introspection-s8e2`. Filesystem checkpoint `c663d0e`, process/network prerequisite checkpoint `fcc5818`, gateway checkpoint `c3e6f77` and observer/DNS checkpoint `9260ae8` are pushed. Runner network collection checkpoint evidence (2026-09-09) follows below. No deployment or child completion claimed. Compaction count: 7; resume in a fresh turn after saving this checkpoint.
 
 ## Filesystem checkpoint evidence — 2026-09-08
 
@@ -194,17 +194,105 @@ All ten Kata contracts remain open. Process capture still lacks UID/GID, executa
   (`observer-root-uid-baseline.log`). That existing fixture limitation is not
   evidence against or a substitute for the passing real privileged components.
 
+## Runner network collection checkpoint — 2026-09-09
+
+- The jailer adapter is privd's client of record for network observers. On
+  every launch and respawn it calls `AcquireNetworkObservers` for the VM and
+  guest boot, hands the three validated AF_NETLINK descriptors to the runner
+  through `ExtraFiles` from fd 3, and passes either `--network-observers`
+  (the binding) or a bounded `--network-unavailable-reason`, never neither.
+  The runner adopts the descriptors (restores close-on-exec, validates the
+  socket properties), keeps the masters for its lifetime, dups a fresh set per
+  reader generation, re-baselines on the same sockets after failures with
+  backoff to 30 s, and never dials privd. A refused acquisition never blocks a
+  launch; it becomes durable unavailable coverage carrying the reason.
+- The acquisition boundary is a declared scope limitation ("observation began
+  at …; earlier traffic unobserved"), not a counted unknown interval. The first
+  independent review caught the opposite: every collector reported permanent
+  degraded loss, hidden by a hand-written fixture. Coverage fixtures are now
+  built from the runner's own status functions.
+- Runner status, `net.collector.health`/`net.collector.loss` events and the
+  runner ctl `network-status` reply feed `Adapter.Coverage`, the situation
+  host coverage source and `/vms/{id}/coverage`. Counts are bounded at the
+  JSON-safe limit; untracked flow identities and unsupported families are
+  their own limitations, not packet loss.
+- Evidence: canonical `scripts/check` with a fresh lint cache
+  (`runner-network-fix{1,2,3,4,5,5b}-check-macos.log`, exit 0); aibox03
+  non-root runner, jailer, cmd/vmobsd, situation, events, privd, network and
+  netobserve suites (`runner-network-fix{1,2,3}-linux-nonroot.log`; rounds 4,
+  5 and 5b re-ran the runner, jailer, situation, cmd/vmobsd and events suites,
+  `runner-network-fix{4,5,5b}-linux-nonroot.log`); confined root runs:
+  50 netobserve reader checks including the credential-dropped reader
+  (`runner-network-fix1-netobserve-confined.log`), the production-shaped
+  `TestNetworkRunnerKernelPipeline` — real privd server, uid-65534 child
+  receives the descriptors, six real denied observations imported into SQLite
+  by protocol, unknown intervals "0" with a declared observation start, dup
+  independence, respawn re-acquisition
+  (`runner-network-fix{1,2,3,4}-runner-pipeline.log`, docker exit 0), seven privd
+  observer checks (`runner-network-fix1-privd-observer.log`) and the two
+  integration gates (`runner-network-fix1-integration-gate.log`). RED logs are
+  retained per fix round.
+- Reviews: first independent review (`runner-network-review-report.md`, one
+  Critical, four Important, nine Minor) → two fix rounds → scoped re-review
+  (`runner-network-fix-review-report.md`: spec compliance met, two Important,
+  four Minor) → fix round 3 → scoped re-review
+  (`runner-network-fix3-review-report.md`: all six fixed; one Important — the
+  never-acquired runner status carried no acquisition identity, so the coverage
+  gate refused it with a wrong cause and the refusal reason never reached the
+  API — and three Minor) → fix round 4 → scoped re-review
+  (`runner-network-fix4-review-report.md`: all four fixed; three Minor — an
+  untested refusal clause, a fixture staleness race, a limitation worded as a
+  boot-wide verdict) → fix round 5 with an in-round follow-up that made two adapter tests
+  assert the refusal they prove → scoped re-review
+  (`runner-network-fix5-review-report.md`: spec met, quality approved, all
+  three fixed, the follow-up's RED real; two Minor parked at the round-5
+  breaker with rulings — the adapter's live-path freshness gate has no
+  stale-status test, and the status-identity clause pins one of seven
+  fields — both carried into the egress/DNS unit's jailer sub-unit).
+- Declared limits: no conntrack-confirmed `net.flow.observed` exists yet
+  because privd installs only the offline profile
+  (`internal/privd/gateway_lifecycle_linux.go:302` pins `Ready: false`); the
+  kernel test asserts that absence and names the condition that flips it.
+  Acquisition failure at launch recovers only by runner respawn or VM restart.
+  Strict/`require_telemetry` reaction is not built. Wiring is tested through
+  `installFirecrackerRuntime`, not `serve()`. The adapter's freshness gate is
+  proven only through `coverageFromNetworkStatus`; no live test serves a
+  stale runner status yet. Jailer suite runs ~79 s.
+
 ### Next execution unit and shipping limits
 
-Connect these descriptors to bounded runner readers and the existing spool.
-Validate each conntrack message's sequence and matching successful DONE before
-reporting a baseline; keep snapshot observations distinct from observed starts.
-Bind denial groups and prefixes to policy. Reserve health/loss capacity outside
-flow queues and expose current source health even when persistence fails.
+Egress activation and namespace-bound managed DNS (kata `1m87`, `kygy`,
+`nwcg`); the brief is `.superpowers/sdd/egress-dns-unit-brief.md`, the ground
+map `.superpowers/sdd/dns-activation-map.md`. The generated gateway rules
+already assume the resolver sits inside the VM gateway namespace at the guest
+gateway address, so DNS sockets ride the existing observer acquisition: for a
+transport VM privd also opens the UDP and TCP listeners on the gateway address,
+one upstream UDP socket and a bounded pool of upstream TCP sockets inside the
+namespace, all under the same acquisition id. Activation is two typed privd
+mutations that reinstall the ruleset with `Ready` true or false once the
+ownership marker, topology digest and current acquisition match the request.
+The jailer adapter is the activation client of record: it activates only when
+the runner reports flow, both denial collectors and the `dns` collector healthy
+under the acquisition it handed over, and deactivates when the runner exits,
+reports another acquisition or reports `dns` unavailable. Transient reader
+failures that re-baseline stay measured loss with egress open; strict mode is
+not built and coverage says so. The runner runs the managed DNS worker as its
+fourth collector, emits `dns.query` through the same spool, and on worker exit
+closes the listeners so guest queries fail fast with no alternate upstream.
+`policy.egress_activated` and `policy.egress_closed` are registered before
+emission; the manifest holds the last confirmed egress state.
 
-Then supply namespace-bound DNS adapters, bind activation to collector readiness
-and durable evidence, and close egress on loss of that ownership. Finish network
-UI/correlation, final disk diffs, explicit HTTP inspection, guest-image rebuild,
-publication and the full two-VM acceptance. The current work does not establish
-shipped confinement for the new handoff or deliver network events to the live
-appliance. No live restart, deployment or host policy change occurred.
+Sub-units in order: U1 privd (transport accepted, DNS acquisition, the
+activate/deactivate verbs, confined root rule-digest tests); U2 runner and
+jailer (worker, activation supervisor, coverage `dns` seam, a confined pipeline
+pass that produces a conntrack-confirmed `net.flow.observed` and a fail-closed
+denial after a worker kill); U3 a two-guest KVM gate under transport.
+Controlled fixtures sit on a public-classified address the gate host routes
+locally.
+
+Shipping limits: no policy file ships in the image although `deploy/config.yaml`
+names `transport-public-web`, so the deployed appliance cannot launch a VM from
+this branch until one lands with a real public upstream, a product choice for
+Doctor Biz that lands under `6wf7`. Then network UI/correlation, final disk
+diffs, explicit HTTP inspection, guest-image rebuild, publication and the full
+two-VM acceptance. No live restart, deployment or host policy change occurred.

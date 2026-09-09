@@ -264,3 +264,22 @@ func assertDenyOrder(t *testing.T, script string) {
 	t.Helper()
 	assertOrder(t, script, `counter name denied`, `limit rate 10/second burst 20 packets log group `, `drop`)
 }
+
+// The runner binds its NFLOG readers to these exact prefixes: a record whose
+// prefix is not in the binding is rejected as malformed, so the rendered policy
+// and the reader must read the same constants.
+func TestDenialLogPrefixesAreExportedForReaders(t *testing.T) {
+	input := gatewayInput(t, network.ProfileOffline, false)
+	rules, err := network.BuildGatewayRules(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, prefix := range []string{network.NamespaceDenialPrefix, network.NamespaceIngressDenialPrefix} {
+		if !strings.Contains(rules.NamespaceScript, `prefix "`+prefix+`"`) {
+			t.Fatalf("namespace rules never log %q", prefix)
+		}
+	}
+	if !strings.Contains(rules.HostScript, `prefix "`+network.HostDenialPrefix+`"`) {
+		t.Fatalf("host rules never log %q", network.HostDenialPrefix)
+	}
+}

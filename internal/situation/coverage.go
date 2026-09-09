@@ -19,7 +19,15 @@ const (
 	CoverageStarting    = "starting"
 	CoverageHealthy     = "healthy"
 	CoverageDegraded    = "degraded"
-	maxSafeJSONInteger  = float64(1<<53 - 1)
+	// MaxSafeCoverageCount is the largest integer a JSON number carries exactly.
+	// Every coverage count crossing the API is refused above it rather than rounded.
+	MaxSafeCoverageCount int64 = 1<<53 - 1
+	maxSafeJSONInteger         = float64(MaxSafeCoverageCount)
+	// maxHostFailureReasonBytes bounds the source diagnosis a coverage record
+	// republishes: the reason crosses the API and no source error is trusted
+	// short. The prefix is outside this budget, so a source reason already
+	// bounded to the same number arrives whole.
+	maxHostFailureReasonBytes = 256
 )
 
 var guestCollectorIDs = []string{"filesystem", "process"}
@@ -94,6 +102,10 @@ func (e *Engine) VMCoverage(ctx context.Context, vm *store.VM) (Coverage, error)
 	}
 	if result.Channel.State == TelemetryDegraded {
 		degradeCollectorsForChannel(result.Collectors)
+	}
+	vmImport, allImport := e.ImporterStatus(vm.VMID), e.ImporterStatus("")
+	if vmImport.State == "degraded" || allImport.State == "degraded" {
+		degradeCollectorsForImport(result.Collectors)
 	}
 	result.Gaps = coverageGaps(result.Channel, result.Collectors)
 	return result, nil
@@ -244,11 +256,18 @@ func applyHostCoverage(collectors []CollectorCoverage, records []CollectorCovera
 	}
 }
 
-func markHostFailure(collectors []CollectorCoverage, _ error) {
+// markHostFailure republishes the diagnosis the source already computed. The
+// generic sentence alone cannot tell a refused acquisition from a dead control
+// socket, and only the source knows which one it was.
+func markHostFailure(collectors []CollectorCoverage, err error) {
+	reason := "host coverage source unavailable"
+	if err != nil {
+		reason += ": " + events.BoundString(err.Error(), maxHostFailureReasonBytes)
+	}
 	for i := range collectors {
 		if slices.Contains(hostCollectorIDs, collectors[i].ID) && collectors[i].Enabled {
 			collectors[i].State = CoverageUnavailable
-			collectors[i].Reason = "host coverage source unavailable"
+			collectors[i].Reason = reason
 		}
 	}
 }
@@ -258,6 +277,15 @@ func degradeCollectorsForChannel(collectors []CollectorCoverage) {
 		if slices.Contains(guestCollectorIDs, collectors[i].ID) && collectors[i].State == CoverageHealthy {
 			collectors[i].State = CoverageDegraded
 			collectors[i].Reason = "capture transport is degraded"
+		}
+	}
+}
+
+func degradeCollectorsForImport(collectors []CollectorCoverage) {
+	for i := range collectors {
+		if collectors[i].State == CoverageHealthy {
+			collectors[i].State = CoverageDegraded
+			collectors[i].Reason = "capture delivery is degraded"
 		}
 	}
 }

@@ -18,6 +18,17 @@ type KindInfo struct {
 // registry grows only alongside the code that emits each kind. Ingress rejects
 // kinds absent from this table (SPEC §17: unregistered event kind).
 var registry = []KindInfo{
+	{Kind: "net.collector.health", Family: "net.collector", SchemaVersion: 1, Provenance: HostObserved, Semantics: "Host network collector readiness and durable ingestion health at one acquired boundary."},
+	{
+		Kind: "net.collector.loss", Family: "net.collector", SchemaVersion: 1, Provenance: HostObserved,
+		Semantics: "Measured observation drops or unknown host network capture intervals; forgotten tracker entries are separate from capture loss.",
+		Caveats: []string{
+			"count_semantics names which of two payload shapes the record carries.",
+			"count_semantics \"cumulative_for_source_acquisition\": one collector object whose dropped_count and unknown_intervals are running totals for that source acquisition, not a delta.",
+			"count_semantics \"single_observation\": loss_class_count with a bounded losses array, counting only the observation that carried them.",
+			"Counts are of observations and kernel records, never of packets.",
+		},
+	},
 	{
 		Kind: "proc.fork", Family: "proc", SchemaVersion: 1, Provenance: GuestReported,
 		Semantics: "A guest kernel task was created, with its process lifetime and reported parent identity.",
@@ -399,17 +410,15 @@ var registry = []KindInfo{
 			"count of lost records is not claimed — an unknown interval is reported, not invented",
 		},
 	},
-	// net.flow, dns, and policy families: reserved for the network inspection
-	// subsystem (L1). Registered now so run-report reproduce_queries are valid
-	// today (zero counts are honest); actual ingress awaits the network emitter.
+	// Host network evidence uses acquired boundary identities; DNS awaits its adapter.
 	{
 		Kind:          "net.flow.observed",
 		Family:        "net.flow",
 		SchemaVersion: 1,
 		Provenance:    HostObserved,
-		Semantics:     "A network flow was observed for the VM. Reserved for the network inspection subsystem; not yet emitted in this build.",
+		Semantics:     "An IPv4 conntrack observation was received at the acquired VM gateway boundary.",
 		Caveats: []string{
-			"not emitted in the portable core; queries return zero results until the network subsystem lands",
+			"NEW does not establish TCP completion; reply tuple is not a guessed translated tuple; flow lifetime and process attribution remain unknown",
 		},
 	},
 	{
@@ -427,9 +436,9 @@ var registry = []KindInfo{
 		Family:        "policy",
 		SchemaVersion: 1,
 		Provenance:    HostObserved,
-		Semantics:     "A network policy denial was observed for the VM. Reserved for the network inspection subsystem; not yet emitted in this build.",
+		Semantics:     "An NFLOG record matched the acquired boundary group and an installed policy denial prefix.",
 		Caveats: []string{
-			"not emitted in the portable core; queries return zero results until the network subsystem lands",
+			"NFLOG is rate limited; retained records are not aggregate firewall counters and packet tuple fields may be absent",
 		},
 	},
 	{

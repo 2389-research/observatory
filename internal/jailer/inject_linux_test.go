@@ -47,6 +47,14 @@ func (f *failingPrivd) NetworkLeases(ctx context.Context) (map[string]string, er
 	}).NetworkLeases(ctx)
 }
 
+func (f *failingPrivd) AcquireNetworkObservers(ctx context.Context, req privd.AcquireNetworkObserversReq) (*privd.NetworkObserverBundle, error) {
+	f.calls = append(f.calls, "acquire_network_observers")
+	if f.failOn == "acquire_network_observers" {
+		return nil, &privd.RemoteError{Cause: "exec_failed", Message: "injected"}
+	}
+	return f.inner.AcquireNetworkObservers(ctx, req)
+}
+
 func (f *failingPrivd) AllocateNetwork(ctx context.Context, req privd.AllocateNetworkReq) error {
 	f.calls = append(f.calls, "allocate_network")
 	if f.failOn == "allocate_network" {
@@ -150,7 +158,6 @@ func buildInjectHarness(
 		MaxSlots:      8,
 		CIDBase:       cidBase,
 		Allocator:     pool,
-		PrivdSocket:   privdSock,
 		AttachTimeout: attachTimeout,
 		Preflight: func(ctx context.Context, refresh bool) preflight.Report {
 			return preflight.Report{Overall: preflight.StatusPass}
@@ -556,12 +563,11 @@ func launchWriteFailHelper() int {
 		MaxSlots:    8,
 		CIDBase:     cidBase,
 		Allocator:   pool,
-		PrivdSocket: get("PRIVD_SOCK"),
 		Preflight: func(ctx context.Context, refresh bool) preflight.Report {
 			return preflight.Report{Overall: preflight.StatusPass}
 		},
 	}
-	adapter, err := jailer.New(cfg, &privd.Client{SocketPath: cfg.PrivdSocket})
+	adapter, err := jailer.New(cfg, &privd.Client{SocketPath: get("PRIVD_SOCK")})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "helper: jailer.New: %v\n", err)
 		return 2
@@ -926,7 +932,6 @@ func TestInject(t *testing.T) {
 			MaxSlots:    8,
 			CIDBase:     h.cidBase,
 			Allocator:   h.pool,
-			PrivdSocket: h.privdSock,
 			Preflight: func(ctx context.Context, refresh bool) preflight.Report {
 				return preflight.Report{Overall: preflight.StatusPass}
 			},
@@ -942,7 +947,8 @@ func TestInject(t *testing.T) {
 		_, launchErr := brokenAdapter.Launch(ctx, defaultSpec(vmID))
 		assertCleanup(t, h, vmID, "runner_spawned", launchErr)
 
-		// Exact call sequence: allocate_network+start_vm succeed; runner exec.Start() fails.
+		// Exact call sequence: allocate_network+start_vm succeed; the adapter acquires
+		// this VM's network observers, then runner exec.Start() fails.
 		// doRollback sees stageSet[runner_spawned]=false (manifest never updated, exec.Start failed),
 		// stageSet[vmm_started]=true → signal_vm/term, 2s sleep, signal_vm/kill, release_vm.
 		// stageSet[network]=true → release_network.
@@ -952,6 +958,7 @@ func TestInject(t *testing.T) {
 		wantCalls8 := []string{
 			"allocate_network",
 			"start_vm",
+			"acquire_network_observers",
 			"signal_vm/term",
 			"signal_vm/kill",
 			"release_vm",
@@ -1035,7 +1042,8 @@ func TestInject(t *testing.T) {
 		}
 		t.Logf("got expected timeout error: %v", launchErr)
 
-		// Exact call sequence: allocate_network+start_vm succeed; runner spawns and attaches timeout.
+		// Exact call sequence: allocate_network+start_vm succeed; the adapter acquires
+		// this VM's network observers, and the runner spawns and attaches timeout.
 		// doRollback sees stageSet[runner_spawned]=true → killRunnerByPID (OS signal, not a privd call).
 		// stageSet[vmm_started]=true → signal_vm/term + signal_vm/kill + release_vm.
 		// stageSet[network]=true → release_network.
@@ -1043,6 +1051,7 @@ func TestInject(t *testing.T) {
 		wantCalls9 := []string{
 			"allocate_network",
 			"start_vm",
+			"acquire_network_observers",
 			"signal_vm/term",
 			"signal_vm/kill",
 			"release_vm",
@@ -1094,7 +1103,6 @@ func TestRollbackRetriesReleaseVM(t *testing.T) {
 		MaxSlots:    8,
 		CIDBase:     h.cidBase,
 		Allocator:   h.pool,
-		PrivdSocket: h.privdSock,
 		Preflight: func(ctx context.Context, refresh bool) preflight.Report {
 			return preflight.Report{Overall: preflight.StatusPass}
 		},

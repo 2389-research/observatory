@@ -93,7 +93,6 @@ func makeStopHarnessWrapped(t *testing.T, wrap func(jailer.PrivdClient) jailer.P
 		MaxSlots:    8,
 		CIDBase:     4,
 		Allocator:   pool,
-		PrivdSocket: privdSock,
 		Preflight: func(ctx context.Context, refresh bool) preflight.Report {
 			return preflight.Report{Overall: preflight.StatusPass}
 		},
@@ -588,7 +587,6 @@ func TestReconcileVMMGone(t *testing.T) {
 		RunnerBin:   runnerBin,
 		RepoRoot:    filepath.Join(dir, "images"), // won't be used in Reconcile
 		LockPath:    filepath.Join(dir, "lock.json"),
-		PrivdSocket: filepath.Join(dir, "privd.sock"), // non-existent — reconcile shouldn't call privd
 		JailUIDBase: os.Getuid(),
 		JailGID:     os.Getgid(),
 		MaxSlots:    8,
@@ -599,7 +597,7 @@ func TestReconcileVMMGone(t *testing.T) {
 		},
 	}
 
-	fakePc := &privd.Client{SocketPath: cfg.PrivdSocket}
+	fakePc := &privd.Client{SocketPath: filepath.Join(dir, "privd.sock")}
 	adapter, err := jailer.New(cfg, fakePc)
 	if err != nil {
 		t.Fatalf("jailer.New: %v", err)
@@ -657,7 +655,6 @@ func TestReconcileAmbiguousUnreadableManifest(t *testing.T) {
 		RunnerBin:   runnerBin,
 		RepoRoot:    filepath.Join(dir, "images"),
 		LockPath:    filepath.Join(dir, "lock.json"),
-		PrivdSocket: filepath.Join(dir, "privd.sock"),
 		JailUIDBase: os.Getuid(),
 		JailGID:     os.Getgid(),
 		MaxSlots:    8,
@@ -668,7 +665,7 @@ func TestReconcileAmbiguousUnreadableManifest(t *testing.T) {
 		},
 	}
 
-	fakePc := &privd.Client{SocketPath: cfg.PrivdSocket}
+	fakePc := &privd.Client{SocketPath: filepath.Join(dir, "privd.sock")}
 	adapter, err := jailer.New(cfg, fakePc)
 	if err != nil {
 		t.Fatalf("jailer.New: %v", err)
@@ -710,13 +707,12 @@ func TestAvailabilityPassWhenPreflightPasses(t *testing.T) {
 		StateDir: t.TempDir(), StageRoot: t.TempDir(), JailBase: t.TempDir(),
 		SpoolRoot: t.TempDir(), RunnerBin: runnerBin, RepoRoot: t.TempDir(),
 		LockPath: filepath.Join(t.TempDir(), "lock.json"), MaxSlots: 1,
-		PrivdSocket: filepath.Join(t.TempDir(), "p.sock"),
-		Allocator:   pool,
+		Allocator: pool,
 		Preflight: func(ctx context.Context, _ bool) preflight.Report {
 			return preflight.Report{Overall: preflight.StatusPass}
 		},
 	}
-	pc := &privd.Client{SocketPath: cfg.PrivdSocket}
+	pc := &privd.Client{SocketPath: filepath.Join(t.TempDir(), "p.sock")}
 	a, err := jailer.New(cfg, pc)
 	if err != nil {
 		t.Fatal(err)
@@ -732,8 +728,7 @@ func TestAvailabilityFailSurfacesFirstFailingCheck(t *testing.T) {
 		StateDir: t.TempDir(), StageRoot: t.TempDir(), JailBase: t.TempDir(),
 		SpoolRoot: t.TempDir(), RunnerBin: runnerBin, RepoRoot: t.TempDir(),
 		LockPath: filepath.Join(t.TempDir(), "lock.json"), MaxSlots: 1,
-		PrivdSocket: filepath.Join(t.TempDir(), "p.sock"),
-		Allocator:   pool,
+		Allocator: pool,
 		Preflight: func(ctx context.Context, _ bool) preflight.Report {
 			return preflight.Report{
 				Overall: preflight.StatusFail,
@@ -744,7 +739,7 @@ func TestAvailabilityFailSurfacesFirstFailingCheck(t *testing.T) {
 			}
 		},
 	}
-	pc := &privd.Client{SocketPath: cfg.PrivdSocket}
+	pc := &privd.Client{SocketPath: filepath.Join(t.TempDir(), "p.sock")}
 	a, err := jailer.New(cfg, pc)
 	if err != nil {
 		t.Fatal(err)

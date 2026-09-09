@@ -111,7 +111,6 @@ func buildFirecrackerRuntime(
 		RunnerBin:   runnerBin,
 		RepoRoot:    cfg.Runtime.ArtifactRoot(),
 		LockPath:    cfg.Runtime.LockFile,
-		PrivdSocket: cfg.Paths.PrivilegedSocket,
 		JailUIDBase: cfg.Runtime.JailUIDBase,
 		JailGID:     cfg.Runtime.JailGID,
 		MaxSlots:    maxSlotsWiring,

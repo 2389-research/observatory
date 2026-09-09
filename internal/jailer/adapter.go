@@ -20,6 +20,7 @@ import (
 // The AT-005 seam: Task 13 injects failures through this interface.
 // The real *privd.Client satisfies this interface.
 type privdClient interface {
+	AcquireNetworkObservers(ctx context.Context, req privd.AcquireNetworkObserversReq) (*privd.NetworkObserverBundle, error)
 	AllocateNetwork(ctx context.Context, req privd.AllocateNetworkReq) error
 	ReleaseNetwork(ctx context.Context, req privd.ReleaseNetworkReq) error
 	StartVM(ctx context.Context, req privd.StartVMReq) (privd.StartVMResp, error)
@@ -36,10 +37,6 @@ type Config struct {
 	RunnerBin string // absolute path to the vmobs-runner binary
 	RepoRoot  string // directory the lock's artifact paths resolve against (the runtime lock file's own directory — config.Runtime.ArtifactRoot())
 	LockPath  string // path to runtime.lock.json
-
-	// PrivdSocket is the path to the vmobs-privd unix socket. Used by the
-	// guest_channel preflight check (connect + close with a 1s timeout).
-	PrivdSocket string
 
 	JailUIDBase int    // UID = JailUIDBase + Slot
 	JailGID     int    // shared GID for all jail processes

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 var (
@@ -22,6 +23,20 @@ func DecimalString(s string) bool { return decimalPattern.MatchString(s) }
 
 // UUIDString reports whether s is a lowercase RFC 4122 textual UUID.
 func UUIDString(s string) bool { return uuidPattern.MatchString(s) }
+
+// BoundString truncates s to at most max bytes, cutting only at a rune boundary.
+// Every bounded string here is published as JSON, and slicing through a
+// multi-byte rune hands json.Marshal invalid UTF-8, which it silently replaces
+// with U+FFFD: a bounded reason must stay readable, not arrive corrupted.
+func BoundString(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	for max > 0 && !utf8.RuneStart(s[max]) {
+		max--
+	}
+	return s[:max]
+}
 
 // ValidationError lists every rule an envelope broke, for structured error details.
 type ValidationError struct {

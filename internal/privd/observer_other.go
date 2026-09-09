@@ -15,6 +15,9 @@ import (
 func (c *Client) AcquireNetworkObservers(context.Context, AcquireNetworkObserversReq) (*NetworkObserverBundle, error) {
 	return nil, fmt.Errorf("network observers require Linux")
 }
+func ValidateObserverDescriptors(*NetworkObserverBundle) error {
+	return fmt.Errorf("network observers require Linux")
+}
 func (s *Server) handleObserverConn(conn *net.UnixConn, _ Request, _ json.RawMessage, framing time.Duration) {
 	_ = conn.SetWriteDeadline(time.Now().Add(framing))
 	_ = WriteMsg(conn, errResp("unsupported", "network observers require Linux"))

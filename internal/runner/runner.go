@@ -15,6 +15,7 @@ import (
 
 	"github.com/2389-research/observatory/internal/events"
 	"github.com/2389-research/observatory/internal/guest/proto"
+	"github.com/2389-research/observatory/internal/privd"
 	"github.com/2389-research/observatory/internal/spool"
 )
 
@@ -46,17 +47,25 @@ const ShutdownReplySlack = 5 * time.Second
 
 // Config holds everything Run needs. Populated by ParseFlags in cmd/vmobs-runner.
 type Config struct {
-	VMID         string
-	BootID       string
-	InstanceID   string
-	UDSPath      string        // path to the VM's vsock UDS (v.sock)
-	TokenFile    string        // path to the capability token file (§15.3)
-	SpoolDir     string        // directory for spool segments
-	StateFile    string        // path to runner-state.json
-	CtlSock      string        // path for the control unix socket
-	VMMPID       int           // supervised VMM process PID
-	VMMStartTime string        // expected /proc starttime (decimal ticks)
-	PingInterval time.Duration // period between guest pings
+	VMID string
+	// NetworkObservers is the binding for the descriptors this runner inherited,
+	// starting at FirstObserverFD. The runner never acquires them: the jailer
+	// adapter is the privd client of record and hands them across exec.
+	NetworkObservers *privd.NetworkObserverBundle
+	// NetworkUnavailableReason is set instead when the adapter could not acquire.
+	// The VM still launches; network coverage reports unavailable with this reason
+	// until a runner respawn or VM restart acquires again.
+	NetworkUnavailableReason string
+	BootID                   string
+	InstanceID               string
+	UDSPath                  string        // path to the VM's vsock UDS (v.sock)
+	TokenFile                string        // path to the capability token file (§15.3)
+	SpoolDir                 string        // directory for spool segments
+	StateFile                string        // path to runner-state.json
+	CtlSock                  string        // path for the control unix socket
+	VMMPID                   int           // supervised VMM process PID
+	VMMStartTime             string        // expected /proc starttime (decimal ticks)
+	PingInterval             time.Duration // period between guest pings
 
 	// PIDAlive is the VMM identity check function. Nil → PIDAliveFunc (package var).
 	// Inject in non-linux tests to override the /proc stub.
@@ -78,8 +87,11 @@ type shutdownRequest struct {
 
 // runner holds live state for one Run invocation.
 type runner struct {
-	cfg   Config
-	token string
+	cfg               Config
+	networkMu         sync.RWMutex
+	network           NetworkStatus
+	networkSpoolError bool
+	token             string
 
 	// state is the most-recently written runner state.
 	state State
@@ -156,9 +168,12 @@ func (r *runner) run(ctx context.Context) error {
 		return fmt.Errorf("runner: write initial state: %w", err)
 	}
 
+	r.initNetworkStatus()
+
 	// Start control socket.
 	ctlSrv, err := ListenCtl(ctx, r.cfg.CtlSock, CtlHandlers{
 		Shutdown:       r.doShutdown,
+		NetworkStatus:  r.networkStatus,
 		Finalize:       r.doFinalize,
 		TerminalCreate: r.terminalCreate,
 		TerminalClose:  r.terminalClose,
@@ -186,6 +201,15 @@ func (r *runner) run(ctx context.Context) error {
 		r.telemetryLoop(telemetryCtx)
 	}()
 
+	// Network observation runs beside supervision on the same schedule as
+	// telemetry. It never ends the runner: a failure there is one collector's
+	// failure, and the VM it is observing is still alive.
+	networkDone := make(chan struct{})
+	go func() {
+		defer close(networkDone)
+		r.networkLoop(telemetryCtx)
+	}()
+
 	// Run the supervision loop.
 	runErr := r.supervisionLoop(ctx, vmmGone)
 
@@ -194,6 +218,7 @@ func (r *runner) run(ctx context.Context) error {
 	// record after it.
 	stopTelemetry()
 	<-telemetryDone
+	<-networkDone
 
 	// Close spool cleanly (writes end marker).
 	if closeErr := sw.Close(); closeErr != nil {

@@ -272,6 +272,10 @@ func writeLiveRunnerManifest(t *testing.T, stateDir, vmID string) {
 // which is how these tests reach doStop's failure branches.
 type unreachablePrivd struct{}
 
+func (*unreachablePrivd) AcquireNetworkObservers(context.Context, privd.AcquireNetworkObserversReq) (*privd.NetworkObserverBundle, error) {
+	return nil, errors.New("privd unreachable in test")
+}
+
 func (*unreachablePrivd) AllocateNetwork(context.Context, privd.AllocateNetworkReq) error {
 	return errors.New("privd unreachable in test")
 }

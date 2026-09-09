@@ -5,12 +5,16 @@ package situation_test
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/2389-research/observatory/internal/events"
 	"github.com/2389-research/observatory/internal/situation"
+	"github.com/2389-research/observatory/internal/spool"
 	"github.com/2389-research/observatory/internal/store"
 )
 
@@ -133,6 +137,34 @@ func TestCoverageMakesHostSourceFailureVisible(t *testing.T) {
 	flow := collectorByID(t, got, "flow")
 	if flow.State != situation.CoverageUnavailable || flow.Reason == "" {
 		t.Errorf("flow after source failure = %+v, want unavailable with reason", flow)
+	}
+	// The source computed the diagnosis; discarding it leaves an operator unable
+	// to tell a refused acquisition from a hung runner or a dead control socket.
+	if !strings.Contains(flow.Reason, "worker registry unavailable") {
+		t.Errorf("flow reason = %q, want it to name the failure the source reported", flow.Reason)
+	}
+}
+
+// The runner already bounds its reason to 256 bytes. Bounding prefix and reason
+// together to the same number silently ate the last 34 bytes of a reason that
+// was already exactly within the bound: the final clause of a kernel error.
+func TestCoverageKeepsWholeBoundedSourceReason(t *testing.T) {
+	st := openStore(t)
+	e := engineOver(st, allTriggers())
+	vm, _ := runningVM(t, st, testUUID(1), testUUID(101))
+	tail := "; final clause of the kernel error"
+	reason := strings.Repeat("x", 256-len(tail)) + tail
+	e.SetHostCoverageSource(coverageSource(func(context.Context, *store.VM) ([]situation.CollectorCoverage, error) {
+		return nil, errors.New(reason)
+	}))
+
+	got, err := e.VMCoverage(t.Context(), vm)
+	if err != nil {
+		t.Fatalf("coverage: %v", err)
+	}
+	flow := collectorByID(t, got, "flow")
+	if !strings.HasPrefix(flow.Reason, "host coverage source unavailable: ") || !strings.HasSuffix(flow.Reason, tail) {
+		t.Errorf("flow reason = %q, want the prefix and the whole 256-byte source reason, ending %q", flow.Reason, tail)
 	}
 }
 
@@ -264,6 +296,48 @@ func TestStaleGuestHeartbeatDoesNotDemoteIndependentHostCollector(t *testing.T) 
 	}
 	if flow := collectorByID(t, got, "flow"); flow.State != situation.CoverageHealthy {
 		t.Errorf("host flow = %+v, want healthy despite stale guest channel", flow)
+	}
+}
+
+func TestImporterFailureDegradesHostCaptureDeliveryAndRecoveryRestoresIt(t *testing.T) {
+	st := openStore(t)
+	e := engineOver(st, allTriggers())
+	boot := testUUID(101)
+	vm, _ := runningVM(t, st, testUUID(1), boot)
+	e.SetHostCoverageSource(coverageSource(func(context.Context, *store.VM) ([]situation.CollectorCoverage, error) {
+		zero, noUnknown := "0", 0
+		return []situation.CollectorCoverage{{
+			ID: "flow", VMID: vm.VMID, BootID: boot, State: situation.CoverageHealthy,
+			ObservedDropped: &zero, UnknownLossIntervals: &noUnknown,
+		}}, nil
+	}))
+
+	root := filepath.Join(t.TempDir(), "missing-spool")
+	imp := spool.NewImporter(st, root, time.Second, nil)
+	e.SetImporter(imp)
+	if _, err := imp.ImportOnce(t.Context()); err == nil {
+		t.Fatal("missing spool root did not record an importer failure")
+	}
+	got, err := e.VMCoverage(t.Context(), vm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flow := collectorByID(t, got, "flow"); flow.State != situation.CoverageDegraded || flow.Reason != "capture delivery is degraded" {
+		t.Fatalf("flow during importer failure = %+v, want degraded delivery", flow)
+	}
+
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := imp.ImportOnce(t.Context()); err != nil {
+		t.Fatalf("recover importer: %v", err)
+	}
+	got, err = e.VMCoverage(t.Context(), vm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flow := collectorByID(t, got, "flow"); flow.State != situation.CoverageHealthy {
+		t.Fatalf("flow after importer recovery = %+v, want healthy", flow)
 	}
 }
 

@@ -25,8 +25,10 @@ type KernelError struct{ Code int32 }
 func (e *KernelError) Error() string { return fmt.Sprintf("netlink kernel error %d", e.Code) }
 
 type message struct {
-	kind, flags uint16
-	data        []byte
+	kind, flags    uint16
+	sequence, port uint32
+	data           []byte
+	raw            []byte
 }
 
 func messages(data []byte) ([]message, error) {
@@ -42,7 +44,14 @@ func messages(data []byte) ([]message, error) {
 		if n < 16 || n > uint64(len(data)) {
 			return nil, fmt.Errorf("%w: message length", ErrMalformed)
 		}
-		m := message{binary.NativeEndian.Uint16(data[4:]), binary.NativeEndian.Uint16(data[6:]), data[16:n]}
+		m := message{
+			kind:     binary.NativeEndian.Uint16(data[4:]),
+			flags:    binary.NativeEndian.Uint16(data[6:]),
+			sequence: binary.NativeEndian.Uint32(data[8:]),
+			port:     binary.NativeEndian.Uint32(data[12:]),
+			data:     data[16:n],
+			raw:      data[:n],
+		}
 		// NLM_F_DUMP_INTR may occur on any dump message, including a data record.
 		if m.flags&16 != 0 {
 			return nil, ErrDumpInterrupted

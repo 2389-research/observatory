@@ -12,10 +12,8 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -876,29 +874,14 @@ func (a *Adapter) reconcileOne(ctx context.Context, vmID string) Finding {
 	}
 }
 
-// buildRunnerCmd builds an exec.Cmd for the runner with Setsid and the given log file.
-// logFile is attached to both stdout and stderr; callers must call logFile.Close() after cmd.Start().
-func buildRunnerCmd(argv []string, logFile *os.File) *exec.Cmd {
-	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	return cmd
-}
-
 // respawnRunner spawns a fresh runner process for a VM whose runner died but
 // whose VMM is still alive. A fresh instance-id is minted to avoid dedup collisions
 // in the spool importer (which deduplicates on (source_instance_id, source_seq)).
-func (a *Adapter) respawnRunner(_ context.Context, m Manifest) error {
+func (a *Adapter) respawnRunner(ctx context.Context, m Manifest) error {
 	instanceID := uuid.NewString()
 	vmID := m.VMID
 
 	vmStateDir := filepath.Join(a.cfg.StateDir, "vms", vmID)
-	vSockPath := filepath.Join(a.cfg.JailBase, "firecracker", vmID, "root", "v.sock")
-	tokenFile := filepath.Join(vmStateDir, "token")
-	spoolDir := filepath.Join(a.cfg.SpoolRoot, vmID)
-	stateFile := filepath.Join(vmStateDir, "runner-state.json")
-	ctlSock := filepath.Join(vmStateDir, "runner.sock")
 	runnerLog := filepath.Join(vmStateDir, "runner.log")
 
 	logFile, err := os.OpenFile(runnerLog, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
@@ -906,24 +889,8 @@ func (a *Adapter) respawnRunner(_ context.Context, m Manifest) error {
 		return fmt.Errorf("open runner log: %w", err)
 	}
 
-	// Same argv shape as launch.go's spawn (factored here rather than duplicated).
-	argv := []string{
-		a.cfg.RunnerBin,
-		"--vm-id", vmID,
-		"--boot-id", m.BootID,
-		"--instance-id", instanceID,
-		"--uds", vSockPath,
-		"--token-file", tokenFile,
-		"--spool-dir", spoolDir,
-		"--state-file", stateFile,
-		"--ctl-sock", ctlSock,
-		"--vmm-pid", fmt.Sprintf("%d", m.VMMPID),
-		"--vmm-starttime", m.VMMStart,
-		"--ping-interval", "5s",
-	}
-
-	cmd := buildRunnerCmd(argv, logFile)
-	if err := cmd.Start(); err != nil {
+	cmd, err := a.startRunner(ctx, m, instanceID, logFile)
+	if err != nil {
 		logFile.Close()
 		return fmt.Errorf("spawn runner: %w", err)
 	}

@@ -18,7 +18,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"syscall"
 	"time"
 
@@ -215,11 +214,7 @@ func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (*lock.Images
 
 	// vSock path: the adapter polls runner-state.json for the attached phase;
 	// the runner connects to this UDS to speak to guestd.
-	vSockPath := filepath.Join(a.cfg.JailBase, "firecracker", vmID, "root", "v.sock")
-	tokenFile := filepath.Join(vmStateDir, "token")
-	spoolDir := filepath.Join(a.cfg.SpoolRoot, vmID)
 	stateFile := filepath.Join(vmStateDir, "runner-state.json")
-	ctlSock := filepath.Join(vmStateDir, "runner.sock")
 	runnerLog := filepath.Join(vmStateDir, "runner.log")
 
 	logFile, err := os.OpenFile(runnerLog, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
@@ -227,24 +222,8 @@ func (a *Adapter) launch(ctx context.Context, spec runtime.VMSpec) (*lock.Images
 		return nil, rollback(fmt.Errorf("open runner log: %w", err))
 	}
 
-	argv := []string{
-		a.cfg.RunnerBin,
-		"--vm-id", vmID,
-		"--boot-id", bootID,
-		"--instance-id", instanceID,
-		"--uds", vSockPath,
-		"--token-file", tokenFile,
-		"--spool-dir", spoolDir,
-		"--state-file", stateFile,
-		"--ctl-sock", ctlSock,
-		"--vmm-pid", strconv.Itoa(startResp.PID),
-		"--vmm-starttime", startResp.StartTime,
-		"--ping-interval", "5s",
-	}
-
-	cmd := buildRunnerCmd(argv, logFile)
-
-	if err := cmd.Start(); err != nil {
+	cmd, err := a.startRunner(ctx, m, instanceID, logFile)
+	if err != nil {
 		logFile.Close()
 		return nil, rollback(fmt.Errorf("spawn runner: %w", err))
 	}
