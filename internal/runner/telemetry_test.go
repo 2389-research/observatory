@@ -401,6 +401,13 @@ func TestRunnerRecordsLossAfterSpoolRecovers(t *testing.T) {
 	// never races the removal that gives the spool its room back.
 	ballastGone := make(chan struct{})
 	ballast := filepath.Join(h.spoolDir, "ballast.vmsp")
+	seq2Push := proto.TelemetryPush{
+		Seq:              "2",
+		Kind:             "guest.sensor_health",
+		GuestWallAt:      time.Now().UTC().Format(time.RFC3339Nano),
+		GuestMonotonicNS: "1000",
+		Data:             json.RawMessage(`{"agent":{}}`),
+	}
 	var served atomic.Int32
 	h.serveFakeTelemetry(func(conn net.Conn) {
 		hello, err := readHello(conn)
@@ -411,7 +418,7 @@ func TestRunnerRecordsLossAfterSpoolRecovers(t *testing.T) {
 		switch served.Add(1) {
 		case 1:
 			defer close(ballastGone)
-			firstConn <- refuseOnFullSpool(conn, ballast)
+			firstConn <- refuseOnFullSpool(conn, ballast, seq2Push)
 		case 2:
 			<-ballastGone
 			if err := writeFakePush(conn, "2", "guest.sensor_health", `{"agent":{}}`); err != nil {
@@ -508,10 +515,13 @@ func TestRunnerRecordsLossAfterSpoolRecovers(t *testing.T) {
 
 // refuseOnFullSpool drives the first connection of an outage: one push the
 // runner acknowledges, then a sparse ballast that puts the spool over its
-// default quota, then a push the runner must refuse by closing the connection.
-// It removes the ballast before it returns and reports "closed" when every
-// step went as planned, or what went wrong instead.
-func refuseOnFullSpool(conn net.Conn, ballast string) string {
+// default quota, then push (the caller's seq 2) which the runner must refuse
+// by closing the connection. It removes the ballast before it returns and
+// reports "closed" when every step went as planned, or what went wrong
+// instead. It takes push as a value, sent with proto.WriteControl, so a
+// caller that resends it later on a second connection sends the identical
+// bytes rather than a fresh push restamped by writeFakePush.
+func refuseOnFullSpool(conn net.Conn, ballast string, push proto.TelemetryPush) string {
 	if err := writeFakePush(conn, "1", "guest.sensor_health", `{"agent":{}}`); err != nil {
 		return fmt.Sprintf("push seq 1: %v", err)
 	}
@@ -530,7 +540,7 @@ func refuseOnFullSpool(conn net.Conn, ballast string) string {
 		return fmt.Sprintf("size ballast: %v, %v", truncErr, closeErr)
 	}
 
-	if err := writeFakePush(conn, "2", "guest.sensor_health", `{"agent":{}}`); err != nil {
+	if err := proto.WriteControl(conn, proto.KindTelemetryPush, push); err != nil {
 		return fmt.Sprintf("push seq 2: %v", err)
 	}
 	if env, err := proto.ReadControl(conn); err == nil {
@@ -540,6 +550,135 @@ func refuseOnFullSpool(conn net.Conn, ballast string) string {
 		return fmt.Sprintf("remove ballast: %v", err)
 	}
 	return "closed"
+}
+
+// TestRunnerResendReusesTheRefusedEnvelope follows the same outage as
+// TestRunnerRecordsLossAfterSpoolRecovers, then asks the question that one
+// does not: does the resend get back the same envelope? A frame the spool
+// refused can still reach the store before its segment is trimmed, so a
+// resend the runner re-stamps with a new host_received_at would read at the
+// store as a different payload under the same (source_instance_id,
+// source_seq) — a conflict the store cannot resolve. The guest's ring stamps
+// an event once, at push time, so its resend is byte-identical on the wire;
+// this pins that the runner's spooled envelope is identical too.
+func TestRunnerResendReusesTheRefusedEnvelope(t *testing.T) {
+	h := newTelemetryHarness(t)
+	h.startGuest()
+
+	// Built once and sent both times: writeFakePush restamps GuestWallAt on
+	// every call, which would make every resend a "different" push and defeat
+	// the test before it starts.
+	push := proto.TelemetryPush{
+		Seq:              "2",
+		Kind:             "guest.sensor_health",
+		GuestWallAt:      time.Now().UTC().Format(time.RFC3339Nano),
+		GuestMonotonicNS: "1000",
+		Data:             json.RawMessage(`{"agent":{}}`),
+	}
+
+	firstConn := make(chan string, 1)
+	resent := make(chan string, 1)
+	// Closed once connection 1 has recorded t2, so connection 2 never reads t2
+	// before it is set. That close-then-receive pair is the happens-before
+	// edge that makes reading t2 from the other goroutine race-free.
+	ballastGone := make(chan struct{})
+	ballast := filepath.Join(h.spoolDir, "ballast.vmsp")
+	var t2 time.Time
+	var served atomic.Int32
+	h.serveFakeTelemetry(func(conn net.Conn) {
+		hello, err := readHello(conn)
+		if err != nil {
+			return
+		}
+		_ = acceptHello(conn, hello)
+		switch served.Add(1) {
+		case 1:
+			result := refuseOnFullSpool(conn, ballast, push)
+			t2 = time.Now()
+			close(ballastGone)
+			firstConn <- result
+		case 2:
+			<-ballastGone
+			// The spool truncates host_received_at to microseconds, so the
+			// comparison against t2 needs a full second of headroom or
+			// truncation could flip a genuinely-later timestamp to read as
+			// earlier.
+			if wait := time.Second - time.Since(t2); wait > 0 {
+				time.Sleep(wait)
+			}
+			if err := proto.WriteControl(conn, proto.KindTelemetryPush, push); err != nil {
+				resent <- fmt.Sprintf("resend seq 2: %v", err)
+				return
+			}
+			env, err := proto.ReadControl(conn)
+			if err != nil || env.Kind != proto.KindTelemetryAck {
+				resent <- fmt.Sprintf("the resent seq 2 went unacknowledged (%v, %v)", env.Kind, err)
+				return
+			}
+			var ack proto.TelemetryAck
+			if err := json.Unmarshal(env.Data, &ack); err != nil {
+				resent <- fmt.Sprintf("unmarshal ack: %v", err)
+				return
+			}
+			resent <- ack.ThroughSeq
+			io.Copy(io.Discard, conn) //nolint:errcheck
+		default:
+			io.Copy(io.Discard, conn) //nolint:errcheck
+		}
+	})
+
+	h.run()
+
+	select {
+	case got := <-firstConn:
+		if got != "closed" {
+			t.Fatalf("connection 1: %s", got)
+		}
+	case <-time.After(telSpoolWait):
+		t.Fatal("the fake guest never got as far as the push the full spool refuses")
+	}
+	select {
+	case got := <-resent:
+		if got != "2" {
+			t.Fatalf("connection 2: %s", got)
+		}
+	case <-time.After(telSpoolWait):
+		t.Fatal("the runner never took the resent push")
+	}
+
+	lossAt, resentAt := -1, -1
+	var loss, resentEnv *events.Envelope
+	seq2Count := 0
+	for i, env := range h.spooled() {
+		if env.Kind == "telemetry.loss" && loss == nil {
+			loss, lossAt = env, i
+		}
+		if env.Kind == "guest.sensor_health" && env.Provenance == events.GuestReported && env.SourceSeq == "2" {
+			resentAt, resentEnv = i, env
+			seq2Count++
+		}
+	}
+	if loss == nil {
+		t.Fatal("no telemetry.loss reached the spool; the refused push left no trace")
+	}
+	if resentEnv == nil {
+		t.Fatal("the resent seq 2 is not in the spool")
+	}
+	if seq2Count != 1 {
+		t.Errorf("seq 2 appears %d times in the spool, want exactly 1", seq2Count)
+	}
+	if lossAt > resentAt {
+		t.Errorf("telemetry.loss is record %d, after the resent seq 2 at %d; the loss must come first", lossAt, resentAt)
+	}
+	refused, _ := loss.Data["guest_pushes_refused"].(string)
+	if n, err := strconv.ParseUint(refused, 10, 64); err != nil || n < 1 {
+		t.Errorf("guest_pushes_refused: got %q, want a decimal string of at least 1", refused)
+	}
+
+	if !resentEnv.HostReceivedAt.Before(t2) {
+		t.Errorf("resent seq 2's host_received_at %s is not before t2 %s; the runner stamped a fresh envelope instead of reusing the one it was refused with",
+			resentEnv.HostReceivedAt.Format(time.RFC3339Nano), t2.Format(time.RFC3339Nano))
+	}
 }
 
 // TestRunnerRefusesAnUnacceptableEpoch covers the guest's only contribution to

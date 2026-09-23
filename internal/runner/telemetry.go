@@ -3,6 +3,7 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -51,6 +52,10 @@ func (r *runner) telemetryLoop(ctx context.Context) {
 	// the events a guest re-sends after an unacknowledged connection are
 	// acknowledged again without being spooled twice. Owned by this goroutine.
 	spooled := make(map[string]uint64)
+	// lastRefusal remembers the one push the spool most recently refused, so a
+	// byte-identical resend reuses that envelope. Owned by this goroutine and
+	// passed along the same way as spooled.
+	lastRefusal := &refusedPush{}
 	backoff := 1 * time.Second
 
 	for {
@@ -62,7 +67,7 @@ func (r *runner) telemetryLoop(ctx context.Context) {
 		cancel()
 		progressed := false
 		if err == nil {
-			progressed = r.serveTelemetry(ctx, conn, spooled)
+			progressed = r.serveTelemetry(ctx, conn, spooled, lastRefusal)
 			conn.Close()
 		}
 		select {
@@ -87,7 +92,7 @@ func (r *runner) telemetryLoop(ctx context.Context) {
 // context ends. Every return path is a redial. It reports whether the
 // connection carried at least one frame, which is what the dial backoff uses to
 // tell a working guest from one it is pointlessly redialing.
-func (r *runner) serveTelemetry(ctx context.Context, conn net.Conn, spooled map[string]uint64) bool {
+func (r *runner) serveTelemetry(ctx context.Context, conn net.Conn, spooled map[string]uint64, lastRefusal *refusedPush) bool {
 	defer closeOnDone(ctx, conn)()
 
 	streamID, err := r.telemetryHandshake(conn)
@@ -116,7 +121,7 @@ func (r *runner) serveTelemetry(ctx context.Context, conn net.Conn, spooled map[
 			r.appendTelemetryIntegrityFailure(streamID, "malformed_push", err.Error())
 			return progressed
 		}
-		seq, err := r.spoolTelemetryPush(streamID, push, spooled)
+		seq, err := r.spoolTelemetryPush(streamID, push, spooled, lastRefusal)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "runner: telemetry spool: %v\n", err)
 			return progressed
@@ -175,9 +180,11 @@ func (r *runner) telemetryHandshake(conn net.Conn) (string, error) {
 // sequence to acknowledge. A sequence already written is acknowledged without
 // being written twice: at-least-once delivery means the guest re-sends whatever
 // it never saw acknowledged, and those re-sends are expected, not suspicious.
-// Whether a re-send actually carries the same bytes is the store's question,
-// and it already answers it with a seq/payload conflict.
-func (r *runner) spoolTelemetryPush(streamID string, push proto.TelemetryPush, spooled map[string]uint64) (string, error) {
+// A push the spool refuses can still reach the store before its segment is
+// trimmed, so a resend reuses the envelope it was refused with: a fresh one
+// would carry a new host_received_at, and the store would see that as a
+// conflicting payload under the same sequence rather than the same event twice.
+func (r *runner) spoolTelemetryPush(streamID string, push proto.TelemetryPush, spooled map[string]uint64, lastRefusal *refusedPush) (string, error) {
 	seq, err := strconv.ParseUint(push.Seq, 10, 64)
 	if err != nil {
 		return "", fmt.Errorf("telemetry seq %q: %w", push.Seq, err)
@@ -206,12 +213,59 @@ func (r *runner) spoolTelemetryPush(streamID string, push proto.TelemetryPush, s
 		return "", fmt.Errorf("telemetry data for seq %s is not an object: %w", push.Seq, err)
 	}
 
-	env := r.newGuestEnvelope(streamID, push, data)
+	env := lastRefusal.reuse(streamID, push)
+	if env == nil {
+		env = r.newGuestEnvelope(streamID, push, data)
+	}
 	if err := r.sw.Append(env); err != nil {
+		lastRefusal.remember(streamID, push, env)
 		return "", fmt.Errorf("append %s seq %s: %w", push.Kind, push.Seq, err)
 	}
+	lastRefusal.forget()
 	spooled[streamID] = seq
 	return push.Seq, nil
+}
+
+// refusedPush remembers the one guest push the spool most recently refused, so
+// that an identical resend gets back the exact envelope it was refused with
+// instead of a fresh one. The telemetry goroutine owns it and passes it down
+// the same call chain as spooled; nothing else touches it, so it needs no lock.
+type refusedPush struct {
+	streamID string
+	push     proto.TelemetryPush
+	env      *events.Envelope
+}
+
+// reuse returns the remembered envelope when push, on streamID, is the same
+// push this remembers refusing: the same Seq, Kind, GuestWallAt and
+// GuestMonotonicNS, and byte-identical Data. It returns nil for anything else,
+// including when nothing is remembered.
+func (l *refusedPush) reuse(streamID string, push proto.TelemetryPush) *events.Envelope {
+	if l.env == nil || l.streamID != streamID {
+		return nil
+	}
+	if l.push.Seq != push.Seq || l.push.Kind != push.Kind ||
+		l.push.GuestWallAt != push.GuestWallAt || l.push.GuestMonotonicNS != push.GuestMonotonicNS {
+		return nil
+	}
+	if !bytes.Equal(l.push.Data, push.Data) {
+		return nil
+	}
+	return l.env
+}
+
+// remember replaces whatever this held with the push and envelope the spool
+// just refused.
+func (l *refusedPush) remember(streamID string, push proto.TelemetryPush, env *events.Envelope) {
+	l.streamID = streamID
+	l.push = push
+	l.env = env
+}
+
+// forget clears the memory once its envelope has made it into the spool, so a
+// later, unrelated push is never mistaken for its resend.
+func (l *refusedPush) forget() {
+	*l = refusedPush{}
 }
 
 // newGuestEnvelope stamps a guest push. Provenance is the runner's word, not
