@@ -42,6 +42,8 @@ var registry = []KindInfo{
 			"guest_pushes_refused counts refused push attempts; the guest re-sends what it never saw acknowledged, so one event can be refused more than once and still arrive",
 			`guest_events_lost is "unknown" whenever a guest push was refused: the guest's bounded ring may have overwritten events it held, and its heartbeat's dropped counter reports how many`,
 			"runner_records_refused is an upper bound: a record whose fsync failed may still reach the store when the writer could not trim it from the segment, or when the importer read it first",
+			"a loss record whose fsync failed may still reach the store while its outage stays open, so telemetry.loss records from one source_instance_id that share an interval_start describe one outage: the one with the highest source_seq counts every refusal the others count, and has the latest interval_end unless the clock stepped back; they must not be summed",
+			"interval_start and interval_end are wall-clock readings: a clock step during the outage skews the interval and can put interval_end before interval_start, and the record keeps both as the clock read them",
 			"the counts describe what the runner's spool refused, not loss elsewhere in the pipeline",
 		},
 	},

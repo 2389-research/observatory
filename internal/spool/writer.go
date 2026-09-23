@@ -109,12 +109,14 @@ func OpenWriter(dir string, cfg WriterCfg) (*Writer, error) {
 // Append marshals env as JSON and appends it as a record to the current segment.
 // It fsyncs the segment file before returning (ack barrier, SPEC §12.4).
 //
-// An Append the spool cannot make durable is refused: ErrSpoolFull when the
-// record would exceed MaxSpoolBytes, or the error of a failed write, fsync or
-// segment create. The writer counts each refusal in an open outage and tries
-// again on the next Append. A failed write or fsync abandons the segment, so
-// the next Append moves to a new one. The first Append that succeeds after
-// refusals writes the outage's telemetry.loss ahead of its own record.
+// An Append the spool cannot make durable is refused. It returns ErrSpoolFull
+// when the record would exceed MaxSpoolBytes, or else the error that stopped
+// it: measuring the spool's size, building the outage's loss record, creating
+// a segment, or a write or fsync. The writer counts each refusal in an open
+// outage and tries again on the next Append. A failed write, fsync or segment
+// create abandons the current segment, so the next Append moves to a new one.
+// The first Append that succeeds after refusals writes the outage's
+// telemetry.loss ahead of its own record.
 //
 // A record that cannot marshal or exceeds the frame limit is rejected for its
 // own content. That is not a refusal: the spool is fine.
@@ -170,9 +172,9 @@ func (w *Writer) Append(env *events.Envelope) error {
 }
 
 // Close records an open outage when it can, then retires the current segment
-// with its end marker. When the loss cannot be recorded, the error says so
-// and carries the counts, so the caller's log keeps what the spool could not.
-// A second Close returns nil.
+// with its end marker. When the loss cannot be recorded, the error says so,
+// carries the counts, and wraps the failure that stopped the record, so the
+// caller's log keeps what the spool could not. A second Close returns nil.
 func (w *Writer) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -180,38 +182,41 @@ func (w *Writer) Close() error {
 		return nil
 	}
 	w.closed = true
+	var recordErr error
 	if w.outage != nil {
-		w.recordOutage()
+		recordErr = w.recordOutage()
 	}
 	// After a failed advance this is still the damaged segment, and the
 	// retire trims it back to its last durable record.
 	retireErr := retireSegment(w.f, w.segBytes)
 	w.f = nil
 	if o := w.outage; o != nil {
-		lost := fmt.Errorf("spool: loss since %s not recorded: %d runner records and %d guest pushes refused; first cause: %s",
-			o.Since.UTC().Format(events.TimestampLayout), o.RunnerRecordsRefused, o.GuestPushesRefused, o.Cause)
+		lost := fmt.Errorf("spool: loss since %s not recorded: %d runner records and %d guest pushes refused; first cause: %s; recording it failed: %w",
+			o.Since.UTC().Format(events.TimestampLayout), o.RunnerRecordsRefused, o.GuestPushesRefused, o.Cause, recordErr)
 		return errors.Join(lost, retireErr)
 	}
 	return retireErr
 }
 
 // recordOutage writes the open outage's loss frame on its own, moving to a
-// new segment first when the current one is damaged or has no room. The
-// outage stays open unless the frame became durable.
-func (w *Writer) recordOutage() {
+// new segment first when the current one is damaged or has no room. It
+// clears the outage only once the frame is durable, and otherwise returns
+// the error that stopped it.
+func (w *Writer) recordOutage() error {
 	loss, err := w.lossFrame()
 	if err != nil {
-		return
+		return err
 	}
 	if w.damaged || w.segBytes+int64(len(loss)) > w.cfg.MaxSegmentBytes {
 		if err := w.advance(); err != nil {
-			return
+			return err
 		}
 	}
 	if err := w.writeFrame(loss, "loss record"); err != nil {
-		return
+		return err
 	}
 	w.outage = nil
+	return nil
 }
 
 // refuse counts a failed Append in the open outage, opening one when none is

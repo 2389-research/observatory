@@ -411,7 +411,8 @@ func TestCloseRecordsAnOpenOutage(t *testing.T) {
 }
 
 // When Close cannot record the loss either, its error says so, with the
-// counts, so the runner's log keeps what the spool could not.
+// counts and the failure that stopped the record, so the runner's log keeps
+// what the spool could not.
 func TestCloseReportsALossItCouldNotRecord(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root creates files in a read-only directory")
@@ -429,6 +430,11 @@ func TestCloseReportsALossItCouldNotRecord(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "not recorded") ||
 		!strings.Contains(err.Error(), "0 runner records and 1 guest pushes refused") {
 		t.Fatalf("Close: %v; want an error saying the loss of 1 guest push was not recorded", err)
+	}
+	// The damaged segment sends the loss record to a new segment, and the
+	// read-only dir refuses its create.
+	if !errors.Is(err, os.ErrPermission) {
+		t.Errorf("Close: %v; want it to carry the refused segment create that stopped the loss record (errors.Is os.ErrPermission)", err)
 	}
 }
 
@@ -672,5 +678,12 @@ func TestRetireSegmentTrimsJunk(t *testing.T) {
 	}
 	if env, err := it.Next(); !errors.Is(err, io.EOF) {
 		t.Errorf("second Next: %v, %v; want io.EOF", env, err)
+	}
+	// Neither the size nor ReadSegment tells the end marker from 4 other
+	// bytes; the strict parse checks the marker's value.
+	envs, marker := segmentFrames(t, name)
+	if len(envs) != 1 || envs[0].SourceSeq != "1" || !marker {
+		t.Errorf("%s holds %s, end marker %v; want record 1 and the marker",
+			filepath.Base(name), describe(envs), marker)
 	}
 }
