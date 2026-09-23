@@ -427,9 +427,9 @@ func TestCloseReportsALossItCouldNotRecord(t *testing.T) {
 		t.Fatal("append to a closed fd succeeded")
 	}
 	err := w.Close()
-	if err == nil || !strings.Contains(err.Error(), "not recorded") ||
+	if err == nil || !strings.Contains(err.Error(), "not durably recorded") ||
 		!strings.Contains(err.Error(), "0 runner records and 1 guest pushes refused") {
-		t.Fatalf("Close: %v; want an error saying the loss of 1 guest push was not recorded", err)
+		t.Fatalf("Close: %v; want an error saying the loss of 1 guest push was not durably recorded", err)
 	}
 	// The damaged segment sends the loss record to a new segment, and the
 	// read-only dir refuses its create.

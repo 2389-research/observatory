@@ -339,7 +339,7 @@ func TestCloseWritesTheFinalStatus(t *testing.T) {
 			GuestPushesRefused:   "1",
 			InstanceID:           recoveryInstanceID,
 		}
-		if err := w.Close(); err == nil || !strings.Contains(err.Error(), "not recorded") {
+		if err := w.Close(); err == nil || !strings.Contains(err.Error(), "not durably recorded") {
 			t.Fatalf("Close: %v, want the loss it could not record", err)
 		}
 		if got := currentStatus(t, dir); got != want {

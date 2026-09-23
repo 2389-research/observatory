@@ -217,7 +217,7 @@ func (w *Writer) Close() error {
 	// The status is advisory; its close error is not the caller's concern.
 	_ = w.status.Close()
 	if o := w.outage; o != nil {
-		lost := fmt.Errorf("spool: loss since %s not recorded: %d runner records and %d guest pushes refused; first cause: %s; recording it failed: %w",
+		lost := fmt.Errorf("spool: loss since %s not durably recorded: %d runner records and %d guest pushes refused; first cause: %s; recording it failed: %w",
 			o.Since.UTC().Format(events.TimestampLayout), o.RunnerRecordsRefused, o.GuestPushesRefused, o.Cause, recordErr)
 		return errors.Join(lost, retireErr)
 	}
