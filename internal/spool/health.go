@@ -39,12 +39,26 @@ type writerRead struct {
 	reported string
 }
 
+// UnobservedStatus is the diagnostic a VM (non-empty vmID) or the root
+// directory (empty vmID) reports before any cycle has run: state unknown,
+// zero consecutive failures, and for a VM a writer that is itself unknown
+// because no cycle has read its status file yet. Both Importer.Status and
+// situation.Engine.ImporterStatus start here, so a wired and an absent
+// importer never disagree about a VM's unobserved shape.
+func UnobservedStatus(vmID string) ImportStatus {
+	s := ImportStatus{State: "unknown", ConsecutiveFailures: "0"}
+	if vmID != "" {
+		s.Writer = &WriterHealth{State: "unknown"}
+	}
+	return s
+}
+
 // Status returns one VM's diagnostics, or root-directory diagnostics for an empty id.
 // Health is process-local; restart reports unknown until a cycle actually runs.
 func (imp *Importer) Status(vmID string) ImportStatus {
 	imp.mu.RLock()
 	defer imp.mu.RUnlock()
-	s := ImportStatus{State: "unknown", ConsecutiveFailures: "0"}
+	s := UnobservedStatus(vmID)
 	if h, ok := imp.health[vmID]; ok {
 		s = h.ImportStatus
 	}

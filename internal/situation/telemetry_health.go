@@ -210,5 +210,5 @@ func (e *Engine) ImporterStatus(vmID string) spool.ImportStatus {
 	if imp := e.importer.Load(); imp != nil {
 		return imp.Status(vmID)
 	}
-	return spool.ImportStatus{State: "unknown", ConsecutiveFailures: "0"}
+	return spool.UnobservedStatus(vmID)
 }

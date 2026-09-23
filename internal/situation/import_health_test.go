@@ -180,3 +180,19 @@ func TestWriterFailureDegradesTelemetryAndRaisesAttention(t *testing.T) {
 		})
 	}
 }
+
+// TestImporterStatusUnobservedCarriesWriterOnlyForAVM: with no importer
+// wired, a VM's status must still carry a writer of state unknown — the same
+// shape Importer.Status gives every VM before its first cycle reads its
+// status file — and the root status must carry no writer at all.
+func TestImporterStatusUnobservedCarriesWriterOnlyForAVM(t *testing.T) {
+	st := openStore(t)
+	eng := situation.New(st, situation.Config{})
+	id := testUUID(1)
+	if got := eng.ImporterStatus(id); got.Writer == nil || got.Writer.State != "unknown" {
+		t.Fatalf("ImporterStatus(%q).Writer = %+v, want a writer with state unknown", id, got.Writer)
+	}
+	if got := eng.ImporterStatus(""); got.Writer != nil {
+		t.Fatalf(`ImporterStatus("").Writer = %+v, want none`, got.Writer)
+	}
+}
