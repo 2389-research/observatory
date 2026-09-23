@@ -910,4 +910,5 @@ Treat anything under them as copied to that host. A test that walks the
 working tree reads them too: `TestNoHostInstallerRemains` failed because a
 `.tracker` transcript quoted the deleted installer, and it now skips
 `.private-journal`, `.roborev`, `.superpowers` and `.tracker`. A repository
-scan skips those by name or walks `git ls-files`.
+scan skips those by name or walks `git ls-files`. Kata `pd82` tracks the
+rsync and `.dockerignore` fix.
