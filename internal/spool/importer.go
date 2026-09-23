@@ -161,7 +161,7 @@ func (imp *Importer) importVM(ctx context.Context, vmDir string) (ImportStats, e
 	}
 
 	// Step 2: load cursor (absent = start of everything).
-	cur, err := imp.loadCursor(vmDir)
+	cur, err := readCursor(vmDir)
 	if err != nil {
 		return stats, fmt.Errorf("importer: read cursor: %w", err)
 	}
@@ -338,8 +338,8 @@ func segmentHasEndMarker(segPath string) (bool, error) {
 	return binary.BigEndian.Uint32(tail[:]) == endMarker, nil
 }
 
-// loadCursor reads durable progress. Only an absent cursor means start at zero.
-func (imp *Importer) loadCursor(vmDir string) (cursor, error) {
+// readCursor reads durable progress. Only an absent cursor means start at zero.
+func readCursor(vmDir string) (cursor, error) {
 	data, err := os.ReadFile(filepath.Join(vmDir, "cursor.json"))
 	if os.IsNotExist(err) {
 		return cursor{}, nil

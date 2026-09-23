@@ -10,7 +10,7 @@ import (
 	"hash/crc32"
 	"os"
 	"path/filepath"
-	"sort"
+	"strconv"
 	"sync"
 	"syscall"
 
@@ -202,7 +202,10 @@ func (w *Writer) closeLocked() error {
 // openSegment creates a new segment file at the current segIdx and writes its header.
 // It fsyncs the file and the directory (SPEC §12.4 directory-entry durability).
 func (w *Writer) openSegment() error {
-	name := fmt.Sprintf("seg-%016d.vmsp", w.segIdx)
+	if w.segIdx > maxSegmentIndex {
+		return fmt.Errorf("spool: segment index %d exceeds the 16-digit name space", w.segIdx)
+	}
+	name := segmentName(w.segIdx)
 	path := filepath.Join(w.dir, name)
 
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
@@ -279,35 +282,101 @@ func (w *Writer) spoolTotalBytes() (int64, error) {
 }
 
 // nextSegmentIndex scans dir for existing *.vmsp files and returns the next
-// monotonic index to use.
+// monotonic index to use. The cursor is consulted too: a boot that starts
+// after the importer has pruned every segment on disk must not reissue a
+// name the cursor already points at, or the importer treats fresh records as
+// already committed (CURRENT) or already seen (PAST).
+//
+// The directory listing is read before the cursor on purpose: the importer
+// commits a record, then writes the cursor, then prunes the segment. A
+// segment missing from an earlier listing was pruned only after the cursor
+// was written to name it, so a cursor read afterwards still names it and the
+// maximum still reflects it. Reading in the other order — cursor first, then
+// listing — risks a prune landing between the two reads, which would hide
+// the segment from both and let its index be reused.
 func nextSegmentIndex(dir string) (uint64, error) {
 	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return 0, nil
-		}
+	if err != nil && !os.IsNotExist(err) {
 		return 0, err
 	}
 
-	var names []string
+	found := false
+	var maxIdx uint64
 	for _, e := range entries {
-		if !e.IsDir() && filepath.Ext(e.Name()) == ".vmsp" {
-			names = append(names, e.Name())
+		if e.IsDir() {
+			continue
+		}
+		idx, ok := parseSegmentName(e.Name())
+		if !ok {
+			continue
+		}
+		if !found || idx > maxIdx {
+			maxIdx = idx
+			found = true
 		}
 	}
-	if len(names) == 0 {
-		return 0, nil
-	}
-	sort.Strings(names)
-	last := names[len(names)-1]
 
-	var idx uint64
-	_, err = fmt.Sscanf(last, "seg-%016d.vmsp", &idx)
+	c, err := readCursor(dir)
 	if err != nil {
-		// Unrecognized name — start fresh.
+		return 0, fmt.Errorf("read import cursor: %w", err)
+	}
+	if c.Segment != "" {
+		idx, ok := parseSegmentName(c.Segment)
+		if !ok {
+			return 0, fmt.Errorf("import cursor names %q, which is not a segment name", c.Segment)
+		}
+		if !found || idx > maxIdx {
+			maxIdx = idx
+			found = true
+		}
+	}
+
+	if !found {
 		return 0, nil
 	}
-	return idx + 1, nil
+	return maxIdx + 1, nil
+}
+
+// segmentNameLen is the exact byte length of a segment file name:
+// "seg-" (4) + 16 decimal digits + ".vmsp" (5).
+const segmentNameLen = 4 + 16 + 5
+
+// maxSegmentIndex is the highest index expressible in the fixed 16-digit
+// name space. A 17-digit name would sort lexicographically before every
+// 16-digit name, so the importer's string-order cursor comparison would
+// misclassify it as PAST and prune it unread (see openSegment).
+const maxSegmentIndex = 9999999999999999
+
+// parseSegmentName reports whether name is exactly "seg-" + 16 ASCII decimal
+// digits + ".vmsp", returning the encoded index when it is. fmt.Sscanf is
+// deliberately not used here: it accepts a leading sign and leading spaces
+// inside a %d verb, which would let a malformed name parse successfully.
+func parseSegmentName(name string) (uint64, bool) {
+	if len(name) != segmentNameLen {
+		return 0, false
+	}
+	if name[:4] != "seg-" {
+		return 0, false
+	}
+	if name[20:] != ".vmsp" {
+		return 0, false
+	}
+	digits := name[4:20]
+	for i := 0; i < len(digits); i++ {
+		if digits[i] < '0' || digits[i] > '9' {
+			return 0, false
+		}
+	}
+	idx, err := strconv.ParseUint(digits, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return idx, true
+}
+
+// segmentName formats idx as a segment file name.
+func segmentName(idx uint64) string {
+	return fmt.Sprintf("seg-%016d.vmsp", idx)
 }
 
 // fSyncDir opens dir and calls fsync on the directory file descriptor.
