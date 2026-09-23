@@ -458,11 +458,18 @@ func (w *Writer) spoolTotalBytes() (int64, error) {
 //
 // The directory listing is read before the cursor on purpose: the importer
 // commits a record, then writes the cursor, then prunes the segment. A
-// segment missing from an earlier listing was pruned only after the cursor
-// was written to name it, so a cursor read afterwards still names it and the
+// segment holding committed records was pruned only after the cursor was
+// written to name it, so a cursor read afterwards still names it and the
 // maximum still reflects it. Reading in the other order — cursor first, then
 // listing — risks a prune landing between the two reads, which would hide
 // the segment from both and let its index be reused.
+//
+// A closed segment with no records (header and end marker only) is pruned as
+// FUTURE without the cursor ever being written to name it, so its name is
+// missing from both reads and can come back in the very next writer. That
+// reuse is safe: the name is still ahead of the cursor, so the importer
+// reads the reissued segment from its first record instead of skipping it as
+// already seen.
 func nextSegmentIndex(dir string) (uint64, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil && !os.IsNotExist(err) {

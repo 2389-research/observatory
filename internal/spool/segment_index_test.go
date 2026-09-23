@@ -207,6 +207,78 @@ func TestNewBootAfterRotatedPruneImportsEveryRecord(t *testing.T) {
 	}
 }
 
+// TestPrunedEmptySegmentNameReturnsAheadOfCursor pins the second prune path
+// nextSegmentIndex relies on: a writer that opens and closes without ever
+// appending leaves a segment holding only a header and an end marker, and
+// the importer prunes that segment as FUTURE without writing the cursor to
+// name it. A later writer can then reissue the identical name. The reuse is
+// safe only because the name stays ahead of the cursor, so the importer
+// reads the reissued segment's records rather than skipping them as already
+// seen. This pins current behavior; it passes without any production change.
+func TestPrunedEmptySegmentNameReturnsAheadOfCursor(t *testing.T) {
+	st := openTestStore(t)
+	root := t.TempDir()
+	vm := "7a7a7a7a-0007-4000-8000-000000000007"
+	instanceA := "7a7a7a7a-0007-4000-8000-0000000000aa"
+	instanceB := "7a7a7a7a-0007-4000-8000-0000000000bb"
+	spoolDir := filepath.Join(root, vm)
+	if err := os.MkdirAll(spoolDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	wA, err := spool.OpenWriter(spoolDir, spool.WriterCfg{
+		VMID: vm, InstanceID: instanceA,
+		MaxSegmentBytes: 4 * 1024 * 1024, MaxSpoolBytes: 64 * 1024 * 1024,
+		LossRecord: lossRecordFor(vm),
+	})
+	if err != nil {
+		t.Fatalf("OpenWriter boot A: %v", err)
+	}
+	if err := wA.Close(); err != nil {
+		t.Fatalf("Close boot A (no appends): %v", err)
+	}
+	wantA := []string{"seg-0000000000000000.vmsp"}
+	if segs := vmspNames(t, spoolDir); !slices.Equal(segs, wantA) {
+		t.Fatalf("boot A segment = %v, want %v", segs, wantA)
+	}
+
+	imp := spool.NewImporter(st, root, time.Second, nil)
+	if _, err := imp.ImportOnce(context.Background()); err != nil {
+		t.Fatalf("ImportOnce (empty boot A): %v", err)
+	}
+	if segs := vmspNames(t, spoolDir); len(segs) != 0 {
+		t.Fatalf("boot A's empty segment not pruned: %v", segs)
+	}
+
+	wB, err := spool.OpenWriter(spoolDir, spool.WriterCfg{
+		VMID: vm, InstanceID: instanceB,
+		MaxSegmentBytes: 4 * 1024 * 1024, MaxSpoolBytes: 64 * 1024 * 1024,
+		LossRecord: lossRecordFor(vm),
+	})
+	if err != nil {
+		t.Fatalf("OpenWriter boot B: %v", err)
+	}
+	wantB := []string{"seg-0000000000000000.vmsp"}
+	if segs := vmspNames(t, spoolDir); !slices.Equal(segs, wantB) {
+		t.Fatalf("boot B segment = %v, want %v (the pruned name reissued)", segs, wantB)
+	}
+	for i := 0; i < 4; i++ {
+		if err := wB.Append(makeSpoolEnvelope(vm, instanceB, fmt.Sprintf("%d", i))); err != nil {
+			t.Fatalf("Append boot B[%d]: %v", i, err)
+		}
+	}
+	if err := wB.Close(); err != nil {
+		t.Fatalf("Close boot B: %v", err)
+	}
+
+	if _, err := imp.ImportOnce(context.Background()); err != nil {
+		t.Fatalf("ImportOnce (boot B): %v", err)
+	}
+	if got := countEvents(t, st, instanceB); got != 4 {
+		t.Fatalf("countEvents(instanceB) = %d, want 4", got)
+	}
+}
+
 // TestStraySpoolFileDoesNotResetSegmentIndex plants a name that sorts after
 // every real segment name. The old scan sorted all *.vmsp names as strings
 // and Sscanf'd only the lexical maximum, so a trailing stray name made
