@@ -130,7 +130,7 @@ func TestHTTPVMImportFailureHealthAndUnknownVM(t *testing.T) {
 		t.Fatal(err)
 	}
 	seg := filepath.Join(dir, "seg-0000000000000000.vmsp")
-	if err := os.WriteFile(seg, []byte("broken"), 0600); err != nil {
+	if err := os.WriteFile(seg, []byte("broken\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	imp := spool.NewImporter(st, root, time.Second, nil)

@@ -147,7 +147,9 @@ func (it *SegmentIter) Next() (*events.Envelope, error) {
 
 // RecoverReport describes the result of a Recover call.
 type RecoverReport struct {
-	// Segments lists the segment file paths that were inspected (and repaired where needed).
+	// Segments lists the paths of segments safe to import, in order. A
+	// headerless newest segment (its creation may be under way) and a
+	// removed headerless segment below it are left out.
 	Segments []string
 	// TruncatedTail is true when at least one segment had a truncated trailing record
 	// that was removed by truncation.
@@ -160,60 +162,114 @@ type RecoverReport struct {
 	Gaps []*events.Envelope
 }
 
-// Recover inspects all *.vmsp segment files in dir and repairs any truncated tails.
-// It returns a RecoverReport describing what it found and fixed.
-// An empty dir returns a zero report without error.
+// Recover inspects the segment files in dir whose names parseSegmentName
+// accepts, and repairs any truncated tails. Other .vmsp names (a
+// quota-filling ballast file, for instance) are never opened, truncated,
+// removed, or treated as the newest segment — spoolTotalBytes in writer.go
+// still counts them toward the disk quota regardless of name.
+//
+// The runner's own writer may still be appending to the newest segment
+// (the highest parsed index), so Recover never opens it read-write or
+// truncates it: reading simply stops at its torn tail. A segment below the
+// newest whose header has no trailing newline is a creation no writer will
+// ever finish and is removed; the same state in the newest segment may be a
+// creation still under way, so it is left alone and excluded from the
+// report. An empty dir returns a zero report without error.
 func Recover(dir string) (RecoverReport, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return RecoverReport{}, fmt.Errorf("spool: recover readdir %s: %w", dir, err)
 	}
 
-	var paths []string
-	for _, e := range entries {
-		if !e.IsDir() && filepath.Ext(e.Name()) == ".vmsp" {
-			paths = append(paths, filepath.Join(dir, e.Name()))
-		}
+	type segFile struct {
+		idx  uint64
+		path string
 	}
-	if len(paths) == 0 {
+	var segs []segFile
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		idx, ok := parseSegmentName(e.Name())
+		if !ok {
+			continue
+		}
+		segs = append(segs, segFile{idx: idx, path: filepath.Join(dir, e.Name())})
+	}
+	if len(segs) == 0 {
 		return RecoverReport{}, nil
 	}
-	sort.Strings(paths)
+	sort.Slice(segs, func(i, j int) bool { return segs[i].idx < segs[j].idx })
+	newest := len(segs) - 1
 
 	var report RecoverReport
-	report.Segments = paths
-
-	for i, path := range paths {
-		truncated, corrupt, err := recoverSegment(path)
+	for i, seg := range segs {
+		headerless, truncated, corrupt, err := recoverSegment(seg.path, i == newest)
 		if err != nil {
-			return RecoverReport{}, fmt.Errorf("spool: recover segment %s: %w", path, err)
+			return RecoverReport{}, fmt.Errorf("spool: recover segment %s: %w", seg.path, err)
 		}
+		if headerless {
+			if i == newest {
+				// Creation may still be under way — leave the file for its
+				// writer to finish, or for a later Recover to remove once
+				// it is no longer the newest.
+				continue
+			}
+			// No writer will ever finish this one: a writer only ever
+			// appends to the segment it just created, and moves on to a
+			// new segment after any failure.
+			if rerr := os.Remove(seg.path); rerr != nil {
+				return RecoverReport{}, fmt.Errorf("spool: remove headerless segment %s: %w", seg.path, rerr)
+			}
+			continue
+		}
+		report.Segments = append(report.Segments, seg.path)
 		if truncated {
 			report.TruncatedTail = true
 		}
 		if corrupt > 0 {
-			// One gap envelope per corrupt segment: segment index i is the SourceSeq
-			// and vmDir+segname determines the SourceInstanceID. Two corruptions in
-			// the same dir always get different seqs (different i), so they land as
-			// distinct (source_instance_id, source_seq) pairs in the store — a second
-			// corruption cannot dedup away the first.
-			report.Gaps = append(report.Gaps, buildGapEnvelope(dir, path, i, corrupt))
+			// One gap envelope per corrupt segment: its position in
+			// report.Segments is the SourceSeq and vmDir+segname determines
+			// the SourceInstanceID. Two corruptions in the same dir always
+			// get different seqs, so they land as distinct
+			// (source_instance_id, source_seq) pairs in the store — a
+			// second corruption cannot dedup away the first.
+			report.Gaps = append(report.Gaps, buildGapEnvelope(dir, seg.path, len(report.Segments)-1, corrupt))
 		}
 	}
 
 	return report, nil
 }
 
-// recoverSegment reads through a single segment file.
-// If the file ends with a truncated (incomplete) record it truncates the file
-// to the last good byte position and returns (truncated=true, ...).
-// If interior corrupt records exist it counts them and returns the count.
-// It does NOT truncate interior corruption — the caller (importer, Task 7)
-// must handle that; recovery only fixes the tail.
-func recoverSegment(path string) (truncated bool, corruptCount int, err error) {
-	f, err := os.OpenFile(path, os.O_RDWR, 0o600)
+// recoverSegment reads through a single segment file at path. isNewest marks
+// the highest-indexed segment in the directory, the one a live writer may
+// still be appending to.
+//
+// A header with no trailing newline (a 0-byte file included) is a creation
+// no reader can finish parsing yet. recoverSegment reports that via
+// headerless rather than an error and leaves the skip-or-remove decision to
+// the caller, which knows whether this is the newest segment. A complete
+// header line that fails to parse, or has the wrong magic, is real
+// corruption and stays a hard error on every segment, the newest included.
+//
+// If the file ends with a truncated (incomplete) trailing record,
+// recoverSegment truncates it to the last good byte position and returns
+// truncated=true — but only when isNewest is false. The newest segment is
+// opened read-only and is never truncated: its torn tail may be a write
+// still in progress, and ReadSegment already stops cleanly there on its own.
+//
+// Interior corruption (a bad CRC or an oversize length) is counted and
+// scanning stops there, on every segment including the newest.
+// recoverSegment does not attempt to repair interior corruption; the caller
+// reports it as a gap.
+func recoverSegment(path string, isNewest bool) (headerless, truncated bool, corruptCount int, err error) {
+	flag := os.O_RDWR
+	if isNewest {
+		flag = os.O_RDONLY
+	}
+	f, err := os.OpenFile(path, flag, 0o600)
 	if err != nil {
-		return false, 0, err
+		return false, false, 0, err
 	}
 	defer f.Close()
 
@@ -221,24 +277,48 @@ func recoverSegment(path string) (truncated bool, corruptCount int, err error) {
 	br := bufio.NewReader(f)
 	hdrLine, err := br.ReadString('\n')
 	if err != nil {
-		// Malformed header — not a recoverable tail issue.
-		return false, 0, fmt.Errorf("read header: %w", err)
+		if err == io.EOF {
+			// No newline yet: a creation under way (the newest segment) or
+			// a creation no writer will ever finish (any other segment).
+			// Either way this is not corruption.
+			return true, false, 0, nil
+		}
+		return false, false, 0, fmt.Errorf("read header: %w", err)
 	}
 
 	var hdr segmentHeader
 	if err := json.Unmarshal([]byte(strings.TrimSuffix(hdrLine, "\n")), &hdr); err != nil {
-		return false, 0, fmt.Errorf("parse header: %w", err)
+		return false, false, 0, fmt.Errorf("parse header: %w", err)
 	}
 	if hdr.Magic != segmentMagic {
-		return false, 0, fmt.Errorf("wrong magic %q", hdr.Magic)
+		return false, false, 0, fmt.Errorf("wrong magic %q", hdr.Magic)
 	}
 
 	// Walk through all records, tracking positions so we can truncate.
-	// filePos is the current read position in the underlying file.
-	// Because we're using bufio.Reader, we track logical byte offsets manually.
+	// pos is the current read position in the underlying file. Because
+	// we're using bufio.Reader, we track logical byte offsets manually.
 	headerBytes := int64(len(hdrLine))
 	pos := headerBytes
 	lastGoodPos := headerBytes // position after the last complete record
+
+	// tornTail truncates the file to the last good record boundary and
+	// syncs the truncation. The newest segment is opened read-only and is
+	// never truncated here — see the doc comment above.
+	tornTail := func() (bool, error) {
+		if isNewest || pos <= lastGoodPos {
+			return false, nil
+		}
+		if terr := f.Truncate(lastGoodPos); terr != nil {
+			return false, terr
+		}
+		// Sync after truncation: recovery emits a gap record for what it
+		// removed; if the truncation itself isn't durable, a crash can
+		// resurrect the garbage tail and a second recovery re-emits the gap.
+		if serr := f.Sync(); serr != nil {
+			return false, serr
+		}
+		return true, nil
+	}
 
 	for {
 		// Read length (4 bytes).
@@ -247,37 +327,23 @@ func recoverSegment(path string) (truncated bool, corruptCount int, err error) {
 		pos += int64(n)
 		if readErr != nil {
 			if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
-				// Truncated before length — truncate file to lastGoodPos.
-				// Sync after truncation: recovery emits a gap record for what it
-				// removed; if the truncation itself isn't durable, a crash can
-				// resurrect the garbage tail and a second recovery re-emits the gap.
-				if pos > lastGoodPos {
-					if terr := f.Truncate(lastGoodPos); terr != nil {
-						return false, corruptCount, terr
-					}
-					if serr := f.Sync(); serr != nil {
-						return false, corruptCount, serr
-					}
-					return true, corruptCount, nil
-				}
-				return false, corruptCount, nil
+				trunc, terr := tornTail()
+				return false, trunc, corruptCount, terr
 			}
-			return false, corruptCount, readErr
+			return false, false, corruptCount, readErr
 		}
 		recLen := binary.BigEndian.Uint32(lenBuf[:])
 
 		if recLen == endMarker {
 			// Clean end marker — nothing to repair.
-			return false, corruptCount, nil
+			return false, false, corruptCount, nil
 		}
 
 		if int(recLen) > maxRecordBytes {
-			// Interior corruption — oversize length. We do not try to repair
-			// interior corruption; just count it and continue scanning (with
-			// the knowledge we'll likely lose sync). For recovery purposes,
-			// we count the corrupt record.
+			// Interior corruption — oversize length. We do not try to
+			// repair interior corruption on any segment, newest included;
+			// just count it and stop scanning.
 			corruptCount++
-			// Can't safely skip; stop here.
 			break
 		}
 
@@ -287,15 +353,10 @@ func recoverSegment(path string) (truncated bool, corruptCount int, err error) {
 		pos += int64(n)
 		if readErr != nil {
 			if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
-				if err := f.Truncate(lastGoodPos); err != nil {
-					return false, corruptCount, err
-				}
-				if err := f.Sync(); err != nil {
-					return false, corruptCount, err
-				}
-				return true, corruptCount, nil
+				trunc, terr := tornTail()
+				return false, trunc, corruptCount, terr
 			}
-			return false, corruptCount, readErr
+			return false, false, corruptCount, readErr
 		}
 		storedCRC := binary.BigEndian.Uint32(crcBuf[:])
 
@@ -305,15 +366,10 @@ func recoverSegment(path string) (truncated bool, corruptCount int, err error) {
 		pos += int64(n)
 		if readErr != nil {
 			if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
-				if err := f.Truncate(lastGoodPos); err != nil {
-					return false, corruptCount, err
-				}
-				if err := f.Sync(); err != nil {
-					return false, corruptCount, err
-				}
-				return true, corruptCount, nil
+				trunc, terr := tornTail()
+				return false, trunc, corruptCount, terr
 			}
-			return false, corruptCount, readErr
+			return false, false, corruptCount, readErr
 		}
 
 		// Verify CRC.
@@ -328,7 +384,7 @@ func recoverSegment(path string) (truncated bool, corruptCount int, err error) {
 		lastGoodPos = pos
 	}
 
-	return false, corruptCount, nil
+	return false, false, corruptCount, nil
 }
 
 // buildGapEnvelope constructs a synthetic recovery gap envelope for one corrupt segment.

@@ -130,7 +130,10 @@ func TestRoundTrip(t *testing.T) {
 }
 
 // TestCrashSimulation writes 2 records, appends garbage, then calls Recover.
-// Recovery should report TruncatedTail=true and the iterator yields exactly 2.
+// The segment is the only one, so it is the newest: Recover must leave it
+// exactly as found, because a live writer might still be mid-append. Once a
+// second writer opens (a new segment becomes the newest), the old segment can
+// no longer grow and Recover truncates its garbage tail.
 func TestCrashSimulation(t *testing.T) {
 	dir := t.TempDir()
 	w, err := spool.OpenWriter(dir, spool.WriterCfg{
@@ -153,7 +156,14 @@ func TestCrashSimulation(t *testing.T) {
 	if len(segs) == 0 {
 		t.Fatal("no segment file found before appending garbage")
 	}
-	f, err := os.OpenFile(segs[0], os.O_WRONLY|os.O_APPEND, 0o600)
+	seg0 := segs[0]
+	beforeGarbage, err := os.Stat(seg0)
+	if err != nil {
+		t.Fatalf("Stat before garbage: %v", err)
+	}
+	sizeBeforeGarbage := beforeGarbage.Size()
+
+	f, err := os.OpenFile(seg0, os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		t.Fatalf("open seg for garbage append: %v", err)
 	}
@@ -162,19 +172,32 @@ func TestCrashSimulation(t *testing.T) {
 	_ = f.Close()
 	// Also skip w.Close() to leave file "crashed".
 
+	withGarbage, err := os.Stat(seg0)
+	if err != nil {
+		t.Fatalf("Stat with garbage: %v", err)
+	}
+	sizeWithGarbage := withGarbage.Size()
+
+	// Phase 1: seg0 is the only segment, so it is the newest. A live writer
+	// could still be mid-append, so Recover must leave it untouched.
 	report, err := spool.Recover(dir)
 	if err != nil {
 		t.Fatalf("Recover: %v", err)
 	}
-	if !report.TruncatedTail {
-		t.Error("expected TruncatedTail=true, got false")
+	if report.TruncatedTail {
+		t.Error("newest segment: expected TruncatedTail=false, got true")
 	}
 	if len(report.Segments) == 0 {
 		t.Error("expected at least one segment in report")
 	}
+	if got, statErr := os.Stat(seg0); statErr != nil || got.Size() != sizeWithGarbage {
+		t.Errorf("newest segment: size changed: got %+v (err %v), want %d", got, statErr, sizeWithGarbage)
+	}
 
-	// Now read the recovered segment — should yield exactly 2 records.
-	iter, err := spool.ReadSegment(segs[0])
+	// Read the recovered segment — still yields exactly 2 records, because
+	// ReadSegment tolerates a torn tail on its own; Recover did not need to
+	// truncate anything for that.
+	iter, err := spool.ReadSegment(seg0)
 	if err != nil {
 		t.Fatalf("ReadSegment after Recover: %v", err)
 	}
@@ -192,6 +215,35 @@ func TestCrashSimulation(t *testing.T) {
 	}
 	if count != 2 {
 		t.Errorf("expected 2 records after recovery, got %d", count)
+	}
+
+	// Phase 2: a second writer takes over — seg0 is no longer the newest and
+	// can no longer grow, so Recover now truncates its garbage tail.
+	w2, err := spool.OpenWriter(dir, spool.WriterCfg{
+		VMID:            "vm-1",
+		InstanceID:      "inst-1",
+		MaxSegmentBytes: 4 * 1024 * 1024,
+		MaxSpoolBytes:   64 * 1024 * 1024,
+		LossRecord:      lossRecordFor("vm-1"),
+	})
+	if err != nil {
+		t.Fatalf("OpenWriter (second): %v", err)
+	}
+	defer w2.Close()
+	segsAfter, _ := filepath.Glob(filepath.Join(dir, "seg-*.vmsp"))
+	if len(segsAfter) != 2 {
+		t.Fatalf("expected 2 segments once the second writer opens, got %d: %v", len(segsAfter), segsAfter)
+	}
+
+	report2, err := spool.Recover(dir)
+	if err != nil {
+		t.Fatalf("Recover (second): %v", err)
+	}
+	if !report2.TruncatedTail {
+		t.Error("seg0 demoted from newest: expected TruncatedTail=true, got false")
+	}
+	if got, statErr := os.Stat(seg0); statErr != nil || got.Size() != sizeBeforeGarbage {
+		t.Errorf("seg0 demoted from newest: size = %+v (err %v), want %d (pre-garbage size)", got, statErr, sizeBeforeGarbage)
 	}
 }
 
