@@ -25,10 +25,19 @@
 //
 // # Recovery rules (SPEC §12.4)
 //
-// Tolerate an unacknowledged truncated trailing record (truncate it away).
-// Reject corrupt interior records — stop reading the segment at the first
-// corruption and report it. A gap envelope (kind spool.recovery_gap) is
-// emitted for the omitted span.
+// Only names of the form seg-%016d.vmsp are segments; every other name is
+// never opened, truncated, or removed by recovery. Segments are ordered by
+// that index, and the newest (highest) is never truncated: its writer may
+// still be appending to it, so reading it simply stops at the torn tail. A
+// torn tail on any other segment is truncated away, since no writer will
+// return to finish it.
+//
+// A segment whose header has no trailing newline yet is a creation still in
+// progress: left alone when it is the newest, removed when it is not, for
+// the same reason — no writer will come back to finish it. Corrupt interior
+// records (a bad CRC or an oversize length) are never repaired on any
+// segment — reading stops at the first one and a gap envelope (kind
+// spool.recovery_gap) reports the omitted span.
 //
 // # Durability (SPEC §12.4)
 //

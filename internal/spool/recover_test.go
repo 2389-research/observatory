@@ -63,53 +63,68 @@ func TestRecoverLeavesEmptyNewestSegmentForNextCycle(t *testing.T) {
 // newest whose header was never finished: no writer will ever come back to
 // it, because a writer only ever appends to the segment it just created and
 // moves on to a new one after any failure. Recover must remove it and report
-// the other, valid segments.
+// the other, valid segments — whether the crash landed mid-header (some
+// bytes, no newline) or before the header write even started (0 bytes, the
+// likelier case in practice: create() and the header write are separate
+// syscalls).
 func TestRecoverRemovesTornCreationBelowNewest(t *testing.T) {
-	root := t.TempDir()
-	vmID := "44444444-4444-4444-4444-444444444444"
-	instanceID := "dddddddd-dddd-dddd-dddd-dddddddddddd"
-
-	vmDir := writeSegment(t, root, vmID, []*events.Envelope{makeSpoolEnvelope(vmID, instanceID, "0")}, true /* closed */)
-	seg0 := filepath.Join(vmDir, "seg-0000000000000000.vmsp")
-
-	// seg1: a torn creation — some header bytes landed, but the terminating
-	// newline never arrived.
-	seg1 := filepath.Join(vmDir, "seg-0000000000000001.vmsp")
-	if err := os.WriteFile(seg1, []byte(`{"magic":"vmsp","vers`), 0o600); err != nil {
-		t.Fatalf("create torn seg1: %v", err)
+	cases := []struct {
+		name    string
+		payload []byte
+	}{
+		{"partial header", []byte(`{"magic":"vmsp","vers`)},
+		{"zero byte", nil},
 	}
 
-	// seg2: the next writer, now the newest and fully valid.
-	w2, err := spool.OpenWriter(vmDir, spool.WriterCfg{
-		VMID:            vmID,
-		InstanceID:      instanceID,
-		MaxSegmentBytes: 4 * 1024 * 1024,
-		MaxSpoolBytes:   64 * 1024 * 1024,
-		LossRecord:      lossRecordFor(vmID),
-	})
-	if err != nil {
-		t.Fatalf("OpenWriter seg2: %v", err)
-	}
-	if err := w2.Append(makeSpoolEnvelope(vmID, instanceID, "1")); err != nil {
-		t.Fatalf("Append seg2: %v", err)
-	}
-	if err := w2.Close(); err != nil {
-		t.Fatalf("Close seg2: %v", err)
-	}
-	seg2 := filepath.Join(vmDir, "seg-0000000000000002.vmsp")
-	if _, err := os.Stat(seg2); err != nil {
-		t.Fatalf("expected seg2 at index 2: %v", err)
-	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			root := t.TempDir()
+			vmID := "44444444-4444-4444-4444-444444444444"
+			instanceID := "dddddddd-dddd-dddd-dddd-dddddddddddd"
 
-	report, err := spool.Recover(vmDir)
-	if err != nil {
-		t.Fatalf("Recover: %v", err)
-	}
-	if want := []string{seg0, seg2}; !slices.Equal(report.Segments, want) {
-		t.Errorf("Segments = %v, want %v", report.Segments, want)
-	}
-	if _, statErr := os.Stat(seg1); !os.IsNotExist(statErr) {
-		t.Errorf("torn creation below newest must be removed, stat err = %v", statErr)
+			vmDir := writeSegment(t, root, vmID, []*events.Envelope{makeSpoolEnvelope(vmID, instanceID, "0")}, true /* closed */)
+			seg0 := filepath.Join(vmDir, "seg-0000000000000000.vmsp")
+
+			// seg1: a torn creation — the header write landed partially, or
+			// (zero byte case) never started at all.
+			seg1 := filepath.Join(vmDir, "seg-0000000000000001.vmsp")
+			if err := os.WriteFile(seg1, c.payload, 0o600); err != nil {
+				t.Fatalf("create torn seg1: %v", err)
+			}
+
+			// seg2: the next writer, now the newest and fully valid.
+			w2, err := spool.OpenWriter(vmDir, spool.WriterCfg{
+				VMID:            vmID,
+				InstanceID:      instanceID,
+				MaxSegmentBytes: 4 * 1024 * 1024,
+				MaxSpoolBytes:   64 * 1024 * 1024,
+				LossRecord:      lossRecordFor(vmID),
+			})
+			if err != nil {
+				t.Fatalf("OpenWriter seg2: %v", err)
+			}
+			if err := w2.Append(makeSpoolEnvelope(vmID, instanceID, "1")); err != nil {
+				t.Fatalf("Append seg2: %v", err)
+			}
+			if err := w2.Close(); err != nil {
+				t.Fatalf("Close seg2: %v", err)
+			}
+			seg2 := filepath.Join(vmDir, "seg-0000000000000002.vmsp")
+			if _, err := os.Stat(seg2); err != nil {
+				t.Fatalf("expected seg2 at index 2: %v", err)
+			}
+
+			report, err := spool.Recover(vmDir)
+			if err != nil {
+				t.Fatalf("Recover: %v", err)
+			}
+			if want := []string{seg0, seg2}; !slices.Equal(report.Segments, want) {
+				t.Errorf("Segments = %v, want %v", report.Segments, want)
+			}
+			if _, statErr := os.Stat(seg1); !os.IsNotExist(statErr) {
+				t.Errorf("torn creation below newest must be removed, stat err = %v", statErr)
+			}
+		})
 	}
 }
 
