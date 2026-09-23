@@ -135,6 +135,9 @@ func (r *runner) run(ctx context.Context) error {
 		InstanceID:      r.cfg.InstanceID,
 		MaxSegmentBytes: maxSegmentBytes,
 		// MaxSpoolBytes 0 → DefaultMaxSpoolBytes (512 MiB)
+		LossRecord: func(o spool.Outage) *events.Envelope {
+			return r.newEnvelope("telemetry.loss", o.Data())
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("runner: open spool: %w", err)
@@ -594,9 +597,9 @@ func (r *runner) newEnvelope(kind string, data map[string]any) *events.Envelope 
 }
 
 // appendChannelEstablished appends a guest.channel_established envelope.
-// On Append failure: logs one line to stderr and continues (spool is poisoned
-// so later appends will fast-fail; identity watch outlives spooling). Limitation:
-// no overflow-health-record path in this milestone.
+// On Append failure it logs one line to stderr and continues, because the
+// identity watch outlives spooling. The writer records refused appends as a
+// telemetry.loss once an append succeeds.
 func (r *runner) appendChannelEstablished(capsCount int) error {
 	env := r.newEnvelope("guest.channel_established", map[string]any{
 		"protocol_version":   1,

@@ -8,11 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/2389-research/observatory/internal/events"
 )
@@ -32,6 +34,9 @@ type WriterCfg struct {
 	// MaxSpoolBytes is the maximum total bytes across all segments in the spool
 	// directory. When 0, DefaultMaxSpoolBytes applies.
 	MaxSpoolBytes int64
+	// LossRecord builds the telemetry.loss envelope for an outage. The writer
+	// calls it while holding its lock, so it must not call the Writer.
+	LossRecord func(Outage) *events.Envelope
 }
 
 // segmentHeader is the JSON object written as the first line of every segment.
@@ -55,22 +60,28 @@ type Writer struct {
 	maxSpool int64 // resolved MaxSpoolBytes (never zero)
 	segIdx   uint64
 	f        *os.File
-	segBytes int64 // bytes written to current segment (header + records)
-	// poison is set on the first write or fsync failure that touches record
-	// bytes. Once set, every subsequent Append returns it immediately.
-	// Rationale: after a failed fsync the kernel may drop dirty pages and
-	// clear the error flag, so a later fsync can succeed while earlier bytes
-	// were lost — retrying turns a loud failure into silent evidence loss.
-	// ErrSpoolFull and oversize-record errors do NOT poison: they reject the
-	// record before any bytes reach the file.
-	poison error
+	segBytes int64 // durable bytes in the current segment (header + records)
+	// damaged means the current segment may hold bytes that failed to become
+	// durable, and nothing more will be written to it. After a failed fsync
+	// the kernel may drop dirty pages and clear the error, so a later fsync on
+	// the same file can succeed although earlier bytes never reached disk.
+	// That condemns the file, not the writer: the next Append moves to a new
+	// segment, which has no such history. damaged implies an open outage.
+	damaged bool
+	// outage is open while refused appends are unrecorded. The next Append
+	// that succeeds writes its telemetry.loss ahead of its own record.
+	outage *Outage
+	closed bool
 }
 
 // OpenWriter opens (or creates) a spool writer in dir with the given configuration.
-// It returns an error when MaxSegmentBytes <= 0.
+// It returns an error when MaxSegmentBytes <= 0 or LossRecord is nil.
 func OpenWriter(dir string, cfg WriterCfg) (*Writer, error) {
 	if cfg.MaxSegmentBytes <= 0 {
 		return nil, fmt.Errorf("spool: MaxSegmentBytes must be > 0")
+	}
+	if cfg.LossRecord == nil {
+		return nil, fmt.Errorf("spool: WriterCfg.LossRecord is required")
 	}
 	maxSpool := cfg.MaxSpoolBytes
 	if maxSpool == 0 {
@@ -89,119 +100,219 @@ func OpenWriter(dir string, cfg WriterCfg) (*Writer, error) {
 		maxSpool: maxSpool,
 		segIdx:   idx,
 	}
-	if err := w.openSegment(); err != nil {
+	if err := w.createSegment(); err != nil {
 		return nil, err
 	}
 	return w, nil
 }
 
 // Append marshals env as JSON and appends it as a record to the current segment.
-// It returns ErrSpoolFull if the record would exceed MaxSpoolBytes.
 // It fsyncs the segment file before returning (ack barrier, SPEC §12.4).
-// If a previous Append poisoned the writer (see Writer.poison), it returns
-// the poison error immediately without attempting any write.
+//
+// An Append the spool cannot make durable is refused: ErrSpoolFull when the
+// record would exceed MaxSpoolBytes, or the error of a failed write, fsync or
+// segment create. The writer counts each refusal in an open outage and tries
+// again on the next Append. A failed write or fsync abandons the segment, so
+// the next Append moves to a new one. The first Append that succeeds after
+// refusals writes the outage's telemetry.loss ahead of its own record.
+//
+// A record that cannot marshal or exceeds the frame limit is rejected for its
+// own content. That is not a refusal: the spool is fine.
 func (w *Writer) Append(env *events.Envelope) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	// Poison check: return the sticky error immediately, no write attempt.
-	if w.poison != nil {
-		return w.poison
+	if w.closed {
+		return fmt.Errorf("spool: append after close")
 	}
 
 	body, err := json.Marshal(env)
 	if err != nil {
 		return fmt.Errorf("spool: marshal envelope: %w", err)
 	}
-	// Reject oversized records before any bytes reach the file — does NOT poison.
 	if len(body) > maxRecordBytes {
 		return fmt.Errorf("spool: record body %d bytes exceeds 256 KiB frame limit", len(body))
 	}
+	rec := encodeFrame(body)
 
-	// Spool total-bytes guard (SPEC §12.5) — does NOT poison; no bytes written yet.
+	// Spool total-bytes guard (SPEC §12.5). It counts the record's frame
+	// only: the loss frame is exempt, so a full spool can still record its
+	// own loss.
 	totalNow, err := w.spoolTotalBytes()
 	if err != nil {
-		return fmt.Errorf("spool: measure spool size: %w", err)
+		return w.refuse(env, fmt.Errorf("spool: measure spool size: %w", err))
 	}
-	// Record overhead: 4-byte len + 4-byte CRC = 8 bytes per record.
-	needed := int64(8 + len(body))
-	if totalNow+needed > w.maxSpool {
-		return ErrSpoolFull
+	if totalNow+int64(len(rec)) > w.maxSpool {
+		return w.refuse(env, ErrSpoolFull)
 	}
 
-	// Rotate if the current segment is already at or near capacity.
-	if w.segBytes+needed > w.cfg.MaxSegmentBytes {
-		if err := w.rotate(); err != nil {
-			return err
+	var loss []byte
+	if w.outage != nil {
+		if loss, err = w.lossFrame(); err != nil {
+			return w.refuse(env, err)
 		}
 	}
-
-	// Build the record: [len uint32 BE][crc32c uint32 BE][body].
-	rec := make([]byte, 8+len(body))
-	binary.BigEndian.PutUint32(rec[0:4], uint32(len(body)))
-	checksum := crc32.Checksum(body, crc32cTable)
-	binary.BigEndian.PutUint32(rec[4:8], checksum)
-	copy(rec[8:], body)
-
-	// Bytes are about to hit the file. Any failure from here poisons the writer.
-	if _, err := w.f.Write(rec); err != nil {
-		w.poison = fmt.Errorf("spool: write record: %w", err)
-		return w.poison
+	if w.damaged || w.segBytes+int64(len(loss)+len(rec)) > w.cfg.MaxSegmentBytes {
+		if err := w.advance(); err != nil {
+			return w.refuse(env, err)
+		}
 	}
-	if err := w.f.Sync(); err != nil {
-		w.poison = fmt.Errorf("spool: fsync after record: %w", err)
-		return w.poison
+	if loss != nil {
+		if err := w.writeFrame(loss, "loss record"); err != nil {
+			return w.refuse(env, err)
+		}
+		w.outage = nil
 	}
-	// segBytes is updated only after successful Sync. With poisoning, a stale
-	// segBytes after a failed sync is unreachable (writer never appends again).
-	w.segBytes += needed
+	if err := w.writeFrame(rec, "record"); err != nil {
+		return w.refuse(env, err)
+	}
 	return nil
 }
 
-// Close writes the end marker, fsyncs, and closes the current segment.
-// If the writer is poisoned, Close skips the end marker and just closes the fd,
-// returning the poison error (or the close error if the fd is already closed).
-// The end marker means "cleanly closed, tail trustworthy" — a poisoned segment
-// is neither, so omitting it lets recovery treat it as crashed and verify it.
+// Close records an open outage when it can, then retires the current segment
+// with its end marker. When the loss cannot be recorded, the error says so
+// and carries the counts, so the caller's log keeps what the spool could not.
+// A second Close returns nil.
 func (w *Writer) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.closeLocked()
-}
-
-// closeLocked is Close's body. rotate calls it while already holding the lock;
-// Close takes the lock and calls it.
-func (w *Writer) closeLocked() error {
-	if w.f == nil {
+	if w.closed {
 		return nil
 	}
-	if w.poison != nil {
-		// Poisoned: skip end marker. Just close the fd (may already be closed).
-		_ = w.f.Close()
-		w.f = nil
-		return w.poison
+	w.closed = true
+	if w.outage != nil {
+		w.recordOutage()
 	}
-	// Write end marker: len == 0xFFFFFFFF.
-	var marker [4]byte
-	binary.BigEndian.PutUint32(marker[:], endMarker)
-	if _, err := w.f.Write(marker[:]); err != nil {
-		_ = w.f.Close()
-		w.f = nil
-		return fmt.Errorf("spool: write end marker: %w", err)
-	}
-	if err := w.f.Sync(); err != nil {
-		_ = w.f.Close()
-		w.f = nil
-		return fmt.Errorf("spool: fsync end marker: %w", err)
-	}
-	err := w.f.Close()
+	// After a failed advance this is still the damaged segment, and the
+	// retire trims it back to its last durable record.
+	retireErr := retireSegment(w.f, w.segBytes)
 	w.f = nil
+	if o := w.outage; o != nil {
+		lost := fmt.Errorf("spool: loss since %s not recorded: %d runner records and %d guest pushes refused; first cause: %s",
+			o.Since.UTC().Format(events.TimestampLayout), o.RunnerRecordsRefused, o.GuestPushesRefused, o.Cause)
+		return errors.Join(lost, retireErr)
+	}
+	return retireErr
+}
+
+// recordOutage writes the open outage's loss frame on its own, moving to a
+// new segment first when the current one is damaged or has no room. The
+// outage stays open unless the frame became durable.
+func (w *Writer) recordOutage() {
+	loss, err := w.lossFrame()
+	if err != nil {
+		return
+	}
+	if w.damaged || w.segBytes+int64(len(loss)) > w.cfg.MaxSegmentBytes {
+		if err := w.advance(); err != nil {
+			return
+		}
+	}
+	if err := w.writeFrame(loss, "loss record"); err != nil {
+		return
+	}
+	w.outage = nil
+}
+
+// refuse counts a failed Append in the open outage, opening one when none is
+// open, and returns err unchanged, so errors.Is still finds ErrSpoolFull or
+// the errno beneath a failed write. Each failed Append calls it exactly once.
+func (w *Writer) refuse(env *events.Envelope, err error) error {
+	if w.outage == nil {
+		w.outage = &Outage{Since: time.Now(), Cause: boundRunes(err.Error(), maxCauseRunes)}
+	}
+	if env != nil && env.Provenance == events.GuestReported {
+		if w.outage.GuestPushesRefused < math.MaxUint64 {
+			w.outage.GuestPushesRefused++
+		}
+	} else {
+		if w.outage.RunnerRecordsRefused < math.MaxUint64 {
+			w.outage.RunnerRecordsRefused++
+		}
+	}
 	return err
 }
 
-// openSegment creates a new segment file at the current segIdx and writes its header.
-// It fsyncs the file and the directory (SPEC §12.4 directory-entry durability).
-func (w *Writer) openSegment() error {
+// lossFrame frames the telemetry.loss envelope for the open outage, with
+// Until set to now.
+func (w *Writer) lossFrame() ([]byte, error) {
+	o := *w.outage
+	o.Until = time.Now()
+	env := w.cfg.LossRecord(o)
+	if env == nil {
+		return nil, fmt.Errorf("spool: LossRecord returned nil")
+	}
+	body, err := json.Marshal(env)
+	if err != nil {
+		return nil, fmt.Errorf("spool: marshal loss record: %w", err)
+	}
+	if len(body) > maxRecordBytes {
+		return nil, fmt.Errorf("spool: loss record body %d bytes exceeds 256 KiB frame limit", len(body))
+	}
+	return encodeFrame(body), nil
+}
+
+// encodeFrame lays out one record: [len uint32 BE][crc32c uint32 BE][body].
+func encodeFrame(body []byte) []byte {
+	rec := make([]byte, 8+len(body))
+	binary.BigEndian.PutUint32(rec[0:4], uint32(len(body)))
+	binary.BigEndian.PutUint32(rec[4:8], crc32.Checksum(body, crc32cTable))
+	copy(rec[8:], body)
+	return rec
+}
+
+// writeFrame appends one frame to the current segment and fsyncs it. what
+// names the frame in the error. On failure the segment is damaged: the frame
+// may be partly written, or written and not durable.
+func (w *Writer) writeFrame(frame []byte, what string) error {
+	if _, err := w.f.Write(frame); err != nil {
+		w.damage()
+		return fmt.Errorf("spool: write %s: %w", what, err)
+	}
+	if err := w.f.Sync(); err != nil {
+		w.damage()
+		return fmt.Errorf("spool: fsync after %s: %w", what, err)
+	}
+	w.segBytes += int64(len(frame))
+	return nil
+}
+
+// damage abandons the current segment: it may hold bytes that never became
+// durable, so nothing more is written to it. The trim back to the last
+// durable record and the fsync are best effort, and retireSegment trims the
+// segment again.
+func (w *Writer) damage() {
+	w.damaged = true
+	_ = w.f.Truncate(w.segBytes)
+	_ = w.f.Sync()
+}
+
+// advance moves the writer to a new segment and retires the current one. It
+// burns the index before the create, so a failed attempt never retries a
+// name it may have left on disk. A failed advance damages the current
+// segment, so the writer never again writes to a segment that the failed
+// create may have left a higher-numbered file beside: only the newest
+// segment grows.
+func (w *Writer) advance() error {
+	w.segIdx++
+	old, oldSize := w.f, w.segBytes
+	if err := w.createSegment(); err != nil {
+		w.damage()
+		return err
+	}
+	w.damaged = false
+	// The old segment's records are already durable. A retire that fails
+	// leaves it without an end marker, which only makes recovery read it as
+	// crashed.
+	_ = retireSegment(old, oldSize)
+	return nil
+}
+
+// createSegment creates the segment file at segIdx, writes its header and
+// fsyncs the file and the directory (SPEC §12.4 directory-entry durability).
+// It becomes the current segment only on success; a failure after the create
+// closes and removes the file.
+func (w *Writer) createSegment() error {
 	if w.segIdx > maxSegmentIndex {
 		return fmt.Errorf("spool: segment index %d exceeds the 16-digit name space", w.segIdx)
 	}
@@ -212,6 +323,11 @@ func (w *Writer) openSegment() error {
 	if err != nil {
 		return fmt.Errorf("spool: create segment %s: %w", name, err)
 	}
+	discard := func(err error) error {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return err
+	}
 
 	hdr := segmentHeader{
 		Magic:      segmentMagic,
@@ -221,24 +337,20 @@ func (w *Writer) openSegment() error {
 	}
 	hdrJSON, err := json.Marshal(hdr)
 	if err != nil {
-		_ = f.Close()
-		return fmt.Errorf("spool: marshal segment header: %w", err)
+		return discard(fmt.Errorf("spool: marshal segment header: %w", err))
 	}
 	hdrLine := append(hdrJSON, '\n')
 
 	if _, err := f.Write(hdrLine); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("spool: write segment header: %w", err)
+		return discard(fmt.Errorf("spool: write segment header: %w", err))
 	}
 	// fsync the file itself.
 	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("spool: fsync new segment: %w", err)
+		return discard(fmt.Errorf("spool: fsync new segment: %w", err))
 	}
 	// fsync the directory so the new dentry is durable (SPEC §12.4).
 	if err := fSyncDir(w.dir); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("spool: fsync spool dir: %w", err)
+		return discard(fmt.Errorf("spool: fsync spool dir: %w", err))
 	}
 
 	w.f = f
@@ -246,13 +358,27 @@ func (w *Writer) openSegment() error {
 	return nil
 }
 
-// rotate closes the current segment cleanly and opens the next one.
-func (w *Writer) rotate() error {
-	if err := w.closeLocked(); err != nil {
-		return fmt.Errorf("spool: rotate close: %w", err)
+// retireSegment ends the segment in f at size: it trims anything past size,
+// writes the end marker there, and fsyncs. The trim matters for a damaged
+// segment, which may hold a partial or unsynced frame past size; the marker
+// must follow the last durable record. It stops at the first failure, always
+// closes f, and returns the first error, or else the Close error.
+func retireSegment(f *os.File, size int64) error {
+	var marker [4]byte
+	binary.BigEndian.PutUint32(marker[:], endMarker)
+	var err error
+	if terr := f.Truncate(size); terr != nil {
+		err = fmt.Errorf("spool: trim segment before end marker: %w", terr)
+	} else if _, werr := f.WriteAt(marker[:], size); werr != nil {
+		err = fmt.Errorf("spool: write end marker: %w", werr)
+	} else if serr := f.Sync(); serr != nil {
+		err = fmt.Errorf("spool: fsync end marker: %w", serr)
 	}
-	w.segIdx++
-	return w.openSegment()
+	closeErr := f.Close()
+	if err != nil {
+		return err
+	}
+	return closeErr
 }
 
 // spoolTotalBytes sums the sizes of all *.vmsp files in the spool directory.
@@ -344,7 +470,7 @@ const segmentNameLen = 4 + 16 + 5
 // maxSegmentIndex is the highest index expressible in the fixed 16-digit
 // name space. A 17-digit name would sort lexicographically before every
 // 16-digit name, so the importer's string-order cursor comparison would
-// misclassify it as PAST and prune it unread (see openSegment).
+// misclassify it as PAST and prune it unread (see createSegment).
 const maxSegmentIndex = 9999999999999999
 
 // parseSegmentName reports whether name is exactly "seg-" + 16 ASCII decimal

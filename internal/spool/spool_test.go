@@ -11,12 +11,45 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/2389-research/observatory/internal/events"
 	"github.com/2389-research/observatory/internal/spool"
 )
+
+// lossInstanceID is the stream every test loss record is filed under. The
+// store requires a lowercase UUID there.
+const lossInstanceID = "5a1e0c2d-7b3f-4e8a-9c6d-0f1e2d3c4b5a"
+
+// lossSeq numbers test loss records from 1 across the whole package, so no two
+// of them share a (source_instance_id, source_seq) key.
+var lossSeq atomic.Uint64
+
+// lossRecordFor returns a WriterCfg.LossRecord that files an outage the way
+// the runner does: a host_observed telemetry.loss from the runner sensor.
+func lossRecordFor(vmID string) func(spool.Outage) *events.Envelope {
+	return func(o spool.Outage) *events.Envelope {
+		vid := vmID
+		return &events.Envelope{
+			SchemaVersion:    1,
+			VMID:             &vid,
+			SourceInstanceID: lossInstanceID,
+			SourceSeq:        strconv.FormatUint(lossSeq.Add(1), 10),
+			Kind:             "telemetry.loss",
+			Provenance:       events.HostObserved,
+			Sensor:           "runner",
+			HostReceivedAt:   events.Timestamp{Time: time.Now().UTC()},
+			Quality: events.Quality{
+				PathResolution: events.PathNotApplicable,
+				Attribution:    events.AttributionNotApplicable,
+			},
+			Data: o.Data(),
+		}
+	}
+}
 
 // makeEnvelope constructs a minimal valid Envelope for testing.
 func makeEnvelope(kind string, seq int) *events.Envelope {
@@ -48,6 +81,7 @@ func TestRoundTrip(t *testing.T) {
 		InstanceID:      "inst-1",
 		MaxSegmentBytes: 4 * 1024 * 1024, // 4 MiB — well over our small payloads
 		MaxSpoolBytes:   64 * 1024 * 1024,
+		LossRecord:      lossRecordFor("vm-1"),
 	})
 	if err != nil {
 		t.Fatalf("OpenWriter: %v", err)
@@ -104,6 +138,7 @@ func TestCrashSimulation(t *testing.T) {
 		InstanceID:      "inst-1",
 		MaxSegmentBytes: 4 * 1024 * 1024,
 		MaxSpoolBytes:   64 * 1024 * 1024,
+		LossRecord:      lossRecordFor("vm-1"),
 	})
 	if err != nil {
 		t.Fatalf("OpenWriter: %v", err)
@@ -169,6 +204,7 @@ func TestInteriorCorruption(t *testing.T) {
 		InstanceID:      "inst-1",
 		MaxSegmentBytes: 4 * 1024 * 1024,
 		MaxSpoolBytes:   64 * 1024 * 1024,
+		LossRecord:      lossRecordFor("vm-1"),
 	})
 	if err != nil {
 		t.Fatalf("OpenWriter: %v", err)
@@ -233,6 +269,7 @@ func TestErrSpoolFull(t *testing.T) {
 		InstanceID:      "inst-1",
 		MaxSegmentBytes: 4 * 1024 * 1024,
 		MaxSpoolBytes:   64, // 64 bytes — will be exceeded by first envelope
+		LossRecord:      lossRecordFor("vm-1"),
 	})
 	if err != nil {
 		t.Fatalf("OpenWriter: %v", err)
@@ -256,6 +293,7 @@ func TestSegmentRotation(t *testing.T) {
 		InstanceID:      "inst-1",
 		MaxSegmentBytes: 600,
 		MaxSpoolBytes:   64 * 1024 * 1024,
+		LossRecord:      lossRecordFor("vm-1"),
 	})
 	if err != nil {
 		t.Fatalf("OpenWriter: %v", err)
@@ -302,6 +340,7 @@ func TestEndMarkerPresence(t *testing.T) {
 		InstanceID:      "inst-1",
 		MaxSegmentBytes: 4 * 1024 * 1024,
 		MaxSpoolBytes:   64 * 1024 * 1024,
+		LossRecord:      lossRecordFor("vm-1"),
 	})
 	if err != nil {
 		t.Fatalf("OpenWriter: %v", err)
@@ -341,6 +380,7 @@ func TestEndMarkerPresence(t *testing.T) {
 		InstanceID:      "inst-1",
 		MaxSegmentBytes: 4 * 1024 * 1024,
 		MaxSpoolBytes:   64 * 1024 * 1024,
+		LossRecord:      lossRecordFor("vm-1"),
 	})
 	if err != nil {
 		t.Fatalf("OpenWriter2: %v", err)
@@ -393,6 +433,7 @@ func TestZeroRecordSegment(t *testing.T) {
 		InstanceID:      "inst-1",
 		MaxSegmentBytes: 4 * 1024 * 1024,
 		MaxSpoolBytes:   64 * 1024 * 1024,
+		LossRecord:      lossRecordFor("vm-1"),
 	})
 	if err != nil {
 		t.Fatalf("OpenWriter: %v", err)
@@ -426,6 +467,7 @@ func TestMaxRecordSize(t *testing.T) {
 		InstanceID:      "inst-1",
 		MaxSegmentBytes: 4 * 1024 * 1024,
 		MaxSpoolBytes:   64 * 1024 * 1024,
+		LossRecord:      lossRecordFor("vm-1"),
 	})
 	if err != nil {
 		t.Fatalf("OpenWriter: %v", err)
@@ -483,6 +525,7 @@ func TestMaxSegmentBytesZeroError(t *testing.T) {
 		InstanceID:      "inst-1",
 		MaxSegmentBytes: 0,
 		MaxSpoolBytes:   64 * 1024 * 1024,
+		LossRecord:      lossRecordFor("vm-1"),
 	})
 	if err == nil {
 		t.Error("expected error for MaxSegmentBytes=0, got nil")

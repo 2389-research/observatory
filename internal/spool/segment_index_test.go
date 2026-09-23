@@ -27,6 +27,7 @@ func oneRecordSegmentBytes(t *testing.T, vmID, instanceID string) int64 {
 		InstanceID:      instanceID,
 		MaxSegmentBytes: 1 << 20,
 		MaxSpoolBytes:   64 * 1024 * 1024,
+		LossRecord:      lossRecordFor(vmID),
 	})
 	if err != nil {
 		t.Fatalf("OpenWriter (calibration): %v", err)
@@ -78,6 +79,7 @@ func TestNewBootAfterPruneImportsEveryRecord(t *testing.T) {
 	wA, err := spool.OpenWriter(spoolDir, spool.WriterCfg{
 		VMID: vm, InstanceID: instanceA,
 		MaxSegmentBytes: 4 * 1024 * 1024, MaxSpoolBytes: 64 * 1024 * 1024,
+		LossRecord: lossRecordFor(vm),
 	})
 	if err != nil {
 		t.Fatalf("OpenWriter boot A: %v", err)
@@ -102,6 +104,7 @@ func TestNewBootAfterPruneImportsEveryRecord(t *testing.T) {
 	wB, err := spool.OpenWriter(spoolDir, spool.WriterCfg{
 		VMID: vm, InstanceID: instanceB,
 		MaxSegmentBytes: 4 * 1024 * 1024, MaxSpoolBytes: 64 * 1024 * 1024,
+		LossRecord: lossRecordFor(vm),
 	})
 	if err != nil {
 		t.Fatalf("OpenWriter boot B: %v", err)
@@ -148,6 +151,7 @@ func TestNewBootAfterRotatedPruneImportsEveryRecord(t *testing.T) {
 	wA, err := spool.OpenWriter(spoolDir, spool.WriterCfg{
 		VMID: vm, InstanceID: instanceA,
 		MaxSegmentBytes: segCap, MaxSpoolBytes: 64 * 1024 * 1024,
+		LossRecord: lossRecordFor(vm),
 	})
 	if err != nil {
 		t.Fatalf("OpenWriter boot A: %v", err)
@@ -177,6 +181,7 @@ func TestNewBootAfterRotatedPruneImportsEveryRecord(t *testing.T) {
 	wB, err := spool.OpenWriter(spoolDir, spool.WriterCfg{
 		VMID: vm, InstanceID: instanceB,
 		MaxSegmentBytes: 4 * 1024 * 1024, MaxSpoolBytes: 64 * 1024 * 1024,
+		LossRecord: lossRecordFor(vm),
 	})
 	if err != nil {
 		t.Fatalf("OpenWriter boot B: %v", err)
@@ -222,6 +227,7 @@ func TestStraySpoolFileDoesNotResetSegmentIndex(t *testing.T) {
 	w, err := spool.OpenWriter(spoolDir, spool.WriterCfg{
 		VMID: vm, InstanceID: "7a7a7a7a-0003-4000-8000-0000000000aa",
 		MaxSegmentBytes: 4 * 1024 * 1024, MaxSpoolBytes: 64 * 1024 * 1024,
+		LossRecord: lossRecordFor(vm),
 	})
 	if err != nil {
 		t.Fatalf("OpenWriter: %v", err)
@@ -250,6 +256,7 @@ func TestInvalidCursorFailsOpenWriter(t *testing.T) {
 	_, err := spool.OpenWriter(spoolDir, spool.WriterCfg{
 		VMID: vm, InstanceID: "7a7a7a7a-0004-4000-8000-0000000000aa",
 		MaxSegmentBytes: 4 * 1024 * 1024, MaxSpoolBytes: 64 * 1024 * 1024,
+		LossRecord: lossRecordFor(vm),
 	})
 	if err == nil {
 		t.Fatal("OpenWriter succeeded on an unparsable cursor")
@@ -279,6 +286,7 @@ func TestCursorNamingANonSegmentFailsOpenWriter(t *testing.T) {
 	_, err := spool.OpenWriter(spoolDir, spool.WriterCfg{
 		VMID: vm, InstanceID: "7a7a7a7a-0005-4000-8000-0000000000aa",
 		MaxSegmentBytes: 4 * 1024 * 1024, MaxSpoolBytes: 64 * 1024 * 1024,
+		LossRecord: lossRecordFor(vm),
 	})
 	if err == nil {
 		t.Fatal("OpenWriter succeeded with a cursor naming a non-segment file")
@@ -308,6 +316,7 @@ func TestSegmentIndexCeiling(t *testing.T) {
 	_, err := spool.OpenWriter(spoolDir, spool.WriterCfg{
 		VMID: vm, InstanceID: "7a7a7a7a-0006-4000-8000-0000000000aa",
 		MaxSegmentBytes: 4 * 1024 * 1024, MaxSpoolBytes: 64 * 1024 * 1024,
+		LossRecord: lossRecordFor(vm),
 	})
 	if err == nil {
 		t.Fatal("OpenWriter succeeded past the 16-digit segment name space")

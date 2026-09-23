@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -381,6 +382,164 @@ func TestRunnerNeverAcksWhatItCouldNotSpool(t *testing.T) {
 	if n := h.countKind("guest.sensor_health"); n != 1 {
 		t.Errorf("spooled %d events, want the 1 well-formed one", n)
 	}
+}
+
+// TestRunnerRecordsLossAfterSpoolRecovers follows one full outage. A full spool
+// refuses a push, the runner withholds the ack, and the guest resends once room
+// returns. The resend succeeds, and the spool says what it refused in between:
+// a telemetry.loss record written ahead of the resent event, so the gap is
+// explicit rather than invisible.
+func TestRunnerRecordsLossAfterSpoolRecovers(t *testing.T) {
+	h := newTelemetryHarness(t)
+	h.startGuest()
+
+	// What each connection saw, reported once. Buffered, so a fake guest never
+	// blocks on a test that has stopped listening.
+	firstConn := make(chan string, 1)
+	resent := make(chan string, 1)
+	// Closed once the first connection is done with the ballast, so the resend
+	// never races the removal that gives the spool its room back.
+	ballastGone := make(chan struct{})
+	ballast := filepath.Join(h.spoolDir, "ballast.vmsp")
+	var served atomic.Int32
+	h.serveFakeTelemetry(func(conn net.Conn) {
+		hello, err := readHello(conn)
+		if err != nil {
+			return
+		}
+		_ = acceptHello(conn, hello)
+		switch served.Add(1) {
+		case 1:
+			defer close(ballastGone)
+			firstConn <- refuseOnFullSpool(conn, ballast)
+		case 2:
+			<-ballastGone
+			if err := writeFakePush(conn, "2", "guest.sensor_health", `{"agent":{}}`); err != nil {
+				resent <- fmt.Sprintf("resend seq 2: %v", err)
+				return
+			}
+			env, err := proto.ReadControl(conn)
+			if err != nil || env.Kind != proto.KindTelemetryAck {
+				resent <- fmt.Sprintf("the resent seq 2 went unacknowledged (%v, %v)", env.Kind, err)
+				return
+			}
+			var ack proto.TelemetryAck
+			if err := json.Unmarshal(env.Data, &ack); err != nil {
+				resent <- fmt.Sprintf("unmarshal ack: %v", err)
+				return
+			}
+			resent <- ack.ThroughSeq
+			io.Copy(io.Discard, conn) //nolint:errcheck
+		default:
+			io.Copy(io.Discard, conn) //nolint:errcheck
+		}
+	})
+
+	h.run()
+
+	select {
+	case got := <-firstConn:
+		if got != "closed" {
+			t.Fatalf("connection 1: %s", got)
+		}
+	case <-time.After(telSpoolWait):
+		t.Fatal("the fake guest never got as far as the push the full spool refuses")
+	}
+	select {
+	case got := <-resent:
+		if got != "2" {
+			t.Fatalf("connection 2: %s", got)
+		}
+	case <-time.After(telSpoolWait):
+		t.Fatal("the runner never took the resent push")
+	}
+
+	// The ack for the resend follows its Append, so the spool already holds
+	// everything this reads.
+	lossAt, resentAt := -1, -1
+	var loss *events.Envelope
+	for i, env := range h.spooled() {
+		if env.Kind == "telemetry.loss" && loss == nil {
+			loss, lossAt = env, i
+		}
+		if env.Kind == "guest.sensor_health" && env.Provenance == events.GuestReported && env.SourceSeq == "2" {
+			resentAt = i
+		}
+	}
+	if loss == nil {
+		t.Fatal("no telemetry.loss reached the spool; the refused push left no trace")
+	}
+	if resentAt < 0 {
+		t.Fatal("the resent seq 2 is not in the spool")
+	}
+	if lossAt > resentAt {
+		t.Errorf("telemetry.loss is record %d, after the resent seq 2 at %d; the loss must come first", lossAt, resentAt)
+	}
+
+	if loss.Provenance != events.HostObserved {
+		t.Errorf("provenance: got %q, want %q", loss.Provenance, events.HostObserved)
+	}
+	if loss.Sensor != "runner" {
+		t.Errorf("sensor: got %q, want %q", loss.Sensor, "runner")
+	}
+	if loss.SourceInstanceID != telInstance {
+		t.Errorf("source_instance_id: got %q, want the runner's %q", loss.SourceInstanceID, telInstance)
+	}
+	if loss.VMID == nil || *loss.VMID != telVMID {
+		t.Errorf("vm_id: got %v, want %q", loss.VMID, telVMID)
+	}
+	if loss.BootID == nil || *loss.BootID != telBootID {
+		t.Errorf("boot_id: got %v, want %q", loss.BootID, telBootID)
+	}
+	if err := loss.Validate(); err != nil {
+		t.Errorf("telemetry.loss does not validate: %v", err)
+	}
+	refused, _ := loss.Data["guest_pushes_refused"].(string)
+	if n, err := strconv.ParseUint(refused, 10, 64); err != nil || n < 1 {
+		t.Errorf("guest_pushes_refused: got %q, want a decimal string of at least 1", refused)
+	}
+	if got := loss.Data["guest_events_lost"]; got != "unknown" {
+		t.Errorf("guest_events_lost: got %v, want %q", got, "unknown")
+	}
+	if cause, _ := loss.Data["cause"].(string); !strings.Contains(cause, "spool full") {
+		t.Errorf("cause: got %q, want it to name the full spool", cause)
+	}
+}
+
+// refuseOnFullSpool drives the first connection of an outage: one push the
+// runner acknowledges, then a sparse ballast that puts the spool over its
+// default quota, then a push the runner must refuse by closing the connection.
+// It removes the ballast before it returns and reports "closed" when every
+// step went as planned, or what went wrong instead.
+func refuseOnFullSpool(conn net.Conn, ballast string) string {
+	if err := writeFakePush(conn, "1", "guest.sensor_health", `{"agent":{}}`); err != nil {
+		return fmt.Sprintf("push seq 1: %v", err)
+	}
+	if env, err := proto.ReadControl(conn); err != nil || env.Kind != proto.KindTelemetryAck {
+		return fmt.Sprintf("seq 1 went unacknowledged (%v, %v)", env.Kind, err)
+	}
+
+	f, err := os.Create(ballast)
+	if err != nil {
+		return fmt.Sprintf("create ballast: %v", err)
+	}
+	truncErr := f.Truncate(512 << 20)
+	closeErr := f.Close()
+	defer os.Remove(ballast)
+	if truncErr != nil || closeErr != nil {
+		return fmt.Sprintf("size ballast: %v, %v", truncErr, closeErr)
+	}
+
+	if err := writeFakePush(conn, "2", "guest.sensor_health", `{"agent":{}}`); err != nil {
+		return fmt.Sprintf("push seq 2: %v", err)
+	}
+	if env, err := proto.ReadControl(conn); err == nil {
+		return fmt.Sprintf("the runner answered %q to a push the full spool refused", env.Kind)
+	}
+	if err := os.Remove(ballast); err != nil {
+		return fmt.Sprintf("remove ballast: %v", err)
+	}
+	return "closed"
 }
 
 // TestRunnerRefusesAnUnacceptableEpoch covers the guest's only contribution to

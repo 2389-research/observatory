@@ -2,8 +2,8 @@
 // ABOUTME: The wire format and recovery rules defined here govern both writer and reader.
 
 // Package spool implements the durable event spool: a directory of append-only
-// segment files used by the guest runner (Task 8) to durably buffer event
-// envelopes before the host importer (Task 7) reads them into SQLite.
+// segment files used by the guest runner to durably buffer event envelopes
+// before the host importer reads them into SQLite.
 //
 // # Segment file layout
 //
@@ -61,6 +61,7 @@ var ErrCorruptRecord = errors.New("spool: corrupt record")
 
 // ErrSpoolFull is returned by Writer.Append when adding the record would
 // cause the total bytes across all segments in the spool directory to exceed
-// WriterCfg.MaxSpoolBytes. The caller must stop acking the guest and emit
-// the overflow health record; the record is never dropped silently (SPEC §12.5).
+// WriterCfg.MaxSpoolBytes. The writer counts the refusal and records it in a
+// telemetry.loss once an append succeeds, so the caller's only duty is to
+// withhold the ack (SPEC §12.5).
 var ErrSpoolFull = errors.New("spool: spool full")

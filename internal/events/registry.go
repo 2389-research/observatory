@@ -39,6 +39,10 @@ var registry = []KindInfo{
 		Semantics:     "An explicit loss interval: events were dropped, with a measured count or an unknown span.",
 		Caveats: []string{
 			"an unknown-span loss must not be summed as zero events lost",
+			"guest_pushes_refused counts refused push attempts; the guest re-sends what it never saw acknowledged, so one event can be refused more than once and still arrive",
+			`guest_events_lost is "unknown" whenever a guest push was refused: the guest's bounded ring may have overwritten events it held, and its heartbeat's dropped counter reports how many`,
+			"runner_records_refused is an upper bound: a record whose fsync failed may still reach the store when the writer could not trim it from the segment, or when the importer read it first",
+			"the counts describe what the runner's spool refused, not loss elsewhere in the pipeline",
 		},
 	},
 	{

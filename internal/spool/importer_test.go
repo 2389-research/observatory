@@ -70,6 +70,7 @@ func writeSegment(t *testing.T, root, vmID string, envs []*events.Envelope, clos
 		InstanceID:      "inst-1",
 		MaxSegmentBytes: 4 * 1024 * 1024,
 		MaxSpoolBytes:   64 * 1024 * 1024,
+		LossRecord:      lossRecordFor(vmID),
 	})
 	if err != nil {
 		t.Fatalf("OpenWriter: %v", err)
@@ -125,6 +126,7 @@ func TestImportTwoSegments(t *testing.T) {
 	w0, err := spool.OpenWriter(spoolDir, spool.WriterCfg{
 		VMID: vmID, InstanceID: instanceID,
 		MaxSegmentBytes: 512, MaxSpoolBytes: 64 * 1024 * 1024,
+		LossRecord: lossRecordFor(vmID),
 	})
 	if err != nil {
 		t.Fatalf("OpenWriter seg0: %v", err)
@@ -142,6 +144,7 @@ func TestImportTwoSegments(t *testing.T) {
 	w1, err := spool.OpenWriter(spoolDir, spool.WriterCfg{
 		VMID: vmID, InstanceID: instanceID,
 		MaxSegmentBytes: 512, MaxSpoolBytes: 64 * 1024 * 1024,
+		LossRecord: lossRecordFor(vmID),
 	})
 	if err != nil {
 		t.Fatalf("OpenWriter seg1: %v", err)
@@ -423,6 +426,7 @@ func TestGapEnvelopeIngress(t *testing.T) {
 	w, err := spool.OpenWriter(spoolDir, spool.WriterCfg{
 		VMID: vmID, InstanceID: instanceID,
 		MaxSegmentBytes: 4 * 1024 * 1024, MaxSpoolBytes: 64 * 1024 * 1024,
+		LossRecord: lossRecordFor(vmID),
 	})
 	if err != nil {
 		t.Fatalf("OpenWriter: %v", err)
@@ -545,6 +549,7 @@ func TestTwoCorruptSegmentsTwoGaps(t *testing.T) {
 	w0, err := spool.OpenWriter(spoolDir, spool.WriterCfg{
 		VMID: vmID, InstanceID: instanceID,
 		MaxSegmentBytes: 4 * 1024 * 1024, MaxSpoolBytes: 64 * 1024 * 1024,
+		LossRecord: lossRecordFor(vmID),
 	})
 	if err != nil {
 		t.Fatalf("OpenWriter seg0: %v", err)
@@ -568,6 +573,7 @@ func TestTwoCorruptSegmentsTwoGaps(t *testing.T) {
 	w1, err := spool.OpenWriter(spoolDir, spool.WriterCfg{
 		VMID: vmID, InstanceID: instanceID,
 		MaxSegmentBytes: 4 * 1024 * 1024, MaxSpoolBytes: 64 * 1024 * 1024,
+		LossRecord: lossRecordFor(vmID),
 	})
 	if err != nil {
 		t.Fatalf("OpenWriter seg1: %v", err)
@@ -693,6 +699,7 @@ func TestCorruptSegmentWithEndMarkerNotPruned(t *testing.T) {
 	w0, err := spool.OpenWriter(spoolDir, spool.WriterCfg{
 		VMID: vmID, InstanceID: instanceID,
 		MaxSegmentBytes: 4 * 1024 * 1024, MaxSpoolBytes: 64 * 1024 * 1024,
+		LossRecord: lossRecordFor(vmID),
 	})
 	if err != nil {
 		t.Fatalf("OpenWriter seg0: %v", err)
@@ -717,6 +724,7 @@ func TestCorruptSegmentWithEndMarkerNotPruned(t *testing.T) {
 	w1, err := spool.OpenWriter(spoolDir, spool.WriterCfg{
 		VMID: vmID, InstanceID: instanceID,
 		MaxSegmentBytes: 4 * 1024 * 1024, MaxSpoolBytes: 64 * 1024 * 1024,
+		LossRecord: lossRecordFor(vmID),
 	})
 	if err != nil {
 		t.Fatalf("OpenWriter seg1: %v", err)
@@ -831,6 +839,7 @@ func TestDriftedGapMtimeDoesNotWedge(t *testing.T) {
 	w0, err := spool.OpenWriter(spoolDir, spool.WriterCfg{
 		VMID: vmID, InstanceID: instanceID,
 		MaxSegmentBytes: 4 * 1024 * 1024, MaxSpoolBytes: 64 * 1024 * 1024,
+		LossRecord: lossRecordFor(vmID),
 	})
 	if err != nil {
 		t.Fatalf("OpenWriter seg0: %v", err)
@@ -853,6 +862,7 @@ func TestDriftedGapMtimeDoesNotWedge(t *testing.T) {
 	w1, err := spool.OpenWriter(spoolDir, spool.WriterCfg{
 		VMID: vmID, InstanceID: instanceID2,
 		MaxSegmentBytes: 4 * 1024 * 1024, MaxSpoolBytes: 64 * 1024 * 1024,
+		LossRecord: lossRecordFor(vmID),
 	})
 	if err != nil {
 		t.Fatalf("OpenWriter seg1: %v", err)

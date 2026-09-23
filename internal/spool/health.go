@@ -61,7 +61,7 @@ func (imp *Importer) record(ctx context.Context, id string, cause error) {
 		}
 		h.State = "degraded"
 		h.ConsecutiveFailures = strconv.FormatUint(h.failures, 10)
-		h.LastError = string([]rune(cause.Error())[:min(len([]rune(cause.Error())), 512)])
+		h.LastError = boundRunes(cause.Error(), maxCauseRunes)
 		delay := min(imp.interval, time.Minute)
 		for n := uint64(1); n < h.failures && delay < time.Minute; n++ {
 			delay = min(delay*2, time.Minute)
