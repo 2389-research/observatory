@@ -72,10 +72,22 @@ type Writer struct {
 	// that succeeds writes its telemetry.loss ahead of its own record.
 	outage *Outage
 	closed bool
+	// status is the writer.status file the writer keeps its health in (see
+	// writeStatus). healthySince is when the writer opened or last recorded
+	// a loss, and lastRefusal is the latest refused Append's error, bounded.
+	status       *os.File
+	healthySince time.Time
+	lastRefusal  string
 }
 
 // OpenWriter opens (or creates) a spool writer in dir with the given configuration.
 // It returns an error when MaxSegmentBytes <= 0 or LossRecord is nil.
+//
+// The writer keeps its health in dir's writer.status (see WriterHealth).
+// OpenWriter zeroes that file before it creates the first segment and writes
+// healthy, under this writer's instance id, only once the segment exists: a
+// writer that cannot create its first segment leaves a status that reads
+// unknown.
 func OpenWriter(dir string, cfg WriterCfg) (*Writer, error) {
 	if cfg.MaxSegmentBytes <= 0 {
 		return nil, fmt.Errorf("spool: MaxSegmentBytes must be > 0")
@@ -94,15 +106,24 @@ func OpenWriter(dir string, cfg WriterCfg) (*Writer, error) {
 		return nil, fmt.Errorf("spool: scan dir for next segment index: %w", err)
 	}
 
+	status, err := prepareStatus(dir)
+	if err != nil {
+		return nil, fmt.Errorf("spool: prepare writer status: %w", err)
+	}
+
 	w := &Writer{
 		dir:      dir,
 		cfg:      cfg,
 		maxSpool: maxSpool,
 		segIdx:   idx,
+		status:   status,
 	}
 	if err := w.createSegment(); err != nil {
+		_ = status.Close()
 		return nil, err
 	}
+	w.healthySince = time.Now()
+	w.writeStatus()
 	return w, nil
 }
 
@@ -163,7 +184,7 @@ func (w *Writer) Append(env *events.Envelope) error {
 		if err := w.writeFrame(loss, "loss record"); err != nil {
 			return w.refuse(env, err)
 		}
-		w.outage = nil
+		w.lossRecorded()
 	}
 	if err := w.writeFrame(rec, "record"); err != nil {
 		return w.refuse(env, err)
@@ -174,7 +195,9 @@ func (w *Writer) Append(env *events.Envelope) error {
 // Close records an open outage when it can, then retires the current segment
 // with its end marker. When the loss cannot be recorded, the error says so,
 // carries the counts, and wraps the failure that stopped the record, so the
-// caller's log keeps what the spool could not. A second Close returns nil.
+// caller's log keeps what the spool could not. Close leaves the writer's
+// final status, healthy or still failing, and closes the status file. A
+// second Close returns nil.
 func (w *Writer) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -190,6 +213,9 @@ func (w *Writer) Close() error {
 	// retire trims it back to its last durable record.
 	retireErr := retireSegment(w.f, w.segBytes)
 	w.f = nil
+	w.writeStatus()
+	// The status is advisory; its close error is not the caller's concern.
+	_ = w.status.Close()
 	if o := w.outage; o != nil {
 		lost := fmt.Errorf("spool: loss since %s not recorded: %d runner records and %d guest pushes refused; first cause: %s; recording it failed: %w",
 			o.Since.UTC().Format(events.TimestampLayout), o.RunnerRecordsRefused, o.GuestPushesRefused, o.Cause, recordErr)
@@ -215,16 +241,26 @@ func (w *Writer) recordOutage() error {
 	if err := w.writeFrame(loss, "loss record"); err != nil {
 		return err
 	}
-	w.outage = nil
+	w.lossRecorded()
 	return nil
 }
 
+// lossRecorded closes the outage once its loss record is durable: the
+// writer is healthy again from now, and its status says so.
+func (w *Writer) lossRecorded() {
+	w.outage = nil
+	w.healthySince = time.Now()
+	w.writeStatus()
+}
+
 // refuse counts a failed Append in the open outage, opening one when none is
-// open, and returns err unchanged, so errors.Is still finds ErrSpoolFull or
-// the errno beneath a failed write. Each failed Append calls it exactly once.
+// open, writes the failing status, and returns err unchanged, so errors.Is
+// still finds ErrSpoolFull or the errno beneath a failed write. Each failed
+// Append calls it exactly once.
 func (w *Writer) refuse(env *events.Envelope, err error) error {
+	msg := boundRunes(err.Error(), maxCauseRunes)
 	if w.outage == nil {
-		w.outage = &Outage{Since: time.Now(), Cause: boundRunes(err.Error(), maxCauseRunes)}
+		w.outage = &Outage{Since: time.Now(), Cause: msg}
 	}
 	if env != nil && env.Provenance == events.GuestReported {
 		if w.outage.GuestPushesRefused < math.MaxUint64 {
@@ -235,6 +271,8 @@ func (w *Writer) refuse(env *events.Envelope, err error) error {
 			w.outage.RunnerRecordsRefused++
 		}
 	}
+	w.lastRefusal = msg
+	w.writeStatus()
 	return err
 }
 

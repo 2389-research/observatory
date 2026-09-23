@@ -69,7 +69,14 @@ type TelemetryHealth struct {
 // finished booting has not been asked yet.
 func (e *Engine) VMTelemetryHealth(ctx context.Context, vm *store.VM) (health TelemetryHealth, err error) {
 	defer func() {
-		if err == nil && (e.ImporterStatus(vm.VMID).State == "degraded" || e.ImporterStatus("").State == "degraded") {
+		if err != nil {
+			return
+		}
+		// A failing import leaves records unread, and a failing spool writer
+		// refuses them, whatever the heartbeat says.
+		vmImport := e.ImporterStatus(vm.VMID)
+		writerFailing := vmImport.Writer != nil && vmImport.Writer.State == "failing"
+		if vmImport.State == "degraded" || writerFailing || e.ImporterStatus("").State == "degraded" {
 			health.State = TelemetryDegraded
 		}
 	}()
@@ -192,6 +199,7 @@ func (e *Engine) sensorsDegraded(ctx context.Context) (int, error) {
 func (e *Engine) SetImporter(imp *spool.Importer) {
 	if imp != nil {
 		imp.SetFailureReporter(e.reportImportFailure)
+		imp.SetWriterFailureReporter(e.reportWriterFailure)
 	}
 	e.importer.Store(imp)
 }

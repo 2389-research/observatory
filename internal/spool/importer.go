@@ -35,14 +35,16 @@ type cursor struct {
 
 // Importer walks per-VM spool dirs under root and imports envelopes into st.
 type Importer struct {
-	mu            sync.RWMutex // protects health snapshots read by HTTP handlers
-	cycleMu       sync.Mutex   // serializes manual and background cycles
-	health        map[string]importHealth
-	reportFailure func(context.Context, string, ImportStatus) error
-	st            *store.Store
-	root          string
-	interval      time.Duration
-	onImported    func(*events.Envelope) // called per newly-appended envelope; may be nil
+	mu                  sync.RWMutex // protects health and writer snapshots read by HTTP handlers
+	cycleMu             sync.Mutex   // serializes manual and background cycles
+	health              map[string]importHealth
+	writers             map[string]writerRead
+	reportFailure       func(context.Context, string, ImportStatus) error
+	reportWriterFailure func(context.Context, string, WriterHealth) error
+	st                  *store.Store
+	root                string
+	interval            time.Duration
+	onImported          func(*events.Envelope) // called per newly-appended envelope; may be nil
 }
 
 // NewImporter constructs an Importer that polls root every interval.
@@ -53,7 +55,7 @@ func NewImporter(st *store.Store, root string, interval time.Duration, onImporte
 	if interval <= 0 {
 		interval = time.Second
 	}
-	return &Importer{health: make(map[string]importHealth), st: st, root: root, interval: interval, onImported: onImported}
+	return &Importer{health: make(map[string]importHealth), writers: make(map[string]writerRead), st: st, root: root, interval: interval, onImported: onImported}
 }
 
 // Run calls ImportOnce every interval until ctx is done.
@@ -116,6 +118,9 @@ func (imp *Importer) importOnce(ctx context.Context, backoff bool) (ImportStats,
 		if err := ctx.Err(); err != nil {
 			return total, err
 		}
+		// The writer's status is read even while the import backs off: an
+		// outage it reports must not wait a minute to show.
+		imp.observeWriter(ctx, id)
 		if backoff && !imp.due(id) {
 			continue
 		}
@@ -138,6 +143,11 @@ func (imp *Importer) importOnce(ctx context.Context, backoff bool) (ImportStats,
 	for id := range imp.health {
 		if !present[id] {
 			delete(imp.health, id)
+		}
+	}
+	for id := range imp.writers {
+		if !present[id] {
+			delete(imp.writers, id)
 		}
 	}
 	imp.mu.Unlock()

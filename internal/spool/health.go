@@ -5,6 +5,7 @@ package spool
 import (
 	"context"
 	"math"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -19,6 +20,9 @@ type ImportStatus struct {
 	ConsecutiveFailures string `json:"consecutive_failures"`
 	LastSuccessAt       string `json:"last_success_at"`
 	NextRetryAt         string `json:"next_retry_at"`
+	// Writer is the VM's spool writer health as its status file read at the
+	// last cycle, or unknown before a cycle read it. The root status has none.
+	Writer *WriterHealth `json:"writer,omitempty"`
 }
 
 type importHealth struct {
@@ -28,16 +32,30 @@ type importHealth struct {
 	notified bool
 }
 
+// writerRead is the last writer status a cycle read for one VM, and the
+// Since of the failing outage already reported for it, if any.
+type writerRead struct {
+	health   WriterHealth
+	reported string
+}
+
 // Status returns one VM's diagnostics, or root-directory diagnostics for an empty id.
 // Health is process-local; restart reports unknown until a cycle actually runs.
 func (imp *Importer) Status(vmID string) ImportStatus {
 	imp.mu.RLock()
 	defer imp.mu.RUnlock()
-	h, ok := imp.health[vmID]
-	if !ok {
-		return ImportStatus{State: "unknown", ConsecutiveFailures: "0"}
+	s := ImportStatus{State: "unknown", ConsecutiveFailures: "0"}
+	if h, ok := imp.health[vmID]; ok {
+		s = h.ImportStatus
 	}
-	return h.ImportStatus
+	if vmID != "" {
+		w := WriterHealth{State: "unknown"}
+		if r, ok := imp.writers[vmID]; ok {
+			w = r.health
+		}
+		s.Writer = &w
+	}
+	return s
 }
 
 func (imp *Importer) due(id string) bool {
@@ -94,4 +112,41 @@ func (imp *Importer) SetFailureReporter(report func(context.Context, string, Imp
 	imp.cycleMu.Lock()
 	defer imp.cycleMu.Unlock()
 	imp.reportFailure = report
+}
+
+// observeWriter reads the VM's writer status for Status. A failing status
+// whose Since has not been reported yet is reported, and a nil return marks
+// that outage reported. A healthy read ends the outage; an unknown read
+// changes nothing, because a missing or torn status is no evidence that the
+// writer recovered.
+func (imp *Importer) observeWriter(ctx context.Context, id string) {
+	h := readStatus(filepath.Join(imp.root, id))
+	imp.mu.Lock()
+	r := imp.writers[id]
+	r.health = h
+	if h.State == "healthy" {
+		r.reported = ""
+	}
+	imp.writers[id] = r
+	imp.mu.Unlock()
+	if h.State != "failing" || h.Since == r.reported || imp.reportWriterFailure == nil {
+		return
+	}
+	if imp.reportWriterFailure(ctx, id, h) == nil {
+		imp.mu.Lock()
+		r = imp.writers[id]
+		r.reported = h.Since
+		imp.writers[id] = r
+		imp.mu.Unlock()
+	}
+}
+
+// SetWriterFailureReporter connects the report of a failing spool writer to
+// the service's attention policy. The importer calls it once per outage,
+// named by the outage's Since. Returning nil marks the outage handled; an
+// error leaves it to be reported again on the next cycle.
+func (imp *Importer) SetWriterFailureReporter(report func(context.Context, string, WriterHealth) error) {
+	imp.cycleMu.Lock()
+	defer imp.cycleMu.Unlock()
+	imp.reportWriterFailure = report
 }
