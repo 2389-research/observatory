@@ -7,12 +7,17 @@ package main
 
 import (
 	"context"
-	"fmt"
+	"errors"
 
 	"github.com/2389-research/observatory/internal/config"
 	"github.com/2389-research/observatory/internal/preflight"
 	"github.com/2389-research/observatory/internal/runtime"
 )
+
+// errFirecrackerNeedsLinux is a package variable, not an error built per call:
+// staticcheck would otherwise prove the stub always fails and report main's
+// shared buildErr check as always true (SA4023), which holds only off Linux.
+var errFirecrackerNeedsLinux = errors.New("runtime.mode firecracker is only supported on Linux; this platform cannot run Firecracker VMs")
 
 // buildFirecrackerRuntime is unavailable on non-Linux platforms. Firecracker
 // requires Linux KVM; runtime.mode firecracker is a config error here.
@@ -20,5 +25,5 @@ func buildFirecrackerRuntime(
 	_ *config.Config,
 	_ func(ctx context.Context, refresh bool) preflight.Report,
 ) (runtime.Runtime, error) {
-	return nil, fmt.Errorf("runtime.mode firecracker is only supported on Linux; this platform cannot run Firecracker VMs")
+	return nil, errFirecrackerNeedsLinux
 }
