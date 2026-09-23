@@ -56,9 +56,14 @@ func TestNoHostInstallerRemains(t *testing.T) {
 		if d.IsDir() {
 			// Skip the artifact and history directories wholesale: .git holds
 			// every deleted version of the installer, images/dist holds a
-			// gigabyte of guest kernel, and web/dist is a build product.
+			// gigabyte of guest kernel, and web/dist and web/node_modules are
+			// build products. The dot directories hold local agent and tool
+			// state -- plans, journals, review and task-runner transcripts --
+			// that git never tracks; a transcript quoting an old instruction
+			// is not an instruction in the repository.
 			switch rel {
-			case ".git", "images/dist", "web/dist", "node_modules":
+			case ".git", "images/dist", "web/dist", "web/node_modules",
+				".private-journal", ".roborev", ".superpowers", ".tracker":
 				return fs.SkipDir
 			}
 			if slices.Contains(historicalRecords, rel) {
