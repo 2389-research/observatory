@@ -279,10 +279,10 @@ func TestPrunedEmptySegmentNameReturnsAheadOfCursor(t *testing.T) {
 	}
 }
 
-// TestStraySpoolFileDoesNotResetSegmentIndex plants a name that sorts after
-// every real segment name. The old scan sorted all *.vmsp names as strings
-// and Sscanf'd only the lexical maximum, so a trailing stray name made
-// parsing fail and silently reset the index to 0.
+// TestStraySpoolFileDoesNotResetSegmentIndex guards that a name which is not
+// a segment name never sets the index: zz-stray.vmsp beside
+// seg-0000000000000004.vmsp still yields index 5, and neither fails the scan
+// nor resets the index to 0.
 func TestStraySpoolFileDoesNotResetSegmentIndex(t *testing.T) {
 	root := t.TempDir()
 	vm := "7a7a7a7a-0003-4000-8000-000000000003"

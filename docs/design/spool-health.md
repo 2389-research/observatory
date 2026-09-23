@@ -104,7 +104,8 @@ The first append that succeeds after refusals writes the outage's
 an outage is still open. Its data holds `cause`, `interval_start`,
 `interval_end`, `runner_records_refused` and `guest_pushes_refused` (decimal
 strings), and `guest_events_lost`: `"0"`, or `"unknown"` once any guest push
-was refused. The event registry gives it seven caveats:
+was refused. The caveats below follow `internal/events/registry.go`'s entry
+for `telemetry.loss`:
 
 1. An unknown-span loss must not be summed as zero events lost.
 2. `guest_pushes_refused` counts refused push attempts. The guest re-sends
@@ -127,8 +128,8 @@ was refused. The event registry gives it seven caveats:
 7. The counts describe what the runner's spool refused, not loss elsewhere in
    the pipeline.
 
-Writer health has known limits. On a copy-on-write filesystem such as btrfs or
-ZFS, an overwrite in place needs new blocks, so on a full disk the status
+Writer health has known limits. On a copy-on-write filesystem such as APFS,
+btrfs or ZFS, an overwrite in place needs new blocks, so on a full disk the status
 overwrite can fail, and so can a segment's end-marker write. The file then
 keeps an older status and can read `healthy` while the writer refuses records.
 A loss the old writer could not record at `Close` survives only in

@@ -21,8 +21,9 @@ import (
 const statusFileName = "writer.status"
 
 // statusFileBytes is the status file's exact size. The writer overwrites the
-// whole file at offset 0 and never changes its length, so an update needs no
-// new block and a reader never sees a file of any other size.
+// whole file at offset 0 and never changes its length: on filesystems that
+// overwrite in place an update needs no new block, and a reader reads the
+// first 4096 bytes and treats a shorter file as unknown.
 const statusFileBytes = 4096
 
 // maxStatusBody is the longest JSON body a status frame can hold.

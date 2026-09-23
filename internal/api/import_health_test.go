@@ -214,8 +214,8 @@ func TestHTTPVMImportStatusCarriesWriterHealth(t *testing.T) {
 			SchemaVersion: 1, VMID: &id, SourceInstanceID: source, SourceSeq: "1", Kind: kind, Provenance: events.HostObserved, Sensor: "runner", HostReceivedAt: events.Timestamp{Time: time.Now().UTC()}, Quality: events.Quality{PathResolution: events.PathNotApplicable, Attribution: events.AttributionNotApplicable}, Data: data,
 		}
 	}
-	// A one-byte quota refuses every append, so the writer can never record its
-	// loss and its Close fails; that failure is not this test's subject.
+	// A one-byte quota refuses every append while the loss record stays
+	// exempt, so Close records the loss.
 	w, err := spool.OpenWriter(dir, spool.WriterCfg{
 		VMID: id, InstanceID: instance, MaxSegmentBytes: 4 << 20, MaxSpoolBytes: 1,
 		LossRecord: func(o spool.Outage) *events.Envelope {
@@ -225,7 +225,11 @@ func TestHTTPVMImportStatusCarriesWriterHealth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = w.Close() })
+	t.Cleanup(func() {
+		if err := w.Close(); err != nil {
+			t.Errorf("close writer: %v", err)
+		}
+	})
 	if err := w.Append(record("vm.state_changed", instance, map[string]any{})); !errors.Is(err, spool.ErrSpoolFull) {
 		t.Fatalf("append over a one-byte quota: %v, want ErrSpoolFull", err)
 	}
