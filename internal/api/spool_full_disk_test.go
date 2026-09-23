@@ -233,7 +233,6 @@ func TestSpoolWriterRecoversFromARealFullDisk(t *testing.T) {
 	if err := appendAcked(recovered); err != nil {
 		t.Fatalf("append after freeing space: %v", err)
 	}
-	acked = append(acked, recovered)
 	newest := checkSegments(t, dir, refused)
 	if len(newest) == 0 {
 		t.Fatal("no segment present after recovery")
