@@ -28,9 +28,10 @@ import (
 // Helpers shared with this file
 // ---------------------------------------------------------------------------
 
-// makeStopAdapter builds a test Adapter+backend+state ready for a launched VM.
-// The caller must clean up backend.killAll() on test cleanup.
-// Returns (adapter, backend, privdSock, stateDir, spoolRoot, jailBase).
+// makeStopHarness builds a test Adapter+backend+state ready for a launched VM,
+// with backend.killAll already registered as a cleanup; launchTestVM also joins
+// the runner of each VM it launches.
+// Returns (adapter, backend, stateDir, spoolRoot, jailBase).
 func makeStopHarness(t *testing.T) (
 	*jailer.Adapter,
 	*testRecordingBackend,
@@ -113,7 +114,11 @@ func makeStopHarnessWrapped(t *testing.T, wrap func(jailer.PrivdClient) jailer.P
 // launchTestVM launches a VM into state stateDir and returns the vmID.
 // The guestd in-process server is started here with the given poweroffFunc.
 // poweroffFunc is called when the runner sends a shutdown_guest ctl to the guest.
-func launchTestVM(t *testing.T, adapter *jailer.Adapter, stateDir, jailBase string, poweroffFunc func()) string {
+//
+// Teardown kills backend's stand-in VMMs and waits for the runner to exit. The
+// runner writes under the harness's t.TempDir() tree until it has seen its VMM
+// go, so deleting the tree any sooner races it (TestTeardownJoinsTheRunner).
+func launchTestVM(t *testing.T, adapter *jailer.Adapter, backend *testRecordingBackend, stateDir, jailBase string, poweroffFunc func()) string {
 	t.Helper()
 	vmID := "vm-stop-test-" + newRandomUUID()[:8]
 	bootID := "boot-" + newRandomUUID()
@@ -159,7 +164,52 @@ func launchTestVM(t *testing.T, adapter *jailer.Adapter, stateDir, jailBase stri
 	if _, err := adapter.Launch(ctx, spec); err != nil {
 		t.Fatalf("Launch %s: %v", vmID, err)
 	}
+
+	// Registered after every other cleanup the harness and this helper set up,
+	// so it runs before all of them -- the TempDir removal included.
+	m, err := jailer.ReadManifest(stateDir, vmID)
+	if err != nil {
+		t.Fatalf("ReadManifest %s: %v", vmID, err)
+	}
+	t.Cleanup(func() {
+		backend.killAll()
+		waitRunnerExit(t, m.RunnerPID)
+	})
 	return vmID
+}
+
+// TestTeardownJoinsTheRunner checks the harness itself (kata kvcn). A launched
+// VM's runner is a real process that writes runner-state.json and spool
+// segments under the test's t.TempDir() tree until it notices, a watch tick
+// after the kill, that its VMM is gone. A teardown that deletes the tree while
+// the runner lives races those writes, and RemoveAll fails the test with
+// "unlinkat <stateDir>/vms/<vmID>: directory not empty". The subtest drives the
+// harness the way every test in this file does, so once t.Run returns all of
+// its cleanups have run, the TempDir removal among them, and the runner must
+// already be gone.
+//
+// Keep the name short: the vsock socket lives under a TempDir named after the
+// test, and a unix socket path is capped at 108 bytes.
+func TestTeardownJoinsTheRunner(t *testing.T) {
+	var runnerPID int
+	var runnerStart string
+	t.Run("vm", func(t *testing.T) {
+		adapter, backend, stateDir, _, jailBase := makeStopHarness(t)
+		vmID := launchTestVM(t, adapter, backend, stateDir, jailBase, func() {})
+		m, err := jailer.ReadManifest(stateDir, vmID)
+		if err != nil {
+			t.Fatalf("ReadManifest: %v", err)
+		}
+		runnerPID, runnerStart = m.RunnerPID, m.RunnerStart
+	})
+	if runnerPID <= 0 || runnerStart == "" {
+		t.Fatalf("the launch recorded no runner identity (pid %d, start %q), "+
+			"so there is nothing to check", runnerPID, runnerStart)
+	}
+	if privd.PIDAlive(runnerPID, runnerStart) {
+		t.Errorf("runner pid %d outlived the teardown that deleted the state "+
+			"dir it writes to", runnerPID)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -178,7 +228,7 @@ func TestStopGraceful(t *testing.T) {
 		backend.killAll()
 	}
 
-	vmID := launchTestVM(t, adapter, stateDir, jailBase, poweroffFunc)
+	vmID := launchTestVM(t, adapter, backend, stateDir, jailBase, poweroffFunc)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -226,7 +276,7 @@ func TestStopForcedOnIgnoredShutdown(t *testing.T) {
 	// poweroffFunc does nothing — simulates guest ignoring shutdown.
 	poweroffFunc := func() {}
 
-	vmID := launchTestVM(t, adapter, stateDir, jailBase, poweroffFunc)
+	vmID := launchTestVM(t, adapter, backend, stateDir, jailBase, poweroffFunc)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -262,7 +312,7 @@ func TestStopEscalatesWhenTermIgnored(t *testing.T) {
 	// stand-in VMM is still there when the proof gate looks.
 	backend.ignoredSignals = map[string]bool{"term": true}
 
-	vmID := launchTestVM(t, adapter, stateDir, jailBase, func() {})
+	vmID := launchTestVM(t, adapter, backend, stateDir, jailBase, func() {})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -299,7 +349,7 @@ func TestForceStopSendsKill(t *testing.T) {
 	adapter, backend, stateDir, _, jailBase := makeStopHarness(t)
 
 	poweroffFunc := func() {}
-	vmID := launchTestVM(t, adapter, stateDir, jailBase, poweroffFunc)
+	vmID := launchTestVM(t, adapter, backend, stateDir, jailBase, poweroffFunc)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -363,7 +413,7 @@ func TestForceStopRetriesRelease(t *testing.T) {
 			return refuser
 		})
 
-	vmID := launchTestVM(t, adapter, stateDir, jailBase, func() {})
+	vmID := launchTestVM(t, adapter, backend, stateDir, jailBase, func() {})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -398,7 +448,7 @@ func TestForceStopRetriesRelease(t *testing.T) {
 // broken jail directory.
 func TestForceStopReleaseErrNoRetry(t *testing.T) {
 	var refuser *refusingReleasePrivd
-	adapter, _, stateDir, _, jailBase := makeStopHarnessWrapped(t,
+	adapter, backend, stateDir, _, jailBase := makeStopHarnessWrapped(t,
 		func(inner jailer.PrivdClient) jailer.PrivdClient {
 			refuser = &refusingReleasePrivd{
 				PrivdClient: inner,
@@ -408,7 +458,7 @@ func TestForceStopReleaseErrNoRetry(t *testing.T) {
 			return refuser
 		})
 
-	vmID := launchTestVM(t, adapter, stateDir, jailBase, func() {})
+	vmID := launchTestVM(t, adapter, backend, stateDir, jailBase, func() {})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -437,10 +487,10 @@ func TestForceStopReleaseErrNoRetry(t *testing.T) {
 // TestReleaseFreesAllResources: Release → ReleaseNetwork + removes manifest + state dir + stage dir.
 // Spool dir must remain.
 func TestReleaseFreesAllResources(t *testing.T) {
-	adapter, _, stateDir, spoolRoot, jailBase := makeStopHarness(t)
+	adapter, backend, stateDir, spoolRoot, jailBase := makeStopHarness(t)
 
 	poweroffFunc := func() {}
-	vmID := launchTestVM(t, adapter, stateDir, jailBase, poweroffFunc)
+	vmID := launchTestVM(t, adapter, backend, stateDir, jailBase, poweroffFunc)
 
 	// Verify manifest exists before release.
 	if _, err := jailer.ReadManifest(stateDir, vmID); err != nil {
@@ -504,7 +554,7 @@ func TestReconcileAdoptsHealthyVM(t *testing.T) {
 	adapter, backend, stateDir, spoolRoot, jailBase := makeStopHarness(t)
 
 	poweroffFunc := func() {}
-	vmID := launchTestVM(t, adapter, stateDir, jailBase, poweroffFunc)
+	vmID := launchTestVM(t, adapter, backend, stateDir, jailBase, poweroffFunc)
 	_ = spoolRoot
 
 	// The VM is running; Reconcile should adopt it.
@@ -529,10 +579,6 @@ func TestReconcileAdoptsHealthyVM(t *testing.T) {
 	if found.Outcome != "adopted" {
 		t.Errorf("Reconcile outcome = %q, want adopted (detail: %s)", found.Outcome, found.Detail)
 	}
-
-	// Cleanup — stop the VM so the sleep process dies.
-	_ = backend.killAll
-	backend.killAll()
 }
 
 // TestReconcileVMMGone: manifest present but VMM process gone → vmm_gone.
