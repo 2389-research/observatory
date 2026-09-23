@@ -922,13 +922,30 @@ Harper uses a word the repo lacks, map it to the product goal, introspection
 into the VM, before researching a guess. If two readings still fit, ask one
 multiple-choice question. "Usable" means usable on aibox03.
 
-## One full disk silences a running VM's telemetry
+## A full disk opens a spool writer outage
 
-`spool.Writer` poisons itself on the first failed write or fsync, and nothing
-clears the poison or opens a fresh segment. When aibox03's disk filled for three
-hours on 2026-09-20, the live VM's runner stopped spooling for good: guestd kept
-heartbeating, and the store recorded nothing after event 96952. The importer
-recovered, yet the open attention still names its cursor write. On a degraded
-running VM, read `runner.log` inside the container before trusting the
-attention. A vmobsd restart adopts the `attached` runner as it is; only a new
-boot clears the poison. Kata `19g4` tracks the fix.
+Builds before kata `19g4`'s merge, including aibox03's `:7739dec`, poison a
+runner's `spool.Writer` on the first failed write or fsync, and only a new boot
+clears it. When aibox03's disk filled on 2026-09-20, the live VM's runner
+stopped spooling for good while guestd kept heartbeating, and the open
+attention named only the importer. On those builds, read `runner.log` inside
+the container before trusting a degraded VM's attention. Fixed builds abandon
+the damaged segment, count refusals in an outage, and write a `telemetry.loss`
+ahead of the first record that lands once space returns; recovery waits for
+that append. While the outage lasts, `writer.status` in the spool dir reads
+failing, the import endpoint's `writer` field names the cause, telemetry health
+reads degraded, and an attention is raised. It folds into any open
+`telemetry_degraded` item for the VM and keeps that item's summary (kata `rwzb`).
+
+## A spool segment name the cursor passed must never return
+
+The runner and the importer share `<state>/spool/<vmid>` and its
+`cursor.json`. Before kata `19g4`'s merge, a new writer took its first segment
+index from the directory listing alone. After a prune, a later boot started
+again at `seg-0000000000000000.vmsp`, and the importer skipped that boot's first
+records as already read, or pruned the file unread, with no gap record (kata
+`fmyb`). Fixed builds take one past the higher of the listing and the cursor.
+On a pre-merge build, any VM booted again after a prune may have lost the start
+of its later boots. The importer still prunes an empty, closed segment ahead of
+the cursor without moving the cursor, so that one name can come back; that is
+safe, since the importer reads it from its first record.

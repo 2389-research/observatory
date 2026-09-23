@@ -794,3 +794,16 @@ Updated the appliance contract and deployment instructions for HTTP on
 `0.0.0.0:8787`, preserving optional authentication, explicit loopback mode,
 HTTPS requirements, and exact terminal origin checks.
 `uv run docs/validation/check.py` passed **47/47** (exit 0).
+
+## Revision — 2026-09-23, spool writer recovery (kata 19g4)
+
+Documented how the runner's spool writer survives a full disk in
+`docs/design/spool-health.md`: `writer.status` and its states, the `writer`
+field on a VM's import status, the attention an outage raises, the
+`telemetry.loss` record and its caveats (which follow
+`internal/events/registry.go`), and the writer's known limits. Added the
+kata's implementation plan under `docs/superpowers/plans/`, recorded the
+outcome in `PLAN.md`, and replaced the full-disk entry in `gotchas.md`.
+`uv run docs/validation/check.py` passed **47/47** (exit 0). The runtime
+results come from the branch's tests; this package check validates the
+documentation only.
