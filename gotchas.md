@@ -912,3 +912,23 @@ working tree reads them too: `TestNoHostInstallerRemains` failed because a
 `.private-journal`, `.roborev`, `.superpowers` and `.tracker`. A repository
 scan skips those by name or walks `git ls-files`. Kata `pd82` tracks the
 rsync and `.dockerignore` fix.
+
+## "The shims" are the in-VM sensors
+
+Harper called the in-guest observation agents, guestd and the s8e2 file,
+process and network sensors, "the shims". The repo never uses the word, and I
+first read it as the `!linux` build stubs my previous reply had mentioned. When
+Harper uses a word the repo lacks, map it to the product goal, introspection
+into the VM, before researching a guess. If two readings still fit, ask one
+multiple-choice question. "Usable" means usable on aibox03.
+
+## One full disk silences a running VM's telemetry
+
+`spool.Writer` poisons itself on the first failed write or fsync, and nothing
+clears the poison or opens a fresh segment. When aibox03's disk filled for three
+hours on 2026-09-20, the live VM's runner stopped spooling for good: guestd kept
+heartbeating, and the store recorded nothing after event 96952. The importer
+recovered, yet the open attention still names its cursor write. On a degraded
+running VM, read `runner.log` inside the container before trusting the
+attention. A vmobsd restart adopts the `attached` runner as it is; only a new
+boot clears the poison. Kata `19g4` tracks the fix.
