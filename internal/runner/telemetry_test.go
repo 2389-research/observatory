@@ -401,13 +401,7 @@ func TestRunnerRecordsLossAfterSpoolRecovers(t *testing.T) {
 	// never races the removal that gives the spool its room back.
 	ballastGone := make(chan struct{})
 	ballast := filepath.Join(h.spoolDir, "ballast.vmsp")
-	seq2Push := proto.TelemetryPush{
-		Seq:              "2",
-		Kind:             "guest.sensor_health",
-		GuestWallAt:      time.Now().UTC().Format(time.RFC3339Nano),
-		GuestMonotonicNS: "1000",
-		Data:             json.RawMessage(`{"agent":{}}`),
-	}
+	seq2Push := fakePush("2", "guest.sensor_health", `{"agent":{}}`)
 	var served atomic.Int32
 	h.serveFakeTelemetry(func(conn net.Conn) {
 		hello, err := readHello(conn)
@@ -425,17 +419,12 @@ func TestRunnerRecordsLossAfterSpoolRecovers(t *testing.T) {
 				resent <- fmt.Sprintf("resend seq 2: %v", err)
 				return
 			}
-			env, err := proto.ReadControl(conn)
-			if err != nil || env.Kind != proto.KindTelemetryAck {
-				resent <- fmt.Sprintf("the resent seq 2 went unacknowledged (%v, %v)", env.Kind, err)
+			seq, err := readAck(conn)
+			if err != nil {
+				resent <- fmt.Sprintf("the resent seq 2 went unacknowledged: %v", err)
 				return
 			}
-			var ack proto.TelemetryAck
-			if err := json.Unmarshal(env.Data, &ack); err != nil {
-				resent <- fmt.Sprintf("unmarshal ack: %v", err)
-				return
-			}
-			resent <- ack.ThroughSeq
+			resent <- seq
 			io.Copy(io.Discard, conn) //nolint:errcheck
 		default:
 			io.Copy(io.Discard, conn) //nolint:errcheck
@@ -443,23 +432,7 @@ func TestRunnerRecordsLossAfterSpoolRecovers(t *testing.T) {
 	})
 
 	h.run()
-
-	select {
-	case got := <-firstConn:
-		if got != "closed" {
-			t.Fatalf("connection 1: %s", got)
-		}
-	case <-time.After(telSpoolWait):
-		t.Fatal("the fake guest never got as far as the push the full spool refuses")
-	}
-	select {
-	case got := <-resent:
-		if got != "2" {
-			t.Fatalf("connection 2: %s", got)
-		}
-	case <-time.After(telSpoolWait):
-		t.Fatal("the runner never took the resent push")
-	}
+	awaitOutage(t, firstConn, resent)
 
 	// The ack for the resend follows its Append, so the spool already holds
 	// everything this reads.
@@ -525,15 +498,15 @@ func refuseOnFullSpool(conn net.Conn, ballast string, push proto.TelemetryPush) 
 	if err := writeFakePush(conn, "1", "guest.sensor_health", `{"agent":{}}`); err != nil {
 		return fmt.Sprintf("push seq 1: %v", err)
 	}
-	if env, err := proto.ReadControl(conn); err != nil || env.Kind != proto.KindTelemetryAck {
-		return fmt.Sprintf("seq 1 went unacknowledged (%v, %v)", env.Kind, err)
+	if _, err := readAck(conn); err != nil {
+		return fmt.Sprintf("seq 1 went unacknowledged: %v", err)
 	}
 
 	f, err := os.Create(ballast)
 	if err != nil {
 		return fmt.Sprintf("create ballast: %v", err)
 	}
-	truncErr := f.Truncate(512 << 20)
+	truncErr := f.Truncate(spool.DefaultMaxSpoolBytes)
 	closeErr := f.Close()
 	defer os.Remove(ballast)
 	if truncErr != nil || closeErr != nil {
@@ -552,6 +525,29 @@ func refuseOnFullSpool(conn net.Conn, ballast string, push proto.TelemetryPush) 
 	return "closed"
 }
 
+// awaitOutage waits for both connections of an outage: the first must end
+// with the runner closing it on the refused push, and the second must have
+// its resend acknowledged through seq 2.
+func awaitOutage(t *testing.T, firstConn, resent <-chan string) {
+	t.Helper()
+	select {
+	case got := <-firstConn:
+		if got != "closed" {
+			t.Fatalf("connection 1: %s", got)
+		}
+	case <-time.After(telSpoolWait):
+		t.Fatal("the fake guest never got as far as the push the full spool refuses")
+	}
+	select {
+	case got := <-resent:
+		if got != "2" {
+			t.Fatalf("connection 2: %s", got)
+		}
+	case <-time.After(telSpoolWait):
+		t.Fatal("the runner never took the resent push")
+	}
+}
+
 // TestRunnerResendReusesTheRefusedEnvelope follows the same outage as
 // TestRunnerRecordsLossAfterSpoolRecovers, then asks the question that one
 // does not: does the resend get back the same envelope? A frame the spool
@@ -568,13 +564,7 @@ func TestRunnerResendReusesTheRefusedEnvelope(t *testing.T) {
 	// Built once and sent both times: writeFakePush restamps GuestWallAt on
 	// every call, which would make every resend a "different" push and defeat
 	// the test before it starts.
-	push := proto.TelemetryPush{
-		Seq:              "2",
-		Kind:             "guest.sensor_health",
-		GuestWallAt:      time.Now().UTC().Format(time.RFC3339Nano),
-		GuestMonotonicNS: "1000",
-		Data:             json.RawMessage(`{"agent":{}}`),
-	}
+	push := fakePush("2", "guest.sensor_health", `{"agent":{}}`)
 
 	firstConn := make(chan string, 1)
 	resent := make(chan string, 1)
@@ -599,10 +589,10 @@ func TestRunnerResendReusesTheRefusedEnvelope(t *testing.T) {
 			firstConn <- result
 		case 2:
 			<-ballastGone
-			// The spool truncates host_received_at to microseconds, so the
-			// comparison against t2 needs a full second of headroom or
-			// truncation could flip a genuinely-later timestamp to read as
-			// earlier.
+			// The spool truncates host_received_at to microseconds, so an
+			// envelope the runner restamped within a microsecond of t2 could
+			// read as before it. The wait keeps the resend at least a second
+			// after t2, well clear of that.
 			if wait := time.Second - time.Since(t2); wait > 0 {
 				time.Sleep(wait)
 			}
@@ -610,17 +600,12 @@ func TestRunnerResendReusesTheRefusedEnvelope(t *testing.T) {
 				resent <- fmt.Sprintf("resend seq 2: %v", err)
 				return
 			}
-			env, err := proto.ReadControl(conn)
-			if err != nil || env.Kind != proto.KindTelemetryAck {
-				resent <- fmt.Sprintf("the resent seq 2 went unacknowledged (%v, %v)", env.Kind, err)
+			seq, err := readAck(conn)
+			if err != nil {
+				resent <- fmt.Sprintf("the resent seq 2 went unacknowledged: %v", err)
 				return
 			}
-			var ack proto.TelemetryAck
-			if err := json.Unmarshal(env.Data, &ack); err != nil {
-				resent <- fmt.Sprintf("unmarshal ack: %v", err)
-				return
-			}
-			resent <- ack.ThroughSeq
+			resent <- seq
 			io.Copy(io.Discard, conn) //nolint:errcheck
 		default:
 			io.Copy(io.Discard, conn) //nolint:errcheck
@@ -628,23 +613,7 @@ func TestRunnerResendReusesTheRefusedEnvelope(t *testing.T) {
 	})
 
 	h.run()
-
-	select {
-	case got := <-firstConn:
-		if got != "closed" {
-			t.Fatalf("connection 1: %s", got)
-		}
-	case <-time.After(telSpoolWait):
-		t.Fatal("the fake guest never got as far as the push the full spool refuses")
-	}
-	select {
-	case got := <-resent:
-		if got != "2" {
-			t.Fatalf("connection 2: %s", got)
-		}
-	case <-time.After(telSpoolWait):
-		t.Fatal("the runner never took the resent push")
-	}
+	awaitOutage(t, firstConn, resent)
 
 	lossAt, resentAt := -1, -1
 	var loss, resentEnv *events.Envelope
@@ -947,12 +916,34 @@ func acceptHello(conn net.Conn, hello proto.Hello) error {
 	})
 }
 
-func writeFakePush(conn net.Conn, seq, kind, data string) error {
-	return proto.WriteControl(conn, proto.KindTelemetryPush, proto.TelemetryPush{
+// fakePush builds one push, stamped with the wall clock when it is built.
+func fakePush(seq, kind, data string) proto.TelemetryPush {
+	return proto.TelemetryPush{
 		Seq:              seq,
 		Kind:             kind,
 		GuestWallAt:      time.Now().UTC().Format(time.RFC3339Nano),
 		GuestMonotonicNS: "1000",
 		Data:             json.RawMessage(data),
-	})
+	}
+}
+
+func writeFakePush(conn net.Conn, seq, kind, data string) error {
+	return proto.WriteControl(conn, proto.KindTelemetryPush, fakePush(seq, kind, data))
+}
+
+// readAck reads one telemetry ack and returns the sequence it acknowledges
+// through.
+func readAck(conn net.Conn) (string, error) {
+	env, err := proto.ReadControl(conn)
+	if err != nil {
+		return "", err
+	}
+	if env.Kind != proto.KindTelemetryAck {
+		return "", fmt.Errorf("expected telemetry ack, got %q", env.Kind)
+	}
+	var ack proto.TelemetryAck
+	if err := json.Unmarshal(env.Data, &ack); err != nil {
+		return "", err
+	}
+	return ack.ThroughSeq, nil
 }
