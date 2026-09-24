@@ -234,10 +234,6 @@ func TestSpoolWriterRecoversFromARealFullDisk(t *testing.T) {
 		t.Fatalf("append after freeing space: %v", err)
 	}
 	newest := checkSegments(t, dir, refused)
-	if len(newest) == 0 {
-		t.Fatal("no segment present after recovery")
-	}
-	sort.Strings(newest)
 	newestSeg := newest[len(newest)-1]
 	newestKinds, err := recordKinds(t, newestSeg)
 	if err != nil {
@@ -365,7 +361,8 @@ func recordKey(env *events.Envelope) string {
 // checkSegments reads every seg-*.vmsp file in dir with the real segment
 // reader, logs what each holds, and fails the test if any of refused's
 // records reached a durable frame: a refused Append must leave no trace.
-// It returns the segment paths found.
+// It fails the test when there are none, and returns the segment paths
+// found, sorted.
 func checkSegments(t *testing.T, dir string, refused []*events.Envelope) []string {
 	t.Helper()
 	refusedKeys := make(map[string]bool, len(refused))
@@ -386,14 +383,11 @@ func checkSegments(t *testing.T, dir string, refused []*events.Envelope) []strin
 		if err != nil {
 			t.Fatalf("stat %s: %v", name, err)
 		}
-		kinds, err := recordKinds(t, name)
-		if err != nil {
-			t.Fatalf("read segment %s: %v", filepath.Base(name), err)
-		}
 		iter, err := spool.ReadSegment(name)
 		if err != nil {
 			t.Fatalf("read segment %s: %v", filepath.Base(name), err)
 		}
+		var kinds []string
 		for {
 			env, err := iter.Next()
 			if errors.Is(err, io.EOF) {
@@ -405,6 +399,7 @@ func checkSegments(t *testing.T, dir string, refused []*events.Envelope) []strin
 			if refusedKeys[recordKey(env)] {
 				t.Errorf("segment %s holds refused record %s", filepath.Base(name), recordKey(env))
 			}
+			kinds = append(kinds, env.Kind)
 		}
 		_ = iter.Close()
 		if len(kinds) == 0 {

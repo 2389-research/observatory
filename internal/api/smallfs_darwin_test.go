@@ -13,9 +13,9 @@ import (
 
 // smallFilesystem creates a fresh 8 MiB HFS+ volume and returns its mount
 // point. hdiutil missing from PATH skips the test; any other failure fails it
-// with the command's output. These commands were checked by hand on this Mac
-// as a regular user. HFS+ does not copy on write, so an in-place overwrite
-// (the writer's status file) still works once the volume is full.
+// with the command's output. None of the commands needs root. HFS+ does not
+// copy on write, so an in-place overwrite (the writer's status file) still
+// works once the volume is full.
 func smallFilesystem(t *testing.T) string {
 	t.Helper()
 	if _, err := exec.LookPath("hdiutil"); err != nil {
