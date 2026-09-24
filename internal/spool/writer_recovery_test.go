@@ -646,9 +646,7 @@ func TestRetireSegmentTrimsJunk(t *testing.T) {
 		t.Fatalf("marshal record: %v", err)
 	}
 	durable := append(hdr, '\n')
-	durable = binary.BigEndian.AppendUint32(durable, uint32(len(body)))
-	durable = binary.BigEndian.AppendUint32(durable, crc32.Checksum(body, crc32cTable))
-	durable = append(durable, body...)
+	durable = append(durable, encodeFrame(body)...)
 	// A frame that promises 256 bytes of body and holds 3 of them.
 	junk := []byte{0, 0, 1, 0, 0xde, 0xad, 0xbe, 0xef, 'x', 'y', 'z'}
 	if _, err := f.Write(append(durable, junk...)); err != nil {

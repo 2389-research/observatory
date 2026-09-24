@@ -93,22 +93,7 @@ func TestRecoverRemovesTornCreationBelowNewest(t *testing.T) {
 			}
 
 			// seg2: the next writer, now the newest and fully valid.
-			w2, err := spool.OpenWriter(vmDir, spool.WriterCfg{
-				VMID:            vmID,
-				InstanceID:      instanceID,
-				MaxSegmentBytes: 4 * 1024 * 1024,
-				MaxSpoolBytes:   64 * 1024 * 1024,
-				LossRecord:      lossRecordFor(vmID),
-			})
-			if err != nil {
-				t.Fatalf("OpenWriter seg2: %v", err)
-			}
-			if err := w2.Append(makeSpoolEnvelope(vmID, instanceID, "1")); err != nil {
-				t.Fatalf("Append seg2: %v", err)
-			}
-			if err := w2.Close(); err != nil {
-				t.Fatalf("Close seg2: %v", err)
-			}
+			writeSegment(t, root, vmID, []*events.Envelope{makeSpoolEnvelope(vmID, instanceID, "1")}, true /* closed */)
 			seg2 := filepath.Join(vmDir, "seg-0000000000000002.vmsp")
 			if _, err := os.Stat(seg2); err != nil {
 				t.Fatalf("expected seg2 at index 2: %v", err)

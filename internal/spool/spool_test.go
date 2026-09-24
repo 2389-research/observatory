@@ -40,7 +40,7 @@ func lossRecordFor(vmID string) func(spool.Outage) *events.Envelope {
 			SourceSeq:        strconv.FormatUint(lossSeq.Add(1), 10),
 			Kind:             "telemetry.loss",
 			Provenance:       events.HostObserved,
-			Sensor:           "runner",
+			Sensor:           spool.Sensor,
 			HostReceivedAt:   events.Timestamp{Time: time.Now().UTC()},
 			Quality: events.Quality{
 				PathResolution: events.PathNotApplicable,

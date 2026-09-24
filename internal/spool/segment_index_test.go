@@ -43,6 +43,9 @@ func oneRecordSegmentBytes(t *testing.T, vmID, instanceID string) int64 {
 	if err != nil {
 		t.Fatalf("stat calibration segment: %v", err)
 	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close (calibration): %v", err)
+	}
 	return info.Size()
 }
 
@@ -60,11 +63,11 @@ func vmspNames(t *testing.T, dir string) []string {
 	return names
 }
 
-// TestNewBootAfterPruneImportsEveryRecord is the plain repro from the task
-// brief: boot A's single segment is fully imported and pruned, then boot B
-// must not reissue seg-0000000000000000.vmsp — the cursor still names it as
-// CURRENT with all of boot A's records committed, so a reused name would
-// make the importer skip boot B's first records as already-seen.
+// TestNewBootAfterPruneImportsEveryRecord covers the simplest case: boot A's
+// single segment is fully imported and pruned, then boot B must not reissue
+// seg-0000000000000000.vmsp — the cursor still names it as CURRENT with all
+// of boot A's records committed, so a reused name would make the importer
+// skip boot B's first records as already-seen.
 func TestNewBootAfterPruneImportsEveryRecord(t *testing.T) {
 	st := openTestStore(t)
 	root := t.TempDir()
@@ -130,10 +133,10 @@ func TestNewBootAfterPruneImportsEveryRecord(t *testing.T) {
 	}
 }
 
-// TestNewBootAfterRotatedPruneImportsEveryRecord covers the second repro from
-// the brief: boot A rotates across three segments before every one of them is
-// imported and pruned. Boot B must start past the highest name boot A ever
-// used, not just past whatever the (now-empty) directory shows.
+// TestNewBootAfterRotatedPruneImportsEveryRecord covers a boot that rotated:
+// boot A rotates across three segments before every one of them is imported
+// and pruned. Boot B must start past the highest name boot A ever used, not
+// just past whatever the (now-empty) directory shows.
 func TestNewBootAfterRotatedPruneImportsEveryRecord(t *testing.T) {
 	st := openTestStore(t)
 	root := t.TempDir()
@@ -214,7 +217,7 @@ func TestNewBootAfterRotatedPruneImportsEveryRecord(t *testing.T) {
 // name it. A later writer can then reissue the identical name. The reuse is
 // safe only because the name stays ahead of the cursor, so the importer
 // reads the reissued segment's records rather than skipping them as already
-// seen. This pins current behavior; it passes without any production change.
+// seen. It pins behavior the code already has.
 func TestPrunedEmptySegmentNameReturnsAheadOfCursor(t *testing.T) {
 	st := openTestStore(t)
 	root := t.TempDir()

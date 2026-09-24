@@ -211,7 +211,7 @@ func TestHTTPVMImportStatusCarriesWriterHealth(t *testing.T) {
 	instance := "dddddddd-eeee-ffff-aaaa-bbbbbbbbbbbb"
 	record := func(kind, source string, data map[string]any) *events.Envelope {
 		return &events.Envelope{
-			SchemaVersion: 1, VMID: &id, SourceInstanceID: source, SourceSeq: "1", Kind: kind, Provenance: events.HostObserved, Sensor: "runner", HostReceivedAt: events.Timestamp{Time: time.Now().UTC()}, Quality: events.Quality{PathResolution: events.PathNotApplicable, Attribution: events.AttributionNotApplicable}, Data: data,
+			SchemaVersion: 1, VMID: &id, SourceInstanceID: source, SourceSeq: "1", Kind: kind, Provenance: events.HostObserved, Sensor: spool.Sensor, HostReceivedAt: events.Timestamp{Time: time.Now().UTC()}, Quality: events.Quality{PathResolution: events.PathNotApplicable, Attribution: events.AttributionNotApplicable}, Data: data,
 		}
 	}
 	// A one-byte quota refuses every append while the loss record stays
