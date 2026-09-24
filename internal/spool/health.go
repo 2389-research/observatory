@@ -59,16 +59,14 @@ func (imp *Importer) Status(vmID string) ImportStatus {
 	imp.mu.RLock()
 	defer imp.mu.RUnlock()
 	s := UnobservedStatus(vmID)
+	writer := s.Writer // unknown for a VM until a cycle reads its file; nil for the root
 	if h, ok := imp.health[vmID]; ok {
 		s = h.ImportStatus
 	}
-	if vmID != "" {
-		w := WriterHealth{State: "unknown"}
-		if r, ok := imp.writers[vmID]; ok {
-			w = r.health
-		}
-		s.Writer = &w
+	if r, ok := imp.writers[vmID]; ok && writer != nil {
+		writer = &r.health
 	}
+	s.Writer = writer
 	return s
 }
 
