@@ -177,16 +177,13 @@ func (w *Writer) Append(env *events.Envelope) error {
 			return w.refuse(env, err)
 		}
 	}
-	if w.damaged || w.segBytes+int64(len(loss)+len(rec)) > w.cfg.MaxSegmentBytes {
-		if err := w.advance(); err != nil {
-			return w.refuse(env, err)
-		}
+	if err := w.makeRoom(len(loss) + len(rec)); err != nil {
+		return w.refuse(env, err)
 	}
 	if loss != nil {
-		if err := w.writeFrame(loss, "loss record"); err != nil {
+		if err := w.writeLoss(loss); err != nil {
 			return w.refuse(env, err)
 		}
-		w.lossRecorded()
 	}
 	if err := w.writeFrame(rec, "record"); err != nil {
 		return w.refuse(env, err)
@@ -214,7 +211,6 @@ func (w *Writer) Close() error {
 	// After a failed advance this is still the damaged segment, and the
 	// retire trims it back to its last durable record.
 	retireErr := retireSegment(w.f, w.segBytes)
-	w.f = nil
 	w.writeStatus()
 	// The status is advisory; its close error is not the caller's concern.
 	_ = w.status.Close()
@@ -235,24 +231,32 @@ func (w *Writer) recordOutage() error {
 	if err != nil {
 		return err
 	}
-	if w.damaged || w.segBytes+int64(len(loss)) > w.cfg.MaxSegmentBytes {
-		if err := w.advance(); err != nil {
-			return err
-		}
-	}
-	if err := w.writeFrame(loss, "loss record"); err != nil {
+	if err := w.makeRoom(len(loss)); err != nil {
 		return err
 	}
-	w.lossRecorded()
+	return w.writeLoss(loss)
+}
+
+// makeRoom moves the writer to a new segment when the current one is
+// damaged or has no room for n more bytes.
+func (w *Writer) makeRoom(n int) error {
+	if w.damaged || w.segBytes+int64(n) > w.cfg.MaxSegmentBytes {
+		return w.advance()
+	}
 	return nil
 }
 
-// lossRecorded closes the outage once its loss record is durable: the
-// writer is healthy again from now, and its status says so.
-func (w *Writer) lossRecorded() {
+// writeLoss writes the open outage's loss frame and, once it is durable,
+// closes the outage: the writer is healthy again from now, and its status
+// says so.
+func (w *Writer) writeLoss(loss []byte) error {
+	if err := w.writeFrame(loss, "loss record"); err != nil {
+		return err
+	}
 	w.outage = nil
 	w.healthySince = time.Now()
 	w.writeStatus()
+	return nil
 }
 
 // refuse counts a failed Append in the open outage, opening one when none is
