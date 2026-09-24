@@ -69,8 +69,8 @@ const endMarker uint32 = 0xFFFFFFFF
 var ErrCorruptRecord = errors.New("spool: corrupt record")
 
 // ErrSpoolFull is returned by Writer.Append when adding the record would
-// cause the total bytes across all segments in the spool directory to exceed
-// WriterCfg.MaxSpoolBytes. The writer counts the refusal and records it in a
-// telemetry.loss once an append succeeds, so the caller's only duty is to
-// withhold the ack (SPEC §12.5).
+// cause the total bytes across all *.vmsp files in the spool directory to
+// exceed WriterCfg.MaxSpoolBytes. The writer counts the refusal and records
+// it in a telemetry.loss once an append succeeds, so the caller's only duty
+// is to withhold the ack (SPEC §12.5).
 var ErrSpoolFull = errors.New("spool: spool full")

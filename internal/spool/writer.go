@@ -31,8 +31,8 @@ type WriterCfg struct {
 	// MaxSegmentBytes is the maximum number of bytes a single segment file may
 	// grow to before the writer rotates to a new segment. Must be > 0.
 	MaxSegmentBytes int64
-	// MaxSpoolBytes is the maximum total bytes across all segments in the spool
-	// directory. When 0, DefaultMaxSpoolBytes applies.
+	// MaxSpoolBytes is the maximum total bytes across all *.vmsp files in the
+	// spool directory. When 0, DefaultMaxSpoolBytes applies.
 	MaxSpoolBytes int64
 	// LossRecord builds the telemetry.loss envelope for an outage. The writer
 	// calls it while holding its lock, so it must not call the Writer.
@@ -58,6 +58,8 @@ type Writer struct {
 	dir      string
 	cfg      WriterCfg
 	maxSpool int64 // resolved MaxSpoolBytes (never zero)
+	// segIdx is the index of the latest segment create attempted. A failed
+	// advance burns it, so it can run ahead of f's name.
 	segIdx   uint64
 	f        *os.File
 	segBytes int64 // durable bytes in the current segment (header + records)
@@ -450,7 +452,7 @@ func (w *Writer) spoolTotalBytes() (int64, error) {
 	return total, nil
 }
 
-// nextSegmentIndex scans dir for existing *.vmsp files and returns the next
+// nextSegmentIndex scans dir for existing segments and returns the next
 // monotonic index to use. The cursor is consulted too: a boot that starts
 // after the importer has pruned every segment on disk must not reissue a
 // name the cursor already points at, or the importer treats fresh records as

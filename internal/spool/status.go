@@ -16,8 +16,9 @@ import (
 	"github.com/2389-research/observatory/internal/events"
 )
 
-// statusFileName is the writer's health file in its spool dir. Recovery and
-// the quota see only segment names, so they never touch it.
+// statusFileName is the writer's health file in its spool dir. Recovery reads
+// only segment names and the quota counts only *.vmsp files, so neither
+// touches it.
 const statusFileName = "writer.status"
 
 // statusFileBytes is the status file's exact size. The writer overwrites the
