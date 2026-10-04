@@ -17,3 +17,7 @@ web/tsconfig.tsbuildinfo
 # whole tree, and the kata tool's project file.
 output.txt
 .kata.toml
+
+# Real-daemon E2E reports, traces, and local evidence.
+.e2e/
+web/.e2e/

@@ -949,3 +949,16 @@ On a pre-merge build, any VM booted again after a prune may have lost the start
 of its later boots. The importer still prunes an empty, closed segment ahead of
 the cursor without moving the cursor, so that one name can come back; that is
 safe, since the importer reads it from its first record.
+
+## Real-daemon E2E and smoke isolation
+
+`web/tests/control-plane.e2e.ts` runs against a real embedded-UI daemon with
+fresh SQLite state via `scripts/e2e-server`; `scripts/check` also runs the
+CLI/auth smoke. A control-plane fixture must set its own `runtime.lock_file`:
+the default relative deployment lock aborts startup when pinned binaries are
+absent. Use an absent path under the fixture's temp directory, preserving
+preflight's real refusal. Never count native Darwin checks as real KVM proof.
+
+The e2e 0.17.0 `selectOption` string means visible label. Select machine values
+with `{ value: 'atomic_reservation' }`. Batch starts with two members; adding
+then removing the third leaves two. Tests should assert settled counts.

@@ -6,7 +6,8 @@
     "dev": "vite",
     "build": "tsc -b && NODE_ENV=production vite build",
     "test": "vitest run",
-    "typecheck": "tsc -b --noEmit"
+    "typecheck": "tsc -b --noEmit && tsc -p tsconfig.e2e.json --noEmit",
+    "test:e2e": "E2E_TELEMETRY_DISABLED=1 e2e run"
   },
   "dependencies": {
     "@xterm/addon-fit": "0.11.0",
@@ -15,6 +16,7 @@
     "react-dom": "^19.2.8"
   },
   "devDependencies": {
+    "@e2e-dev/web": "0.12.0",
     "@testing-library/jest-dom": "^7.0.1",
     "@testing-library/react": "^16.3.3",
     "@testing-library/user-event": "^14.6.7",
@@ -23,6 +25,7 @@
     "@types/react-dom": "^19.2.7",
     "@vitejs/plugin-react": "^6.1.1",
     "dom-accessibility-api": "^0.7.1",
+    "e2e": "0.17.0",
     "jsdom": "^30.0.1",
     "typescript": "^7.0.2",
     "vite": "^8.2.2",

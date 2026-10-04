@@ -67,12 +67,16 @@ that are actually wired. Nothing pretends.
 
 ## Working on it
 
-    scripts/check                      # the whole gate: fmt, vet, lint, tests, docs
+    scripts/check                      # fmt, vet, lint, tests, real E2E/smoke, docs
     uv run docs/validation/check.py    # docs-only changes
 
 `scripts/check` is the only verification that counts. Tests use real components
 at the seams — real SQLite, real HTTP. The fake runtime exists for unit tests and
 is never reachable from a served mode; the gate fails if it becomes so.
+
+The browser/API flow matrix and isolated test commands are in
+[tests/e2e.md](tests/e2e.md). These tests prove control-plane behavior on a
+host that cannot launch guests; they do not satisfy a KVM acceptance gate.
 
 Acceptance evidence requires real Firecracker on a real Linux host. Results from
 the fake runtime are labelled as such and cannot satisfy a KVM gate.

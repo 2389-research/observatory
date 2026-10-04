@@ -63,6 +63,14 @@ sed -e "s|127.0.0.1:8787|127.0.0.1:$PORT|g" \
     -e "s|/etc/vmobs|$TMP/etc|g" \
     -e "s|require_authentication: false|require_authentication: true|g" \
     docs/examples/host-config.yaml >"$TMP/config.yaml"
+# Keep the smoke independent of the checkout's deployment lock and binary paths.
+# An absent test lock preserves the preflight refusal this flow verifies.
+cat >>"$TMP/config.yaml" <<YAML
+
+runtime:
+  mode: unavailable
+  lock_file: "$TMP/etc/runtime.lock.json"
+YAML
 
 cat >"$TMP/state/templates/smoke-tpl.json" <<'EOF'
 {

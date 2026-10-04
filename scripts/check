@@ -75,6 +75,12 @@ if command -v npm >/dev/null 2>&1; then
     note "FAIL web tests — $logdir/web-test.log; rerun: cd web && npm test"
     fail=1
   fi
+  if (cd web && npm run test:e2e) >"$logdir/web-e2e.log" 2>&1; then
+    note "PASS real-daemon web E2E"
+  else
+    note "FAIL real-daemon web E2E — $logdir/web-e2e.log; rerun: cd web && npm run test:e2e"
+    fail=1
+  fi
   if (cd web && npm run build) >"$logdir/web-build.log" 2>&1; then
     if git diff --quiet -- web/dist; then
       note "PASS web dist current"
@@ -88,6 +94,13 @@ if command -v npm >/dev/null 2>&1; then
   fi
 else
   note "FAIL npm missing — install node (brew install node); the gate rebuilds web/dist to prove it is current"
+  fail=1
+fi
+
+if scripts/smoke >"$logdir/smoke.log" 2>&1; then
+  note "PASS real-daemon CLI/auth smoke"
+else
+  note "FAIL real-daemon CLI/auth smoke — $logdir/smoke.log; rerun: scripts/smoke"
   fail=1
 fi
 

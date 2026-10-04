@@ -1,0 +1,43 @@
+#!/bin/sh
+# ABOUTME: Runs the real daemon with disposable state for deterministic browser/API tests.
+# ABOUTME: Accepts the runner's port; never touches installed state or launches a guest.
+set -eu
+case "${1:-}" in
+  --help|-h) echo 'usage: scripts/e2e-server PORT'; exit 0 ;;
+  ''|*[!0-9]*) echo 'usage: scripts/e2e-server PORT' >&2; exit 2 ;;
+esac
+cd "$(dirname "$0")/.."
+if [ -n "${GOROOT:-}" ] && [ ! -d "$GOROOT" ]; then unset GOROOT; fi
+scratch=$(mktemp -d)
+daemon_pid=''
+cleanup() {
+  if [ -n "$daemon_pid" ]; then
+    kill "$daemon_pid" 2>/dev/null || true
+    wait "$daemon_pid" 2>/dev/null || true
+  fi
+  rm -rf "$scratch"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+mkdir -p "$scratch/state/templates" "$scratch/run" "$scratch/etc"
+sed -e "s|127.0.0.1:8787|127.0.0.1:$1|g" \
+    -e "s|/var/lib/vmobs|$scratch/state|g" \
+    -e "s|/run/vmobs|$scratch/run|g" \
+    -e "s|/etc/vmobs|$scratch/etc|g" \
+    -e "s|/srv/vmobs|$scratch/runtime|g" \
+    docs/examples/host-config.yaml > "$scratch/config.yaml"
+cat >> "$scratch/config.yaml" <<YAML
+
+runtime:
+  mode: unavailable
+  lock_file: "$scratch/etc/runtime.lock.json"
+YAML
+# A manifest is approved test data, not a fabricated runtime. Missing runtime
+# artifacts and devices must still make admission refuse every launch.
+cat > "$scratch/state/templates/e2e.json" <<'JSON'
+{"template_id":"e2e-template","description":"isolated admission test","guest_privilege_profiles":["unprivileged"],"sensors":[],"protocol_versions":{"guest":"1"}}
+JSON
+go build -o "$scratch/vmobsd" ./cmd/vmobsd
+"$scratch/vmobsd" -config "$scratch/config.yaml" &
+daemon_pid=$!
+wait "$daemon_pid"
