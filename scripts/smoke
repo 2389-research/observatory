@@ -29,13 +29,15 @@ run_expect() {
   want=$1; shift
   "$@" >"$TMP/out" 2>"$TMP/err"
   got=$?
+  # Tokens belong only in the subprocess argv, never in saved diagnostics.
+  command_label=$(printf '%s\n' "$*" | sed -E 's/(--token[ =]+)[^ ]+/\1[redacted]/g')
   if [ "$got" -ne "$want" ]; then
-    note "FAIL exit $got (want $want): $*"
+    note "FAIL exit $got (want $want): $command_label"
     sed 's/^/  stderr: /' "$TMP/err"
     fail=1
     return 1
   fi
-  note "PASS exit $want: $*"
+  note "PASS exit $want: $command_label"
 }
 
 # out_check description jq_filter: assert jq filter over the last stdout.
